@@ -27,8 +27,8 @@ HA OS 实机 + 真固件 + 小程序的端到端仍属发布前人工补测项�
   == www/version.json == custom_components/huijian_ai/manifest.json）。
 - 推送 main 后必须检查 GitHub Actions 状态：
   ```bash
-  gh run list --repo fangwenyi-dev/ha-voice-plugin --limit 3
-  gh run view <run-id> --repo fangwenyi-dev/ha-voice-plugin --log-failed
+  gh run list --repo fangwenyi-dev/huijian-gateway-plugin-yy --limit 3
+  gh run view <run-id> --repo fangwenyi-dev/huijian-gateway-plugin-yy --log-failed
   ```
   CI 九 job 全绿才算发布完成；GitHub Release 与 Gitee Release 均由 CI 自动创建
   （Gitee 只发最新版，历史不补）。
@@ -47,7 +47,7 @@ Supervisor 的 `RE_SCHEMA_ELEMENT` 只接受
 `type / type(min,max) / list(a|b|c) / 尾缀?` 四种形态——
 **`=默认值` 是臆造语法**，会导致加载项从商店**静默消失**（无任何前端报错）。
 默认值唯一正规途径 = `options:` 块。改 schema 任何值之前，必须对上游源码或
-官方文档实证语法存在。钉桩：`test_schema_documented_grammar_only`。
+官方文档实证语法存在。钉桩：`tests/test_store_schema.py`（逐字抄录上游 RE_SCHEMA_ELEMENT 全值匹配）+ `test_release_consistency` 翻译覆盖。
 
 ## 已付过学费的坑（动手前先对表）
 
@@ -72,7 +72,7 @@ Supervisor 的 `RE_SCHEMA_ELEMENT` 只接受
 ```
 huijian_voice/          # 交付物本体（加载项目录）
 ├── core/               # 运行时（ws/admin/nlu/asr/tts/model_store/…）
-├── tests/              # 105 项钉桩 + e2e/（真镜像 CI 门禁 + run_local 本地）
+├── tests/              # 110 项钉桩 + e2e/（真镜像 CI 门禁 + run_local 本地）
 ├── www/                # Ingress 管理页（全中文，版本四源之一）
 ├── custom_components/  # 随镜像分发的 huijian_ai（D1 补丁，版本对齐加载项）
 ├── DOCS.md / README.md # 商店文档页 / 开发架构文档

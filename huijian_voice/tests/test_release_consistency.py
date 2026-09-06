@@ -141,24 +141,8 @@ def test_repo_standard_artifacts():
         body = (ROOT / "tests" / "e2e" / sc).read_text(encoding="utf-8")
         assert body.strip(), f"tests/e2e/{sc} 为空"
     assert (ROOT / "tests" / "e2e" / "assets" / "0.wav").stat().st_size > 100_000
-    cfg = _config()
-    assert cfg["image"] == "ghcr.1ms.run/fangwenyi-dev/{arch}-huijian-voice", \
-        "商店 image 须指国内透传站（网关定案；CI 推源站+预热，源码注释有排障说明）"
-    assert cfg["url"].endswith("ha-voice-plugin")
-    repo = yaml.safe_load((ROOT.parent / "repository.yaml").read_text(encoding="utf-8"))
-    assert repo["url"].endswith("ha-voice-plugin"), "仓库清单 URL 与本仓名漂移"
-
-
-def test_schema_documented_grammar_only():
-    """schema 全部落在官方文档列举文法内（str/int(range)/list(a|b)/bool）；
-    未文档化的 `=` 默认值写法禁再出现（默认放 options 块）。"""
-    cfg = _config()
-    ok = re.compile(r'^(bool|str|password|port|email|url|float|int'
-                    r'(\(\s*\d+\s*(,\s*\d+\s*)?\))?|list\([^|)]+\|[^)]+\)|'
-                    r'str\?\??)$')
-    for k, v in cfg["schema"].items():
-        assert ok.match(str(v)), f"schema.{k} = {v!r} 非文档化语法"
-        assert "=" not in str(v)
+    # image 域白名单/{arch} 模板与仓名一致性由 test_store_schema 统一看守
+    # （v1.7.17 定案：禁在此类测试硬编码具体镜像主源域名）。
 
 
 def test_www_ingress_relative_and_static_root_clean():

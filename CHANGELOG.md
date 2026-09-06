@@ -81,7 +81,7 @@
   网关 v1.7.12 因同款语法触发「**加载项从商店整体静默消失**」P0 回归
   （上游 `RE_SCHEMA_ELEMENT` 实证从无 `=` 文法；商店刷新校验失败即 continue，
   无任何前端报错），网关 v1.7.16 已修复并记录在案。本仓上线前即收敛为纯文档
-  语法 `"int(0, 1440)"` / `"list(debug|info|warning|error)"`，默认值一律走
+  语法 `"int(0,1440)"` / `"list(debug|info|warning|error)"`，默认值一律走
   options 块，并由 `test_schema_documented_grammar_only` 钉死。
   （本条早前版本曾误写「姊妹仓写法生产正常」——与网关 CHANGELOG v1.7.16
   事故记录矛盾，已更正。教训同源：改 schema 任何值前必须对上游源码实证语法。）
@@ -93,7 +93,7 @@
   更名 `repository.yaml`（新规范）。
 
 ### 验证与测试基线
-- **105 项 pytest 钉桩**全绿（NLU 矩阵/WS 协议契约/管理面路由/并发守卫/基建契约/
+- **110 项 pytest 钉桩**全绿（NLU 矩阵/WS 协议契约/管理面路由/并发守卫/基建契约/
   发布一致性），CI lint 硬门禁。
 - **Windows 全栈 E2E-lite**（真 sherpa-onnx + 真 onnxruntime + 真 Kokoro + 真
   libopus）：三通道两轮 + 卸载/惰性重载/busy 避让/single-flight 实测。

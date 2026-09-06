@@ -8,7 +8,7 @@ name: 慧尖语音助手
 version: "1.0.0"
 slug: huijian_voice
 description: 慧尖局域网语音助手服务器——本地 STT/TTS/NLU，零必填配置即用，执行走 HA 意图 REST
-url: 'https://github.com/fangwenyi-dev/ha-voice-plugin'
+url: 'https://github.com/fangwenyi-dev/huijian-gateway-plugin-yy'
 arch:
   - amd64
   - aarch64
@@ -69,6 +69,6 @@ schema:
   # 自动把随镜像分发的 huijian_ai 集成落盘到 HA custom_components
   auto_install_integration: bool
   # 省电：>N 分钟空闲卸载 ASR/TTS 模型（首句延迟 +~2s）；0=常驻（默认）
-  idle_unload_minutes: "int(0, 1440)"
+  idle_unload_minutes: int(0,1440)
   # 日志级别：debug/info/warning/error（排障用，改后重启生效）
-  log_level: "list(debug|info|warning|error)"
+  log_level: list(debug|info|warning|error)

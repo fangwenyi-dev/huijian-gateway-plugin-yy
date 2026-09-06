@@ -15,7 +15,7 @@ huijian_voice/
 ├── custom_components/huijian_ai/   # vendored 集成（含 HUIJIAN-PATCH D1）
 ├── www/index.html         # 管理页（单文件零外链全中文；CURRENT_VERSION 钉桩）
 ├── translations/{zh-Hans,zh-CN,en}.yaml   # schema 键全覆盖（钉桩）
-├── tests/                 # 105 项：NLU/协议/管理面/并发守卫/基建契约/发布一致性
+├── tests/                 # 110 项：NLU/协议/管理面/并发守卫/基建契约/发布一致性
 ├── dev/                   # E2E-lite 真链路脚本（e2e_boot + e2e_client，非交付物）
 └── core/
     ├── const.py settings.py audio.py model_store.py ha_client.py
@@ -55,7 +55,7 @@ Pipeline 级联（T0 正则→T1 TextCNN→场景→查询→LLM→兜底）→ 
 ```bash
 cd huijian_voice
 pip install -r requirements.txt pytest pyyaml   # + 系统 libopus0（Linux）
-python -m pytest tests -q                        # 105 项
+python -m pytest tests -q                        # 110 项
 # 起全服务（假 HA token 即可，REST 失败不致命）：
 HUIJIAN_DATA=/tmp/hj HUIJIAN_OPT_MODEL_AUTO_DOWNLOAD=false \
 HUIJIAN_HA_TOKEN=x HUIJIAN_MODELS_DIR=<模型解包父目录> python -m core

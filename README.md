@@ -61,7 +61,7 @@ ESP 语音卫星设备（小智协议子集）直连本加载项即可对话控�
 ## 开发
 
 - 架构与实证结论：[huijian_voice/README.md](huijian_voice/README.md)
-- 测试：`cd huijian_voice && python -m pytest tests -q`（105 项钉桩）
+- 测试：`cd huijian_voice && python -m pytest tests -q`（110 项钉桩）
 - CI 全链门禁：lint → build(双架构) → **e2e 真镜像三通道** → manifest →
   镜像预热 → GitHub/Gitee 双 Release（[.github/workflows/ci.yaml](.github/workflows/ci.yaml)）
 - 贡献规则与陷阱清单：[CLAUDE.md](CLAUDE.md)

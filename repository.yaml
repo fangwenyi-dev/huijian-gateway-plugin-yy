@@ -4,6 +4,6 @@
 # repository.yaml 规范实证于姊妹仓 huijian-gateway-plugin 真机运行）。
 # 同仓双镜像定案（v4.1）：网关与语音各自独立加载项目录、独立镜像、独立升级。
 name: 慧尖加载项
-url: https://github.com/fangwenyi-dev/ha-voice-plugin
+url: https://github.com/fangwenyi-dev/huijian-gateway-plugin-yy
 description: 慧尖局域网语音助手（huijian_voice）——纯 LAN STT/TTS/NLU 服务器
 maintainer: fangwenyi-dev
