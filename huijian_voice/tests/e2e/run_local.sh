@@ -8,6 +8,11 @@ cd "$(dirname "$0")/../.."
 PY="${PYTHON:-python3}"
 LOG=/tmp/hj-e2e-server.log
 
+# dev 预置 _hjmodels 为手工解包产物：老布局无完成标记 → 补章迁移（生产镜像
+# 由 ModelStore 自行解包盖章，此段仅本地开发路径）
+MJ="$(dirname "$(pwd)")/_hjmodels"
+[ -d "$MJ" ] && for d in "$MJ"/*/; do [ -e "$d/.extracted_ok" ] || echo "dev-migration" > "$d/.extracted_ok"; done
+
 echo "==== 1. 起服务 ===="
 rm -rf _e2e_data
 "$PY" tests/e2e/e2e_server.py >"$LOG" 2>&1 &

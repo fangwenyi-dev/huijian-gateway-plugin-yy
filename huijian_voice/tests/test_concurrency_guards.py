@@ -136,6 +136,19 @@ def store_env(tmp_path):
     return st, payload
 
 
+def test_extract_marker_atomicity(store_env):
+    """就绪判定必须认 .extracted_ok 完成章：文件全在但无章（模拟大文件半写/
+    旧数据）不得误报就绪（v1.0.0 CI e2e Protobuf-parsing-failed 竞态防线）。"""
+    st, _ = store_env
+    d = st.models_dir / "k1" / "pkg"
+    d.mkdir(parents=True)
+    for f in ("tokens.txt", "encoder.int8.onnx", "decoder.int8.onnx"):
+        (d / f).write_text("x", encoding="utf-8")
+    assert st.model_dir_for("k1") is None, "半写目录（无完成章）被误判就绪"
+    (st.models_dir / "k1" / ".extracted_ok").write_text("pkg.tar.gz", encoding="utf-8")
+    assert st.model_dir_for("k1") is not None, "盖章后就绪判定失效？"
+
+
 def test_singleflight_and_ghost_keys(store_env, monkeypatch):
     st, payload = store_env
     calls = []

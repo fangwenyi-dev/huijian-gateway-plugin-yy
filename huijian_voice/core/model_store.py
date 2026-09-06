@@ -69,6 +69,12 @@ class ModelStore:
         entry = self._manifest.get(key)
         if not entry:
             return None
+        # 完成标记=就绪唯一凭证：extractall 逐件落盘，大文件半写时 exists() 会
+        # 误报就绪（v1.0.0 CI e2e 实锤：STT 读到半写 decoder.int8.onnx →
+        # "Protobuf parsing failed"，run 间 flaky）。标记在完整解包后才写 →
+        # 就绪判定升级为内容级原子。
+        if not (self.models_dir / key / ".extracted_ok").is_file():
+            return None
         top = entry.get("top_dir", "")
         try:
             cand = self.models_dir / key / top if top else self.models_dir / key
@@ -237,6 +243,9 @@ class ModelStore:
                     tf.extractall(target, members=members, filter="data")
                 except TypeError:
                     tf.extractall(target, members=members)
+            # 全部成员解包成功后才盖章（见 model_dir_for 的原子性注释）
+            with open(target / ".extracted_ok", "w", encoding="utf-8") as mf:
+                mf.write(tar_path.name)
             if self.is_ready(key):
                 self._set_status(key, state="ready", pct=100, detail="已就绪")
                 logger.info("[模型] %s 就绪 @ %s", key, target)
