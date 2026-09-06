@@ -391,10 +391,11 @@ jobs:
           python3 - "$ACR" "$ACR_REPO" "$T" <<'PYX'
           import hashlib, json, sys, urllib.request
           acr, repo, t = sys.argv[1:4]
-          def get(p, accept=None, binary=False):
+          def get(p, accept=None):
               h = {"Authorization": "Bearer " + t}
               if accept: h["Accept"] = accept
-              r = urllib.request.urlopen(f"https://{acr}{p}", headers=h, timeout=60)
+              r = urllib.request.urlopen(urllib.request.Request(f"https://{acr}{p}", headers=h),
+                                         timeout=60)
               return r.read()
           idx = json.loads(get(f"/v2/{repo}/manifests/latest", "application/vnd.oci.image.index.v1+json"))
           child = json.loads(get(f"/v2/{repo}/manifests/{idx['manifests'][0]['digest']}",
