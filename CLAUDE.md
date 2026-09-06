@@ -28,10 +28,13 @@ HA OS 实机 + 真固件 + 小程序的端到端仍属发布前人工补测项�
   把网关仓文件复制进本仓交付面（只读参考其 CI/测试范式）。两仓目录名高度相似
   （`huijian-gateway-plugin` vs `huijian-gateway-plugin-yy`），push 前必须
   `git remote -v` 核对 origin URL 逐字符为 `-yy` 结尾。
-- **禁止自动推送**。仅当用户明确说「推送」才 `git push`。若用户确认本仓需要 Gitee
-  镜像（当前待定，同名仓已建但**未推送**），则每次推送必须双远端同推：
-  `git push origin main && git push gitee main`，且 Gitee 仓**必须**是同名
-  `huijian-gateway-plugin-yy`（绝不是网关的 ha-gateway-plugin）。
+- **禁止自动推送**。仅当用户明确说「推送」才 `git push`。本仓 **Gitee 镜像已启用**
+  （用户 2026-09-08 确认）：每次推送必须双远端同推
+  `git push origin main && git push gitee main`；Gitee 仓**必须**是同名
+  `huijian-gateway-plugin-yy`（绝不是网关的 ha-gateway-plugin）。凭据：GCM 已存
+  gitee.com oauth2 条目（源自本机 ~/.gitee_token）；GitHub Secrets 已配
+  GITEE_TOKEN（CI gitee-release job 用）。注意：Gitee API 无法转公开仓，
+  可见性需在网页设置里手动切换（待办）。
 - 每次发布必须提升版本号（改 `huijian_voice/config.yaml` 的 `version`，
   四源一致性由测试与 CI 自动校验：config.yaml == www/index.html CURRENT_VERSION
   == www/version.json == custom_components/huijian_ai/manifest.json）。
