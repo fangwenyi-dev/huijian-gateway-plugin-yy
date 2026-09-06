@@ -10,8 +10,14 @@ bashio::log.info "═══ 慧尖语音助手 boot ═══"
 
 mkdir -p /data/models/import /data/run
 chmod 777 /data/run || true
-# 版本戳落盘（admin_api._addon_version 与主服务 _version 的权威来源）
-echo "${HUIJIAN_VERSION:-dev}" > /data/version.txt
+# 版本戳落盘（admin_api._addon_version 与主服务 _version 的权威来源）。
+# 权威源=镜像内 www/version.json（四源一致由钉桩+CI lint 双保）；ENV HUIJIAN_VERSION
+# 只有官方 builder 注入 build-arg 时才有值，裸 docker build 烘进 0.0.0 → 不可依赖。
+ver=$(jq -r '.addon_version // empty' /usr/share/nginx/html/version.json 2>/dev/null || true)
+[ "$ver" = "0.0.0" ] && ver=""
+[ -z "$ver" ] && ver="${HUIJIAN_VERSION:-dev}"
+[ "$ver" = "0.0.0" ] && ver="dev"
+echo "$ver" > /data/version.txt
 
 # ── 集成自动安装（体验层融合三件套之一）──────────────────────────
 SRC=/opt/huijian/integration/custom_components/huijian_ai

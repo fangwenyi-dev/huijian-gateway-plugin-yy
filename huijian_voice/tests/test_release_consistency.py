@@ -46,7 +46,8 @@ def test_version_four_point_consistency():
     assert re.search(rf"^## \[{re.escape(ver)}\]", changelog, re.M), \
         "根 CHANGELOG 缺 `## [ver]` 段（Keep a Changelog 头，CI Release 正文/awk 提取依赖）"
     constpy = (ROOT / "core" / "const.py").read_text(encoding="utf-8")
-    m2 = re.search(r'HUIJIAN_VERSION",\s*"([\d.]+)"', constpy)
+    # const 最终兜底字面量（毒值过滤后的 else 分支）必须与 config 同版本
+    m2 = re.search(r'HUIJIAN_VERSION", ""\).*\nAPP_VERSION = .*else "([\d.]+)"', constpy)
     assert m2 and m2.group(1) == ver, "const.py 版本兜底未 bump"
 
 
@@ -143,6 +144,28 @@ def test_repo_standard_artifacts():
     assert (ROOT / "tests" / "e2e" / "assets" / "0.wav").stat().st_size > 100_000
     # image 域白名单/{arch} 模板与仓名一致性由 test_store_schema 统一看守
     # （v1.7.17 定案：禁在此类测试硬编码具体镜像主源域名）。
+
+
+def test_version_stamp_poison_guard():
+    """0.0.0（裸 build 烘的占位 ENV）与 dev 都不准作为对外版本穿透；
+    boot 版本戳权威源必须是镜像内 version.json（四源一致已被上游钉保护）。"""
+    boot = (ROOT / "boot.sh").read_text(encoding="utf-8")
+    assert "version.json" in boot and "0.0.0" in boot, \
+        "boot.sh 版本戳未走 version.json 权威源/未防 0.0.0 毒值"
+    constpy = (ROOT / "core" / "const.py").read_text(encoding="utf-8")
+    assert '"0.0.0"' in constpy, "const 缺 0.0.0 毒值过滤"
+    from core import const
+    import pathlib, tempfile
+    with tempfile.TemporaryDirectory() as td:
+        orig = const.DATA_DIR
+        try:
+            const.DATA_DIR = pathlib.Path(td)
+            for poison in ("dev", "0.0.0", ""):
+                pathlib.Path(td, "version.txt").write_text(poison, encoding="utf-8")
+                assert const.addon_version() != poison or poison == ""
+                assert re.fullmatch(r"\d+\.\d+\.\d+", const.addon_version())
+        finally:
+            const.DATA_DIR = orig
 
 
 def test_dockerfile_no_redundant_init_cmd():
