@@ -373,3 +373,23 @@ def test_mdns_blocking_calls_off_loop():
     assert "asyncio.to_thread(self.mdns.close)" in main_src
     mdns_src = (_CORE / "mdns.py").read_text(encoding="utf-8")
     assert "%r\", e)" in mdns_src.replace("'", '"'), "广播失败日志须 %r 携带异常类型"
+
+
+def test_transcode_stdout_digest_channel():
+    """CI 以 $(python3 acr_transcode.py …) 捕获 manifest digest（拼下一步
+    index 成员参数）。run4 实发教训：log() 的 print 走 stdout 混入捕获，
+    "[acr-transcode] ✅ …" 前缀当 digest 拼 URL → InvalidURL 控制字符崩，
+    且失败被管道退出码掩盖=假成功。定案：stdout=emit(digest) 单通道，
+    人类日志一律 stderr。"""
+    src = (Path(__file__).resolve().parent.parent.parent
+           / "scripts" / "acr_transcode.py").read_text(encoding="utf-8")
+    log_fn = src[src.index("def log(msg):"):]
+    assert "file=sys.stderr" in log_fn.split("\n\n")[0], "log() 必须走 stderr"
+    assert src.count("emit(digest)") == 2, "transcode/index 两处 digest 输出"
+    assert "def emit" in src
+    # 顶层脚本区（log/emit 定义之后）不得再有任何裸 print( 到 stdout
+    body = src[src.index("def cmd_transcode"):]
+    import re
+    bare = [m for m in re.findall(r"^\s*print\(", body, re.M)
+            if True]
+    assert not bare, "cmd_* 内禁裸 print（用 emit/log）"

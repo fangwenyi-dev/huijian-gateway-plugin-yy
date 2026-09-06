@@ -60,8 +60,15 @@ def _cred(env_name, file_path):
         return ""
 
 
+def emit(digest: str) -> None:
+    """机器契约：stdout 只此一行纯 digest（CI $(cmd) 捕获+格式校验）。"""
+    print(digest)
+
+
 def log(msg):
-    print(f"[acr-transcode] {msg}", flush=True)
+    """人类日志走 stderr——stdout 是 digest 单通道（run4 教训：print 默认
+    stdout 把日志前缀混进 $(cmd|tail -1) 捕获，拼 URL 控制字符崩）。"""
+    print(f"[acr-transcode] {msg}", file=sys.stderr, flush=True)
 
 
 def sha256_hex(data: bytes) -> str:
@@ -255,7 +262,10 @@ def cmd_transcode(a):
         nm["annotations"] = man["annotations"]
     digest = push_manifest(dst, a.dst_repo, a.dst_tag,
                            json.dumps(nm, separators=(",", ":")).encode(), MEDIA_MANIFEST)
-    print(digest)  # stdout 最后一行=新 manifest digest（CI 拿它拼 index）
+    # stdout 最后一行=纯 digest，与 log() 的 "[acr-transcode]" 人类前缀彻底分离
+    # （CI 用 $(python3 …|tail -1) 捕获——本地手跑 tail 混前缀侥幸未炸，
+    # CI 实发把前缀行当 digest 用，拼 URL 控制字符崩。单通道纪律见双函数注释）
+    emit(digest)
     log(f"✅ 转码完成 {a.dst}/{a.dst_repo}:{a.dst_tag} → {digest}")
 
 
@@ -274,7 +284,7 @@ def cmd_index(a):
     idx = json.dumps({"schemaVersion": 2, "mediaType": MEDIA_INDEX,
                       "manifests": members}, separators=(",", ":")).encode()
     digest = push_manifest(dst, a.dst_repo, a.tag, idx, MEDIA_INDEX)
-    print(digest)
+    emit(digest)
     log(f"✅ index 已合成 {a.dst}/{a.dst_repo}:{a.tag} → {digest}")
 
 

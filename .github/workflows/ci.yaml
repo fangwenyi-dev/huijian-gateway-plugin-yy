@@ -340,13 +340,20 @@ jobs:
           echo "源纯镜像 digest: amd64=$AM arm64=$AR"
           DA=$(python3 scripts/acr_transcode.py transcode --src ghcr.io \
                  --src-repo "$OWNER/amd64-huijian-voice" --src-ref "$AM" \
-                 --dst "$ACR" --dst-repo "$ACR_REPO" --dst-tag "$VERSION-amd64" | tail -1)
+                 --dst "$ACR" --dst-repo "$ACR_REPO" --dst-tag "$VERSION-amd64")
           DR=$(python3 scripts/acr_transcode.py transcode --src ghcr.io \
                  --src-repo "$OWNER/aarch64-huijian-voice" --src-ref "$AR" \
-                 --dst "$ACR" --dst-repo "$ACR_REPO" --dst-tag "$VERSION-arm64" | tail -1)
+                 --dst "$ACR" --dst-repo "$ACR_REPO" --dst-tag "$VERSION-arm64")
+          # digest 格式硬校验（run4 教训：stdout 混日志前缀→拼 URL 控制字符崩，
+          # 且异常被 set -e 吞步仍绿=假成功；格式不过立即红）
+          for D in "$DA" "$DR"; do
+            echo "$D" | grep -qE '^sha256:[0-9a-f]{64}$' || { echo "::error::transcode 输出非纯 digest: [$D]"; exit 1; }
+          done
           for TGT in "$VERSION" latest; do
-            python3 scripts/acr_transcode.py index --dst "$ACR" --dst-repo "$ACR_REPO" \
-              --tag "$TGT" --member "amd64=$DA" --member "arm64=$DR" | tail -1
+            IX=$(python3 scripts/acr_transcode.py index --dst "$ACR" --dst-repo "$ACR_REPO" \
+                   --tag "$TGT" --member "amd64=$DA" --member "arm64=$DR")
+            echo "$IX" | grep -qE '^sha256:[0-9a-f]{64}$' || { echo "::error::index 输出异常: [$IX]"; exit 1; }
+            echo "index $TGT → $IX"
           done
       - name: Self-verify anonymous pull + dual-arch gzip index
         run: |
