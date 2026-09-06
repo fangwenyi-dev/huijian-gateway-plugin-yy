@@ -20,6 +20,14 @@
 HA OS 实机 + 真固件 + 小程序的端到端仍属发布前人工补测项（需测试 HA 实例）。
 
 ### 推送与发布
+- **项目边界（2026-09-08 用户定案，最高优先）**：本仓=慧尖**语音**加载项，与慧尖
+  **LoRa 网关**（`E:\AI\huijian-gateway-plugin` / `fangwenyi-dev/ha-gateway-plugin`）
+  是两个完全不同的项目。本仓一切提交/推送只准进
+  `origin = github.com/fangwenyi-dev/huijian-gateway-plugin-yy`（Gitee 侧仅在用户
+  明确确认后推同名仓）；**严禁**把本仓任何内容提交到网关仓（含其工作目录），也严禁
+  把网关仓文件复制进本仓交付面（只读参考其 CI/测试范式）。两仓目录名高度相似
+  （`huijian-gateway-plugin` vs `huijian-gateway-plugin-yy`），push 前必须
+  `git remote -v` 核对 origin URL 逐字符为 `-yy` 结尾。
 - **禁止自动推送**。仅当用户明确说「推送」才 `git push`；且必须**双远端**：
   `git push origin main && git push gitee main`（永久规矩）。
 - 每次发布必须提升版本号（改 `huijian_voice/config.yaml` 的 `version`，
