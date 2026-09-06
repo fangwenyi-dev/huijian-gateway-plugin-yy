@@ -19,7 +19,10 @@ import wave
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(os.path.dirname(HERE))
+ROOT = os.path.dirname(os.path.dirname(HERE))   # 仓内默认布局推导
+_APP = os.environ.get("E2E_APP_ROOT") or ROOT     # 容器内扁平布局显式指定 core 父目录
+if _APP != ROOT or not os.path.isdir(os.path.join(ROOT, "core")):
+    sys.path.insert(0, _APP)
 sys.path.insert(0, ROOT)
 
 if os.name == "nt":

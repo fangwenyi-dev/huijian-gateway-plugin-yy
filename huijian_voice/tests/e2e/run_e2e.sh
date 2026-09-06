@@ -58,7 +58,8 @@ echo "✅ 镜像内版本链 $CFG_VER"
 echo "==== 6. 三通道协议断言（容器内跑，依赖与生产完全同源）===="
 docker cp "$DIR/e2e_client.py" "$NAME":/tmp/e2e_client.py
 docker cp "$DIR/assets/0.wav" "$NAME":/tmp/0.wav
-docker exec -e E2E_WAV=/tmp/0.wav "$NAME" /opt/huijian/bin/python /tmp/e2e_client.py
+docker exec -e E2E_WAV=/tmp/0.wav -e E2E_APP_ROOT=/opt/huijian/app \
+    "$NAME" /opt/huijian/bin/python /tmp/e2e_client.py
 
 echo "==== 7. 管理面经 nginx 反代（:8001 白名单=回环，runner 本机正命中）===="
 curl -sf http://127.0.0.1:8001/healthz | grep -q '"ok":true'

@@ -18,3 +18,5 @@ _hjmodels/
 *.onnx.bak
 .venv/
 venv/
+
+_ci.py
