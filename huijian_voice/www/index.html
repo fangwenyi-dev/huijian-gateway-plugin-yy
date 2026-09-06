@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!--
-  慧尖语音助手 · 加载项管理页（单文件零外链，离线 LAN 可用）
+  慧尖HA语音插件 · 加载项管理页（单文件零外链，离线 LAN 可用）
   访问路径：HA 侧边栏 Ingress（Supervisor 代理，源 IP 在白名单内）或宿主 :8001。
   数据面全部走同域 /api/（nginx→127.0.0.1:8002 admin），前端零凭据。
   CURRENT_VERSION 与 config.yaml/CHANGELOG 一致性由 tests/test_release_consistency.py 钉桩。
@@ -9,7 +9,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>慧尖语音助手</title>
+<title>慧尖HA语音插件</title>
 <style>
   :root { --bg:#f5f6f8; --card:#fff; --line:#e3e6ea; --tx:#1f2329; --mut:#8a919c;
           --ok:#1a9e5c; --bad:#d43a3a; --warn:#c07f00; --pri:#2f6fed; }
@@ -57,7 +57,7 @@
 </head>
 <body>
 <header>
-  <h1>🎙️ 慧尖语音助手</h1>
+  <h1>🎙️ 慧尖HA语音插件</h1>
   <span class="ver">v<span id="ver">–</span> · <span id="haver">检测中</span></span>
 </header>
 <nav>
@@ -217,7 +217,7 @@
 
 <script>
 "use strict";
-const CURRENT_VERSION = "1.0.0";           // 与 config.yaml 一致（钉桩测试）
+const CURRENT_VERSION = "1.0.1";           // 与 config.yaml 一致（钉桩测试）
 // 音色表 = kokoro-multi-lang-v1_0 官方 sid 映射（docs/source/onnx/tts/pretrained_models/kokoro.rst 实证）
 const VOICES = [
   [45,"zf_xiaobei · 小北（默认）"],[46,"zf_xiaoni · 小尼"],[47,"zf_xiaoxiao · 晓晓"],[48,"zf_xiaoyi · 小艺"],

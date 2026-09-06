@@ -1,11 +1,11 @@
 # ═══════════════════════════════════════════════════════════════════
-# 慧尖语音助手 · Supervisor 加载项配置
+# 慧尖HA语音插件 · Supervisor 加载项配置
 # 定案依据：《语音助手落地方案-v4.1》§3——单独新建 huijian_voice，
 # 不并入 LoRa 网关加载项（镜像体积/重启爆炸半径/发布节奏/资源隔离/
 # 产品边界五理由）。本文件键序与注释风格沿用慧尖网关加载项模板。
 # ═══════════════════════════════════════════════════════════════════
-name: 慧尖语音助手
-version: "1.0.0"
+name: 慧尖HA语音插件
+version: "1.0.1"
 slug: huijian_voice
 description: 慧尖局域网语音助手服务器——本地 STT/TTS/NLU，零必填配置即用，执行走 HA 意图 REST
 url: 'https://github.com/fangwenyi-dev/huijian-gateway-plugin-yy'

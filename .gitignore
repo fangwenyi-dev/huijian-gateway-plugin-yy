@@ -20,3 +20,6 @@ _hjmodels/
 venv/
 
 _ci.py
+
+# 本地镜像源诊断脚本（临时工具，不入库）
+_probe.py

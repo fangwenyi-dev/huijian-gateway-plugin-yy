@@ -1,0 +1,79 @@
+name: Warm image mirrors (manual)
+# 背景（v1.0.1 实发）：1ms/nju 透传站多边缘缓存——CI 发版后的自动预热只覆盖
+# runner 命中的少数边缘，客户 DNS 分到冷边缘时首装会长时间停在
+# "Downloading docker image"（blob 前向回源假活慢滴，实测 33KB/s、nju 0B/12s）。
+# 本 workflow 提供随时手动补热：对指定 tag 全量 GET 每个 blob（config+layers
+# × amd64/aarch64 × 1ms/nju），多触发几轮 = 多命中些边缘。best-effort，不阻塞。
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要预热的镜像 tag（如 1.0.0）"
+        required: true
+        default: ""
+
+env:
+  IMAGE_NAME: huijian-voice
+
+jobs:
+  warm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Pre-pull all blobs via ghcr.1ms.run & ghcr.nju.edu.cn
+        env:
+          TAG: ${{ github.event.inputs.tag }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -u
+          if [ -z "$TAG" ]; then echo "::error::tag 不能为空"; exit 1; fi
+          IDX_ACCEPT="application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json"
+          MAN_ACCEPT="application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
+          token_of() { # $1=repo $2=realm $3=service
+            [ -z "$2" ] && return 0
+            curl -fsS -m 15 "$2?service=$3&scope=repository:${OWNER}/$1:pull" \
+              | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("token") or d.get("access_token",""))' || true
+          }
+          warm_via() { # $1=reg $2=realm $3=service $4=timeout秒
+            local REG="$1" REALM="$2" SVC="$3" TMO="${4:-60}"
+            local TOTOK=0 TOFAIL=0
+            for ARCH in amd64 aarch64; do
+              local OCI_ARCH; OCI_ARCH=$([ "$ARCH" = aarch64 ] && echo arm64 || echo "$ARCH")
+              local REPO="${ARCH}-${IMAGE_NAME}" TOK
+              TOK=$(token_of "$REPO" "$REALM" "$SVC")
+              local HDRS=(-H "User-Agent: docker/24.0")
+              [ -n "$TOK" ] && HDRS+=(-H "Authorization: Bearer $TOK")
+              local IDX MDIG
+              IDX=$(curl -fsS -m "$TMO" "${HDRS[@]}" -H "Accept: $IDX_ACCEPT" "https://$REG/v2/$REPO/manifests/$TAG" 2>/dev/null || true)
+              if [ -z "$IDX" ]; then echo "  [$REG] ❌ $REPO:$TAG index 不可达（边缘 404 属冷缓存闪断常态，重试本 workflow 即可）"; TOFAIL=$((TOFAIL+1)); continue; fi
+              MDIG=$(printf '%s' "$IDX" | python3 -c '
+          import json,sys
+          m=json.load(sys.stdin)
+          hit=[e for e in m.get("manifests",[]) if e.get("platform",{}).get("architecture")==sys.argv[1] and e.get("platform",{}).get("os")=="linux"]
+          print(hit[0]["digest"] if hit else "")' "$OCI_ARCH" 2>/dev/null || true)
+              if [ -z "$MDIG" ]; then echo "  [$REG] ❌ $REPO index 无 $OCI_ARCH/linux 条目"; TOFAIL=$((TOFAIL+1)); continue; fi
+              local MAN
+              MAN=$(curl -fsS -m "$TMO" "${HDRS[@]}" -H "Accept: $MAN_ACCEPT" "https://$REG/v2/$REPO/manifests/$MDIG" 2>/dev/null || true)
+              if [ -z "$MAN" ]; then echo "  [$REG] ❌ $REPO 平台 manifest 不可达"; TOFAIL=$((TOFAIL+1)); continue; fi
+              local BLOBS
+              BLOBS=$(printf '%s' "$MAN" | python3 -c 'import json,sys;m=json.load(sys.stdin);print(m["config"]["digest"]);[print(l["digest"]) for l in m.get("layers",[])]' 2>/dev/null || true)
+              if [ -z "$BLOBS" ]; then echo "  [$REG] ❌ manifest 解析失败/无 blobs"; TOFAIL=$((TOFAIL+1)); continue; fi
+              local OK=0 FAIL=0 BYTES=0 R CODE SZ B
+              for B in $BLOBS; do
+                # 无 Range 全量 GET = 整 blob 过站入缓存；-m 600 兜住假活连接
+                R=$(curl -s -o /dev/null -m 600 "${HDRS[@]}" -H "Accept: application/vnd.oci.image.layer.v1.tar+gzip" -w "%{http_code} %{size_download}" -L "https://$REG/v2/$REPO/blobs/$B" || echo "000 0")
+                CODE="${R% *}"; SZ="${R#* }"
+                if [ "$CODE" = "200" ]; then OK=$((OK+1)); BYTES=$((BYTES+SZ)); else FAIL=$((FAIL+1)); echo "  [$REG] ⚠️ blob ${B:0:19} HTTP $CODE"; fi
+              done
+              echo "  [$REG] $REPO:$TAG ok=$OK fail=$FAIL $((BYTES/1024/1024))MB"
+              TOTOK=$((TOTOK+OK)); TOFAIL=$((TOFAIL+FAIL))
+            done
+            echo "  [$REG] 汇总 ok=$TOTOK fail=$TOFAIL"
+            [ "$TOFAIL" -eq 0 ]
+          }
+          # nju 站冷 blob 假活实测 0B/12s——给它 900s 总预算；两站都 best-effort
+          warm_via ghcr.1ms.run "https://ghcr.1ms.run/openapi/v1/auth/token" ghcr.1ms.run 60 \
+            || echo "::warning title=1ms.run 手动补热未全绿::边缘冷，稍后再触发一轮"
+          warm_via ghcr.nju.edu.cn "" "" 180 \
+            || echo "::warning title=nju 手动补热未全绿::仅备用源，不阻塞"
+          echo "补热完成。客户侧：Supervisor 停止加载项→卸载→重装即重新拉取。"

@@ -3,6 +3,27 @@
 所有版本变更记录在此文件中。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [1.0.1] - 2026-09-08
+
+### Added
+- **手动镜像补热 workflow（`warm.yaml`，workflow_dispatch）**：HA OS 实机首装
+  v1.0.0 停在 `Downloading docker image` 实发诊断——镜像与 manifest 三源
+  （ghcr.io/1ms/nju）均完好（17 层 132MB），但透传站对新 tag 的 blob 边缘
+  缓存未热：1ms 实测 33KB/s 慢滴、nju 12s 零字节假活；CI 发版预热只覆盖
+  runner 命中的少数边缘，客户 DNS 分到冷边缘即干等。新增对任意 tag 全量
+  GET 全部 blob（amd64/aarch64 × 双站）的手动补热通道，多触发几轮=多命中
+  边缘；本批推送后立即对 1.0.0 补热救援卡装用户。
+- **DOCS 排障升级**：「安装一直停在下载」分级处置（等 1h→卸载重装→仓库
+  移除重加→兜底改回 ghcr.io），钉桩 `test_manual_warm_workflow_and_docs_faq`
+  （dispatch 触发/任意 tag/无 Range 全量 GET/双站覆盖 + FAQ 话术在位）。
+
+### Changed
+- **商店显示名「慧尖语音助手」→「慧尖HA语音插件」**（用户定案）：与 LoRa
+  网关加载项在商店/文档/管理页三处同屏场景下明确区分。触点：config.yaml
+  `name`（商店卡片权威源）、Ingress 管理页 title/H1、商店 DOCS 全部卡片话术
+  （用户照文案找卡片，一处不能漏）、根 README。slug `huijian_voice` 与镜像名
+  `huijian-voice` 不变——改 slug 会断老用户升级路径。
+
 ## [1.0.0] - 2026-09-08
 
 首个完整版本 · 慧尖局域网语音助手加载项（huijian_voice）。

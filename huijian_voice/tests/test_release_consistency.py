@@ -131,6 +131,29 @@ def test_workflow_uses_supported_builder_args():
     assert jobs["gitee-release"]["needs"] == ["prepare", "release"]
 
 
+def test_manual_warm_workflow_and_docs_faq():
+    """v1.0.1 实发教训：1ms/nju 透传站多边缘缓存，CI 发版预热只覆盖 runner
+    命中的少数边缘——客户 DNS 分到冷边缘时首装停在 Downloading（实测 blob
+    33KB/s、nju 0B/12s 假活）。结构性对策两件，缺一不可：
+    ① workflows/warm.yaml 手动补热通道（对任意 tag 全量 GET 全部 blob，
+       多触发几轮=多命中些边缘）；② DOCS 商店页给客户"等1h→重装→移除重加
+       →改回 ghcr.io"分级处置话术。缺任一 = 下次发版客户再次干等。"""
+    warm_path = ROOT.parent / ".github" / "workflows" / "warm.yaml"
+    assert warm_path.is_file(), "缺手动补热 workflow"
+    doc = yaml.safe_load(warm_path.read_text(encoding="utf-8"))
+    trig = doc.get("on", doc.get(True))  # YAML 1.1 把裸 on: 键解析为布尔 True
+    assert "workflow_dispatch" in trig, "补热必须是手动触发"
+    assert "tag" in trig["workflow_dispatch"]["inputs"], "必须可指定任意历史 tag"
+    script = list(doc["jobs"].values())[0]["steps"][-1]["run"]
+    assert "blobs/" in script and "bytes=" not in script, \
+        "必须无 Range 全量 GET（预热整 blob 入边缘缓存，Range 只热片段）"
+    for reg in ("ghcr.1ms.run", "ghcr.nju.edu.cn"):
+        assert reg in script, f"补热必须覆盖 {reg}"
+    docs = (ROOT / "DOCS.md").read_text(encoding="utf-8")
+    assert "Downloading docker image" in docs, "商店 FAQ 必须教客户识别该卡点"
+    assert "卸载再重装" in docs and "ghcr.io" in docs, "FAQ 必须有分级处置（重装+兜底换源）"
+
+
 def test_repo_standard_artifacts():
     """网关仓同款交付面：根五件套 + 商店图标 + e2e 编排脚本 + 镜像国内透传站。"""
     for f in ("README.md", "CHANGELOG.md", "CLAUDE.md", "LICENSE", "repository.yaml"):
