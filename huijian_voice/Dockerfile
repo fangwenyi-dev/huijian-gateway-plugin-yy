@@ -63,4 +63,9 @@ RUN chmod +x /etc/cont-init.d/01-huijian-voice.sh \
              /etc/services.d/huijian-core/run \
              /etc/services.d/nginx/run
 
-CMD ["/init"]
+# 注意：**禁止**再写 CMD/ENTRYPOINT ["/init"]。base 的 ENTRYPOINT 已是 /init
+# （ghcr 7.8.3 config 实证），重复 CMD 会变成 `/init /init`——s6-overlay v3 的
+# legacy services 装配拿 argv[1] 当初始化脚本，直接
+# `s6-overlay-suexec: fatal: can only run as pid 1` 全服务停摆
+# （v1.0.0 CI e2e 硬门禁抓出：Supervisor 真机因覆写 CMD 才没暴露）。
+

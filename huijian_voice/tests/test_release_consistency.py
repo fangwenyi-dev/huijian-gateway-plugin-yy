@@ -145,6 +145,16 @@ def test_repo_standard_artifacts():
     # （v1.7.17 定案：禁在此类测试硬编码具体镜像主源域名）。
 
 
+def test_dockerfile_no_redundant_init_cmd():
+    """base ENTRYPOINT 已=/init；Dockerfile 再放 CMD/ENTRYPOINT ["/init"] 会
+    变 `/init /init` → s6 v3 legacy services 崩（v1.0.0 CI e2e 实锤）。"""
+    txt = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    for ln in txt.splitlines():
+        t = ln.strip()
+        assert not (t.startswith("CMD") or t.startswith("ENTRYPOINT")) or "/init" not in t, \
+            f"禁对 /init 出 CMD/ENTRYPOINT：{t[:60]}"
+
+
 def test_dockerfile_pre_from_scope_only_args():
     """首个 FROM 前是全局作用域，Docker 只接受 ARG/parser-directive/comment。
     v1.0.0 CI 首炸实证：stage 前放 LABEL → buildx 报 "no build stage in current
