@@ -168,6 +168,21 @@ def test_version_stamp_poison_guard():
             const.DATA_DIR = orig
 
 
+def test_atomic_write_public_readable():
+    """status/models 事实文件经 _atomic_write 落 nginx 静态根：mkstemp 默认
+    0600 会让 www-data 读 403（v1.0.0 CI e2e 实锤），必须 fchmod 0644。"""
+    import inspect
+    from core import main as m
+    src = inspect.getsource(m._atomic_write)
+    assert "fchmod" in src and "0o644" in src, "_atomic_write 丢失世界可读 chmod"
+    import os as _os, pathlib, stat, tempfile
+    if _os.name != "nt":
+        with tempfile.TemporaryDirectory() as td:
+            tgt = pathlib.Path(td, "status.json")
+            m._atomic_write(tgt, "{}")
+            assert stat.S_IMODE(tgt.stat().st_mode) & 0o044, "落盘文件 others 不可读"
+
+
 def test_dockerfile_no_redundant_init_cmd():
     """base ENTRYPOINT 已=/init；Dockerfile 再放 CMD/ENTRYPOINT ["/init"] 会
     变 `/init /init` → s6 v3 legacy services 崩（v1.0.0 CI e2e 实锤）。"""

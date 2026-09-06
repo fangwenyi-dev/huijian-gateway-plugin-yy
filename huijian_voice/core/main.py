@@ -234,6 +234,9 @@ def _atomic_write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix="." + path.name + ".", suffix=".tmp")
     try:
+        # mkstemp 默认 0600：rename 后 nginx worker（www-data）读走 403——
+        # 事实文件必须世界可读（v1.0.0 CI e2e step7 实锤，Windows 本地不可见面）。
+        os.fchmod(fd, 0o644)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
         os.replace(tmp, path)
