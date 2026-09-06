@@ -102,8 +102,32 @@
   静态扫描 FROM 前所有非注释行，复发即红。
 
 
+- **镜像 CMD 与 base ENTRYPOINT 重复**（v1.0.0 run4 e2e 实炸）：`CMD ["/init"]`
+  叠加 base 自带 `ENTRYPOINT ["/init"]` 成 `/init /init`，argv 污染打崩 s6 v3
+  legacy services（`s6-overlay-suexec: fatal: can only run as pid 1`，全服务停摆）。
+  Supervisor 真机会覆写 CMD 故本地形态不可见——真镜像 e2e 门禁独有能力。钉桩
+  `test_dockerfile_no_redundant_init_cmd`。
+- **版本显示链 0.0.0 毒值**（v1.0.0 e2e step5 前瞻拦截）：split-action 不注入
+  `BUILD_VERSION`，裸 docker build 把 ENV 烘成 0.0.0 且穿透到 health/管理页。
+  版本戳权威源改为镜像内 `www/version.json`（四源一致已被钉保护），const 过滤
+  0.0.0/dev。钉桩 `test_version_stamp_poison_guard` + e2e step5 版本链断言。
+- **e2e 容器内客户端路径推导**（run5 实炸）：客户端拷至容器 /tmp 后按仓内
+  相对层级找 `core` 包 → ModuleNotFound。`E2E_APP_ROOT` 显式注入（编排+客户端两侧）。
+- **nginx 读事实文件 403**（run6 实炸，POSIX-only 面）：`_atomic_write` 的 mkstemp
+  默认 0600，root 写者落盘后 www-data worker 读 `status.json` Permission denied。
+  修复 fchmod 0644；钉桩 `test_atomic_write_public_readable`（Windows 权限模型
+  不可见，CI 独有抓面）。
+- **模型就绪判定竞态（flaky 根治）**（run7 实炸）：`extractall` 直解 target，
+  250MB onnx 半写时 `exists()` 级就绪误报 → STT 读残档 `Protobuf parsing failed`，
+  run 间时好时坏。新增 `.extracted_ok` 完成章（全部成员解包成功后才写），
+  就绪判定升级为内容级原子。钉桩 `test_extract_marker_atomicity`（半写目录
+  不得就绪）+ run_local 对 dev 预解包目录补章迁移。
+- **Gitee Release BOM 拦截守卫立功**（run8）：本机 `.gitee_token` 文件带 UTF-8 BOM，
+  配进 GitHub Secret 后 CI 逐字节守卫当场拒收（正是网关 v1.6.21 事故换防线）；
+  Secret 以 `utf-8-sig` 清洗重配。Gitee 仓可见性需网页手动切公开（API 强制 private）。
+
 ### 验证与测试基线
-- **111 项 pytest 钉桩**全绿（NLU 矩阵/WS 协议契约/管理面路由/并发守卫/基建契约/
+- **115 项 pytest 钉桩**全绿（NLU 矩阵/WS 协议契约/管理面路由/并发守卫/基建契约/
   发布一致性），CI lint 硬门禁。
 - **Windows 全栈 E2E-lite**（真 sherpa-onnx + 真 onnxruntime + 真 Kokoro + 真
   libopus）：三通道两轮 + 卸载/惰性重载/busy 避让/single-flight 实测。
