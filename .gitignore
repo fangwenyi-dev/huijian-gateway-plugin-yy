@@ -1,0 +1,20 @@
+# Python/测试痕迹
+__pycache__/
+*.pyc
+.pytest_cache/
+# E2E/开发实证产物（勿入库）
+huijian_voice/_e2e_data/
+huijian_voice/_smoke_data/
+_winlibs/
+_hjmodels/
+
+# 研究输入（模型母本/上游源码/工具链），不属于交付仓
+/asr/
+/tts/
+/nlu/
+/yyjicheng/
+/.omo/
+*.tar.bz2
+*.onnx.bak
+.venv/
+venv/

@@ -1,0 +1,244 @@
+{
+    "config": {
+        "abort": {
+            "already_configured": "设备已配置",
+            "already_configured_detailed": "设备“{name}”，MAC 地址为 “{mac}”，已配置为“{title}”。",
+            "already_configured_updates": "设备“{name}”，MAC 地址为 “{mac}”，已配置为“{title}”；现有配置将使用验证数据进行更新。",
+            "already_in_progress": "配置流程已在进行中",
+            "mdns_missing_mac": "mDNS 属性中缺少 MAC 地址。",
+            "mqtt_missing_api": "MQTT 属性中缺少 API 端口。",
+            "mqtt_missing_ip": "MQTT 属性中缺少 IP 地址。",
+            "mqtt_missing_mac": "MQTT 属性中缺少 MAC 地址。",
+            "mqtt_missing_payload": "缺少 MQTT 有效负载。",
+            "name_conflict_migrated": "“{name}”的配置已从 “{existing_mac}” 迁移到 MAC 地址为 “{mac}” 的新设备。",
+            "reauth_successful": "重新认证成功",
+            "reauth_unique_id_changed": "**“{name}”的重新认证已中止**，因为地址 “{host}” 指向不同的设备：“{unexpected_device_name}” (MAC： ”{unexpected_mac}“)，而不是预期的设备 (MAC： ”{expected_mac}“) 。",
+            "reconfigure_already_configured": "设备“{name}”的 MAC 地址为 “{mac}”，已配置为“{title}”。重新配置已中止，因为新配置似乎指向不同的设备。",
+            "reconfigure_name_conflict": "**“{name}”的重新配置已中止**，因为地址 “{host}” 指向名为“{name}”的设备（MAC：“{expected_mac}”），而该设备已被另一个配置条目“{existing_title}”使用。",
+            "reconfigure_successful": "重新配置成功",
+            "reconfigure_unique_id_changed": "**“{name}”的重新配置已中止**，因为地址 “{host}” 指向不同的设备：“{unexpected_device_name}” (MAC：“{unexpected_mac}”)，而不是预期的设备 (MAC：“{expected_mac}”) 。",
+            "service_received": "已收到动作"
+        },
+        "error": {
+            "connection_error": "无法连接到设备",
+            "invalid_auth": "身份验证无效",
+            "invalid_psk": "加密密钥无效",
+            "requires_encryption_key": "设备需要加密密钥",
+            "resolve_error": "无法解析设备的地址。如果此问题仍然存在，请考虑设置静态 IP 地址。"
+        },
+        "flow_title": "{name}",
+        "step": {
+            "authenticate": {
+                "data": {
+                    "password": "密码"
+                },
+                "data_description": {
+                    "password": "密码已弃用，并将在未来版本中移除。请改用加密密钥。"
+                },
+                "description": "请输入设备密码。 `{name}`"
+            },
+            "discovery_confirm": {
+                "description": "是否要将设备“{name}”添加到 Home Assistant ？",
+                "title": "已发现 HOUZZkit AI 设备"
+            },
+            "encryption_key": {
+                "data": {
+                    "noise_psk": "加密密钥"
+                },
+                "data_description": {
+                    "noise_psk": "加密密钥用于加密 Home Assistant 与设备之间的连接。"
+                },
+                "description": "请输入“{name}”的加密密钥。"
+            },
+            "name_conflict": {
+                "description": "**名称“{name}”已被另一个设备使用：{existing_title}（MAC 地址：{existing_mac}）**\n \n要继续，请选择以下选项之一：\n \n **将配置迁移到新设备：**如果这是替换，请将现有设置迁移到新设备（{mac}）。\n **覆盖现有配置：**如果这不是替换，请删除 “{existing_mac}” 的旧配置并使用新设备。",
+                "menu_options": {
+                    "name_conflict_migrate": "将配置迁移到新设备",
+                    "name_conflict_overwrite": "覆盖现有配置"
+                },
+                "title": "名称冲突"
+            },
+            "reauth_confirm": {
+                "data": {
+                    "noise_psk": "加密密钥"
+                },
+                "data_description": {
+                    "noise_psk": "加密密钥用于加密 Home Assistant 与设备之间的连接。"
+                },
+                "description": "设备“{name}”启用了传输加密或更改了加密密钥。请输入更新后的密钥。"
+            },
+            "reauth_encryption_removed_confirm": {
+                "description": "设备“{name}”已禁用传输加密。请确认您要移除加密密钥并允许未加密的连接。"
+            },
+            "user": {
+                "data": {
+                    "host": "主机",
+                    "port": "端口"
+                },
+                "data_description": {
+                    "host": "设备的 IP 地址或主机名",
+                    "port": "本机 API 正在运行的端口"
+                },
+                "description": "请输入您设备的连接设置。"
+            },
+            "qrcode_done": {
+                "description": "{tip}",
+                "data": {
+                    "submit_confirm": "确认无误"
+                }
+            }
+        },
+        "progress": {
+            "qrcode": "{tip}",
+            "waiting_for_device": "等待设备确认..."
+        }
+    },
+    "entity": {
+        "assist_satellite": {
+            "assist_satellite": {
+                "name": "语音助手卫星"
+            }
+        },
+        "climate": {
+            "climate": {
+                "state_attributes": {
+                    "fan_mode": {
+                        "state": {
+                            "quiet": "静音"
+                        }
+                    }
+                }
+            }
+        },
+        "select": {
+            "pipeline": {
+                "state": {
+                    "preferred": "首选"
+                }
+            },
+            "pipeline_n": {
+                "name": "助手 {index}",
+                "state": {
+                    "preferred": "首选"
+                }
+            },
+            "vad_sensitivity": {
+                "name": "讲话完毕检测",
+                "state": {
+                    "aggressive": "积极",
+                    "default": "默认",
+                    "relaxed": "轻松"
+                }
+            },
+            "wake_word": {
+                "state": {
+                    "no_wake_word": "无唤醒词",
+                    "okay_nabu": "Okay Nabu"
+                }
+            },
+            "wake_word_n": {
+                "name": "唤醒词 {index}",
+                "state": {
+                    "no_wake_word": "无唤醒词",
+                    "okay_nabu": "Okay Nabu"
+                }
+            }
+        }
+    },
+    "exceptions": {
+        "action_call_failed": {
+            "message": "无法在{device_name}上执行动作调用 {call_name}：{error}"
+        },
+        "action_call_timeout": {
+            "message": "等待来自“{device_name}”上动作“{call_name}”调用的响应时超时"
+        },
+        "error_communicating_with_device": {
+            "message": "与设备“{device_name}”通信时出错：{error}"
+        },
+        "error_compiling": {
+            "message": "编译{configuration}时出错。"
+        },
+        "error_uploading": {
+            "message": "OTA（无线）更新{configuration}时出错。"
+        },
+        "huijian_auth_error": {
+            "message": "{name} 授权失败，请重新配置。"
+        },
+        "ota_in_progress": {
+            "message": "{configuration} 的 OTA（无线）更新已在进行中。"
+        }
+    },
+    "issues": {
+        "api_password_deprecated": {
+            "description": "API 密码已弃用，建议改用 API 加密密钥。\n\n删除 API 密码并将加密密钥添加到设备以解决此问题。",
+            "title": "{name}上的 API 密码已弃用"
+        },
+        "assist_in_progress_deprecated": {
+            "fix_flow": {
+                "step": {
+                    "confirm_disable_entity": {
+                        "description": "{integration_name} 进行中二元传感器 {entity_id} 已弃用。\n\n请迁移您的配置，使用相应的 {assist_satellite_domain} 实体，然后单击“提交”禁用进行中二元传感器可修复此问题。"
+                    }
+                }
+            },
+            "title": "{integration_name} 进行中二元传感器已弃用"
+        },
+        "ble_firmware_outdated": {
+            "description": "ESPHome {version} 引入了超低延迟事件处理技术，将 BLE 事件延迟从 0-16 毫秒降低至约 12 微秒。这解决了与需要低延迟的设备进行配对、连接或握手时的稳定性问题，并使蓝牙代理操作的性能媲美甚至超越本地适配器。我们强烈建议您更新“{name}”以充分利用这些改进措施。",
+            "title": "使用 ESPHome {version}或更高版本更新{name}"
+        },
+        "device_conflict": {
+            "fix_flow": {
+                "step": {
+                    "init": {
+                        "description": "**位于 {ip} 的设备“{name}” ({model}) 报告其 MAC 地址从 “{stored_mac}” 更改为 “{mac}” 。**\n \n如果您有多个同名的设备，请重命名或移除 MAC 地址为 “{mac}” 的设备以避免冲突。\n \n如果这是硬件更换，请确认您是否要将 Home Assistant 配置迁移到 MAC 地址为 “{mac}” 的新设备。",
+                        "menu_options": {
+                            "manual": "移除或重命名设备",
+                            "migrate": "将配置迁移到新设备"
+                        },
+                        "title": "{name}的设备冲突"
+                    },
+                    "manual": {
+                        "description": "要解决冲突，请从网络中移除 MAC 地址为 “{mac}” 的设备并重新启动 MAC 地址为 “{stored_mac}” 的设备，或者使用与“{name}”不同的名称重新刷新 MAC 地址为 “{mac}” 的设备。完成后再次提交。",
+                        "title": "移除或重命名设备“{name}”"
+                    },
+                    "migrate": {
+                        "description": "您确定要将位于 {ip} 的“{name}” ({model}) 的 Home Assistant 配置从 “{stored_mac}” 迁移到 “{mac}” 吗 ？",
+                        "title": "确认{name}的设备更换"
+                    }
+                }
+            },
+            "title": "{name}的设备冲突"
+        },
+        "service_calls_not_allowed": {
+            "description": "设备尝试执行一个 Home Assistant 动作，但此功能未被启用。\n\n如果您信任此设备并希望允许它执行 Home Assistant 动作，您可以在选项流程中启用此功能。",
+            "title": "不允许 {name} 执行 Home Assistant 动作"
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "description": "语音场景：\n{scene_list}\n\n传感器自动化：\n{auto_list}\n\n{manage_url}",
+                "data": {
+                    "allow_service_calls": "允许设备执行 Home Assistant 动作。",
+                    "llm_hass_api": "控制 Home Assistant",
+                    "subscribe_logs": "订阅来自设备的日志。",
+                    "to_delete": "选择要删除的场景",
+                    "to_delete_auto": "选择要删除的自动化"
+                },
+                "data_description": {
+                    "allow_service_calls": "启用后，设备可以执行 Home Assistant 动作或发送事件。请仅在您信任该设备的情况下启用此功能。",
+                    "subscribe_logs": "启用后，设备将向 Home Assistant 发送日志，您可以在日志面板中查看它们。"
+                }
+            },
+            "voice_scene_delete_result": {
+                "description": "{result_msg}",
+                "title": "删除结果"
+            },
+            "options": {
+                "description": "配置设备选项。",
+                "title": "选项设置"
+            }
+        }
+    }
+}

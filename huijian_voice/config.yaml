@@ -1,0 +1,74 @@
+# ═══════════════════════════════════════════════════════════════════
+# 慧尖语音助手 · Supervisor 加载项配置
+# 定案依据：《语音助手落地方案-v4.1》§3——单独新建 huijian_voice，
+# 不并入 LoRa 网关加载项（镜像体积/重启爆炸半径/发布节奏/资源隔离/
+# 产品边界五理由）。本文件键序与注释风格沿用慧尖网关加载项模板。
+# ═══════════════════════════════════════════════════════════════════
+name: 慧尖语音助手
+version: "1.0.0"
+slug: huijian_voice
+description: 慧尖局域网语音助手服务器——本地 STT/TTS/NLU，零必填配置即用，执行走 HA 意图 REST
+url: 'https://github.com/fangwenyi-dev/ha-voice-plugin'
+arch:
+  - amd64
+  - aarch64
+
+init: false
+# startup=system：语音栈模型加载慢（数秒~数十秒），与网关同层启动，
+# 内部对 HA REST 做惰性重试，不阻塞 HA。
+startup: system
+
+# 存活判据：WS 端点端口（[HOST] 宏 = 宿主监听，host_network 前提）
+watchdog: tcp://[HOST]:8000
+
+# ── Ingress 管理页（同款慧尖网关 nginx 模式）────────────────────────
+# nginx 监听宿主 8001，仅放行 127.0.0.1 与 Supervisor 网段；
+# 前端零凭据，HA REST 经 nginx 注入 Supervisor token 代理。
+ingress: true
+ingress_port: 8001
+panel_icon: mdi:account-voice
+panel_title: 慧尖语音
+
+# homeassistant_api: true → nginx 反代 /core/api/ 的权限前提；
+# 加载项 Python 侧同时获得 SUPERVISOR_TOKEN 环境变量。
+homeassistant_api: true
+
+# ── host_network 理由（照抄网关模板论证风格）───────────────────────
+# 1) huijian_ai 集成的三条 WS 外拨目标即 ws://<HA宿主>:8000，须稳定监听宿主端口；
+# 2) mDNS（_huijian-voice._tcp）广播必须到达物理 LAN，桥接网络下不可达；
+# 3) 巡检循环以 /proc/net/tcp 判断宿主真实监听，与网关同款实现。
+# 注：本加载项无 MQTT/UDP 需求；桥接网络 + ports: 映射在技术上亦可行，
+#     但 mDNS 发现（零配置主通道）会退化，故维持 host_network。
+host_network: true
+
+# 预构建镜像路线（{arch} 占位由 Supervisor 展开；CI 矩阵双镜像+manifest）
+# 商店安装统一走 ghcr.1ms.run 透传站（网关定案：Supervisor 单 URL 无多源回退，
+# 国内直连 ghcr.io 握手失败率不可忽略；CI 每次发版双架构全 blob 预热，缓存必命中；
+# 透传站故障时客户手动换回 ghcr.io 同 tag 即可，见 DOCS「排障」）。
+image: ghcr.1ms.run/fangwenyi-dev/{arch}-huijian-voice
+
+# 挂载：
+#  homeassistant_config:rw —— run.sh 落盘安装 huijian_ai 集成（体验层融合三件套之一）
+map:
+  - homeassistant_config:rw
+
+# ── Supervisor options：只放高级项，"装完即用"的默认值全部内置 ──────
+# 产品级配置（STT/TTS/LLM provider、音色、语速、纠错表扩展等）一律
+# 在加载项 Web UI 修改，落盘 /data/settings.json（单一事实源）；
+# 此处 4 键为重启级/装机级开关（用户定案 2026-09-08「用户尽量不要配置」）。
+options:
+  model_auto_download: true
+  auto_install_integration: true
+  idle_unload_minutes: 0
+  log_level: info
+
+schema:
+  # 模型首启自动下载（modelscope→hf-mirror→GitHub 三级回退；关闭后需在
+  # models.lock.json 所列 URL 手动放置到 /data/models/import/）
+  model_auto_download: bool
+  # 自动把随镜像分发的 huijian_ai 集成落盘到 HA custom_components
+  auto_install_integration: bool
+  # 省电：>N 分钟空闲卸载 ASR/TTS 模型（首句延迟 +~2s）；0=常驻（默认）
+  idle_unload_minutes: "int(0, 1440)"
+  # 日志级别：debug/info/warning/error（排障用，改后重启生效）
+  log_level: "list(debug|info|warning|error)"

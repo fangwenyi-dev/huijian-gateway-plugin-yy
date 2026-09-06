@@ -1,0 +1,9 @@
+# 慧尖加载项仓库 · 商店清单
+# 用法：HA「设置→加载项→商店→⋮→仓库」添加本仓库 GitHub URL 即可。
+# 加载项自动发现：Supervisor 扫描一级子目录的 config.yaml（网关同款范式，
+# repository.yaml 规范实证于姊妹仓 huijian-gateway-plugin 真机运行）。
+# 同仓双镜像定案（v4.1）：网关与语音各自独立加载项目录、独立镜像、独立升级。
+name: 慧尖加载项
+url: https://github.com/fangwenyi-dev/ha-voice-plugin
+description: 慧尖局域网语音助手（huijian_voice）——纯 LAN STT/TTS/NLU 服务器
+maintainer: fangwenyi-dev

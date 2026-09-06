@@ -1,0 +1,458 @@
+name: Build and Release (huijian_voice)
+
+# 与网关仓 ci.yaml 同源范式（v1.7.16 后的九 job 形态）。
+# 触发：main 推送（版本号在 config.yaml，改号即发版）；workflow_dispatch 可手跑。
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  ARCHITECTURES: '["amd64", "aarch64"]'
+  IMAGE_NAME: huijian-voice
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+jobs:
+  # ========== 0. 代码质量检查（网关同款五门禁） ==========
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check shell scripts syntax
+        run: |
+          apt-get update -qq && apt-get install -y -qq shellcheck > /dev/null 2>&1 || true
+          for f in huijian_voice/run.sh huijian_voice/boot.sh huijian_voice/nginx.sh huijian_voice/tests/e2e/*.sh; do
+            echo "检查 $f ..."
+            bash -n "$f" || exit 1
+            shellcheck "$f" || echo "⚠ shellcheck 警告（非阻塞）"
+          done
+
+      - name: Check YAML files syntax
+        run: |
+          pip install -q pyyaml
+          python3 -c '
+          import yaml, sys, glob
+          for f in glob.glob("**/*.yaml", recursive=True):
+              try:
+                  yaml.safe_load(open(f))
+                  print(f"OK {f}")
+              except Exception as e:
+                  print(f"FAIL {f}: {e}")
+                  sys.exit(1)
+          '
+
+      - name: Check JSON files syntax
+        run: |
+          for f in $(find . -name "*.json" -not -path "./.git/*"); do
+            python3 -c "import json; json.load(open('$f'))" || exit 1
+            echo "OK $f"
+          done
+
+      - name: Python syntax & unit tests
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq libopus0 > /dev/null 2>&1 || true
+          pip install -q -r huijian_voice/requirements.txt pytest pyyaml
+          python3 -m compileall -q huijian_voice/core huijian_voice/tests
+          python3 -m pytest huijian_voice/tests -q
+
+      - name: Verify version consistency (四源)
+        run: |
+          VERSION=$(grep '^version:' huijian_voice/config.yaml | head -1 | awk -F'"' '{print $2}')
+          if [ -z "$VERSION" ]; then
+            echo "::error title=config.yaml 版本提取失败::'^version:' 行格式漂移？"
+            exit 1
+          fi
+          echo "config.yaml 版本: $VERSION"
+          HTML_VER=$(grep 'CURRENT_VERSION = "' huijian_voice/www/index.html | sed 's/.*CURRENT_VERSION = "\([^"]*\)".*/\1/')
+          echo "index.html 版本: $HTML_VER"
+          [ "$VERSION" = "$HTML_VER" ] || { echo "FAIL 版本不一致"; exit 1; }
+          python3 - "$VERSION" <<'PYEOF'
+          import json, sys
+          want = sys.argv[1]
+          vj = json.load(open('huijian_voice/www/version.json'))
+          mf = json.load(open('huijian_voice/custom_components/huijian_ai/manifest.json'))
+          for label, got in [("version.json.addon_version", vj.get("addon_version")),
+                             ("version.json.integration_version", vj.get("integration_version")),
+                             ("manifest.json.version", mf.get("version"))]:
+              status = "OK" if got == want else "FAIL"
+              print(f"{status} {label}: {got}")
+              if got != want:
+                  sys.exit(1)
+          PYEOF
+          echo "✅ 所有版本号一致: $VERSION"
+
+      - name: nginx config sanity (非阻塞提示)
+        run: |
+          # 完整语法校验在 e2e job 的真容器里跑（nginx -t 需要镜像内二进制）；
+          # 此处仅拦最劣级的花括号失衡
+          python3 - <<'PYEOF'
+          s = open('huijian_voice/nginx-huijian.conf').read()
+          assert s.count('{') == s.count('}'), "nginx conf 花括号失衡"
+          print("OK nginx-huijian.conf 括号平衡")
+          PYEOF
+
+
+
+  # ========== 1. 读取版本号 & 准备变更日志 ==========
+  prepare:
+    name: Prepare
+    needs: lint
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      changelog: ${{ steps.changelog.outputs.changelog }}
+    steps:
+      - uses: actions/checkout@v4
+        # v1.7.12（审计 I-3）：changelog 兜底路径要 `git log --oneline -10`，
+        # 默认 fetch-depth=1 只能给出 1 条——给 20 条历史
+        with:
+          fetch-depth: 20
+
+      - name: Extract version from config.yaml
+        id: version
+        run: |
+          VERSION=$(grep '^version:' huijian_voice/config.yaml | head -1 | awk -F'"' '{print $2}')
+          # v1.7.12（第 6 轮审计 I-1）：空版本 fail-fast——prepare 是 build/
+          # manifest/release 三个下游的版本真源，空串会让镜像 tag 成
+          # `:latest`+`:`、Release 名成 "v"，污染仓库不可逆
+          if [ -z "$VERSION" ]; then
+            echo "::error title=config.yaml 版本提取失败::'^version:' 行缺失或格式漂移"
+            exit 1
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "提取到版本号: $VERSION"
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # 将 changelog 写入临时文件，避免 echo -e 破坏中文编码（Gitee 乱码根因）
+          CHANGELOG_FILE="/tmp/changelog.md"
+          
+          if [ -f CHANGELOG.md ]; then
+            awk -v ver="${{ steps.version.outputs.version }}" '
+              /^## \[/{ found=0 }
+              $0 ~ "^## \\["ver"]" { found=1; print; next }   # v1.6.26（E-3）：命中行要输出——旧 next 吞掉 "## [x.y.z]" 标题，Release 正文裸开头
+              /^## \[/{ if(found) exit }
+              found { print }
+            ' CHANGELOG.md | head -50 > "$CHANGELOG_FILE"
+          fi
+          
+          if [ ! -s "$CHANGELOG_FILE" ]; then
+            # 从 git log 自动生成 changelog（最近 10 条提交）
+            {
+              echo "## v${{ steps.version.outputs.version }}"
+              echo ""
+              git log --oneline -10 --format='- %h: %s'
+            } > "$CHANGELOG_FILE"
+          fi
+          
+          # 用文件内容设置输出（避免 echo -e 破坏 UTF-8 中文）
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "changelog<<$EOF" >> $GITHUB_OUTPUT
+          cat "$CHANGELOG_FILE" >> $GITHUB_OUTPUT
+          echo "$EOF" >> $GITHUB_OUTPUT
+
+
+  # ========== 2. 构建 Docker 镜像 ==========
+  init:
+    name: Init
+    needs: prepare
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get build matrix
+        id: matrix
+        uses: home-assistant/builder/actions/prepare-multi-arch-matrix@2026.06.0
+        with:
+          architectures: ${{ env.ARCHITECTURES }}
+          image-name: ${{ env.IMAGE_NAME }}
+
+
+  build:
+    name: Build ${{ matrix.arch }}
+    needs: [prepare, init]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.init.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        uses: home-assistant/builder/actions/build-image@2026.06.0
+        with:
+          arch: ${{ matrix.arch }}
+          context: "huijian_voice"
+          container-registry-password: ${{ secrets.GITHUB_TOKEN }}
+          image: ${{ matrix.image }}
+          image-tags: |
+            ${{ needs.prepare.outputs.version }}
+            latest
+          push: "true"
+          version: ${{ needs.prepare.outputs.version }}
+
+  # ========== 2.5 真镜像 E2E（发布硬门禁：构建交付镜像本体+真模型+协议断言） ==========
+  # 与网关 e2e 同定位：无 continue-on-error——本 job 失败即阻断 manifest/release。
+  # 覆盖：Dockerfile/s6/nginx/ModelStore 真下载/三通道协议/版本链/静态根 token
+  # 缺席断言/优雅停机。断言脚本与本地 run_local.sh 单一事实源（e2e_client.py）。
+  e2e:
+    name: E2E real image
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run image E2E
+        run: bash huijian_voice/tests/e2e/run_e2e.sh
+
+
+
+  manifest:
+    name: Manifest
+    # e2e 为 v1.6.23 起的硬门禁（详见 e2e job 注释）
+    needs: [prepare, init, build, e2e]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish multi-arch manifest
+        uses: home-assistant/builder/actions/publish-multi-arch-manifest@2026.06.0
+        with:
+          architectures: ${{ env.ARCHITECTURES }}
+          container-registry-password: ${{ secrets.GITHUB_TOKEN }}
+          image-name: ${{ env.IMAGE_NAME }}
+          image-tags: |
+            ${{ needs.prepare.outputs.version }}
+            latest
+
+      # v1.6.4 定案（实验实锤）：GitHub【没有】visibility 变更 API——
+      # REST PUT/PATCH × /user/ 与 /users/{owner}/ 全 404、GraphQL 公开
+      # schema 无该 mutation（updateV3RegistryPackage 已被移除）。
+      # 但 Actions 用 GITHUB_TOKEN 首推的包【继承仓库可见性】：public 仓库
+      # ⇒ 新包自动 public（amd64 删包重建实测 anon 200）。历史包因创建时
+      # 走了本地 PAT 推送被永久定死 private，修复手段=删包+重推：
+      #   gh api -X DELETE /user/packages/container/<pkg>
+      # 探测注意：token 必须带 service=ghcr.io 且 manifest GET 要带
+      # OCI/idx Accept 头，否则 audience 错 token 会得到误导性 404。
+      - name: Check package visibility
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -u
+          check_pull() {
+            FAILED=""
+            for p in "${IMAGE_NAME}" "amd64-${IMAGE_NAME}" "aarch64-${IMAGE_NAME}"; do
+              T=$(curl -fsS "https://ghcr.io/token?service=ghcr.io&scope=repository:${GITHUB_REPOSITORY_OWNER}/$p:pull" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p' || true)
+              C=$(curl -s -o /dev/null -w "%{http_code}" \
+                   -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json" \
+                   "https://ghcr.io/v2/${GITHUB_REPOSITORY_OWNER}/$p/manifests/${VERSION:-latest}" \
+                   -H "Authorization: Bearer ${T:-none}" || echo 000)
+              if [ "$C" = "200" ]; then
+                echo "✅ ${p} 匿名可拉（public）"
+              else
+                FAILED="${FAILED} ${p}(HTTP $C)"
+              fi
+            done
+          }
+          check_pull
+          if [ -n "${FAILED}" ]; then
+            # v1.6.9：复测一次再定罪——排除 ghcr 传播延迟/瞬时网络导致的误报
+            echo "⏳ 首轮失败，15 秒后复测：${FAILED}"
+            sleep 15
+            check_pull
+          fi
+          if [ -n "${FAILED}" ]; then
+            # v1.6.9（外部审计确认）：由 ::warning 升级为阻断——config.yaml 已启用
+            # image: 路由，包不可匿名拉取时用户安装必失败，绿 CI 是掩盖故障
+            echo "::error title=ghcr 包不可匿名拉取::${FAILED} —— image 路线安装会失败。修复：gh api -X DELETE /user/packages/container/<pkg> 删包后重推 CI 自动按仓库 public 重建（详见本文件上方注释）"
+            exit 1
+          fi
+
+
+
+  # ========== 2.5 国内镜像站缓存预热（v1.6.18）==========
+  # Supervisor 的 image 只支持单一 URL、无多源故障转移，客户安装快慢取决于
+  # config.yaml 所指透传站的缓存冷热（冷缓存=现场回源 ghcr.io，慢且偶发 404）。
+  # 发版后立即用本作业把新版本双架构全部 blobs 经各镜像站完整拉一遍，强制
+  # 边缘缓存回源命中——首装客户直接命中热缓存。best-effort：continue-on-error
+  # 镜像站抖动不阻塞 Release（ghcr 源站才是唯一真身，预热只优化体验）。
+  # 注：latest tag 与本版本 tag 指向同一批 blobs，预热版本 tag 即覆盖。
+  warm-mirrors:
+    name: Warm CN mirrors
+    needs: [prepare, manifest]
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 30
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      OWNER: ${{ github.repository_owner }}
+    steps:
+      - name: Pre-pull all blobs via ghcr.1ms.run & ghcr.nju.edu.cn
+        run: |
+          set -u
+          IDX_ACCEPT="application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json"
+          MAN_ACCEPT="application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
+          token_of() { # $1=repo $2=realm(空=匿名) $3=service
+            [ -z "$2" ] && return 0
+            curl -fsS -m 15 "$2?service=$3&scope=repository:${OWNER}/$1:pull" \
+              | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("token") or d.get("access_token",""))' || true
+          }
+          # v1.6.19（第六轮审计 C′）四处纠偏：
+          # ① OCI platform.architecture 值是 "arm64" 而非 "aarch64"——旧过滤
+          #   永不命中，全部落到 ms[0]（可能取到 attestation blob 摘要）。
+          #   现显式映射且无匹配时报错跳过，绝不瞎猜。
+          # ② MAN/BLOBS 的 curl 无兜底：整个函数被 `warm_via || echo` 调用时
+          #   set -e 失效，404 → MAN 空 → BLOBS 空 → 循环不执行 → "ok=0
+          #   fail=0" 假绿零预热（v1.6.18 首发即此形态）。现逐段判空计入 FAIL。
+          # ③ OK/FAIL/BYTES 改按 arch 归零，日志不再跨 arch 累计失真。
+          # ④ 1ms 对冷 tag 是多边缘 200/404 闪断（分钟~小时自愈），3×20s 密集
+          #   重试无用且易自触发限流（记忆定案：预热低频单轮）→ 改单轮 +
+          #   调用方 300s 长间隔一次性复查；nju 慢站超时放宽到 180s。
+          warm_via() { # $1=reg $2=realm $3=service $4=timeout秒；返回码=是否全绿
+            local REG="$1" REALM="$2" SVC="$3" TMO="${4:-60}"
+            local TOTOK=0 TOFAIL=0
+            for ARCH in amd64 aarch64; do
+              local OCI_ARCH; OCI_ARCH=$([ "$ARCH" = aarch64 ] && echo arm64 || echo "$ARCH")
+              # v1.6.26（E-10）：仓名由 workflow env IMAGE_NAME 派生（与 build
+              # 推送源同一真源）——旧硬编码在 config.yaml image 改名后会让
+              # 预热静默打向不存在的仓库名（全程 404 也"尽力而为"地绿）
+              local REPO="${ARCH}-${IMAGE_NAME}" TOK
+              TOK=$(token_of "$REPO" "$REALM" "$SVC")
+              local -a HDRS=()
+              [ -n "$TOK" ] && HDRS+=(-H "Authorization: Bearer $TOK")
+              local OK=0 FAIL=0 BYTES=0
+              local IDX="" TRY
+              for TRY in 1 2; do
+                IDX=$(curl -fsS -m "$TMO" "${HDRS[@]}" -H "Accept: $IDX_ACCEPT" "https://$REG/v2/$REPO/manifests/$VERSION" 2>/dev/null || true)
+                [ -n "$IDX" ] && break
+                [ "$TRY" = 1 ] && { echo "  [$REG] $REPO manifest 冷缓存/抖动，15s 后单次复查"; sleep 15; }
+              done
+              if [ -z "$IDX" ]; then echo "  [$REG] ❌ $REPO manifest 不可达"; TOFAIL=$((TOFAIL+1)); continue; fi
+              local MDIG
+              MDIG=$(printf '%s' "$IDX" | python3 -c 'import json,sys
+          i=json.load(sys.stdin);ms=i.get("manifests") or []
+          hit=[m for m in ms if (m.get("platform") or {}).get("architecture")==sys.argv[1] and (m.get("platform") or {}).get("os")=="linux"]
+          print(hit[0]["digest"] if hit else "")' "$OCI_ARCH" 2>/dev/null || true)
+              if [ -z "$MDIG" ]; then echo "  [$REG] ❌ $REPO index 中无 $OCI_ARCH/linux 平台条目（异常形态，跳过勿瞎猜）"; TOFAIL=$((TOFAIL+1)); continue; fi
+              local MAN
+              MAN=$(curl -fsS -m "$TMO" "${HDRS[@]}" -H "Accept: $MAN_ACCEPT" "https://$REG/v2/$REPO/manifests/$MDIG" 2>/dev/null || true)
+              if [ -z "$MAN" ]; then echo "  [$REG] ❌ $REPO 平台 manifest($MDIG) 不可达"; TOFAIL=$((TOFAIL+1)); continue; fi
+              local BLOBS
+              BLOBS=$(printf '%s' "$MAN" | python3 -c 'import json,sys;m=json.load(sys.stdin);print(m["config"]["digest"]);[print(l["digest"]) for l in m.get("layers",[])]' 2>/dev/null || true)
+              if [ -z "$BLOBS" ]; then echo "  [$REG] ❌ $REPO manifest 解析失败/无 blobs"; TOFAIL=$((TOFAIL+1)); continue; fi
+              local R CODE SZ B
+              for B in $BLOBS; do
+                R=$(curl -s -o /dev/null -m 600 "${HDRS[@]}" -H "Accept: application/vnd.oci.image.layer.v1.tar+gzip" -w "%{http_code} %{size_download}" -L "https://$REG/v2/$REPO/blobs/$B" || echo "000 0")
+                CODE="${R% *}"; SZ="${R#* }"
+                if [ "$CODE" = "200" ]; then OK=$((OK+1)); BYTES=$((BYTES+SZ)); else FAIL=$((FAIL+1)); echo "  [$REG] ⚠️ blob ${B:0:19} HTTP $CODE"; fi
+              done
+              echo "  [$REG] $REPO:$VERSION 预热完成 (ok=$OK fail=$FAIL $((BYTES/1024/1024))MB)"
+              TOTOK=$((TOTOK+OK)); TOFAIL=$((TOFAIL+FAIL))
+            done
+            echo "  [$REG] 汇总 ok=$TOTOK fail=$TOFAIL"
+            [ "$TOFAIL" -eq 0 ]
+          }
+          # 1ms：冷 tag 边缘 404 属闪断形态，短重试无效——单轮失败则 300s 后
+          # 一次性复查（给边缘同步留时间），仍失败才告警。
+          warm_via ghcr.1ms.run "https://ghcr.1ms.run/openapi/v1/auth/token" ghcr.1ms.run 60 \
+            || { echo "  1ms 首轮未全绿，300s 后复查一次…"; sleep 300; \
+                 warm_via ghcr.1ms.run "https://ghcr.1ms.run/openapi/v1/auth/token" ghcr.1ms.run 60 \
+                 || echo "::warning title=1ms.run 预热未全绿::边缘缓存仍冷（多边缘 200/404 闪断属常态），客户首装或回源慢；处理见加载项 README FAQ"; }
+          warm_via ghcr.nju.edu.cn "" "" 180 \
+            || echo "::warning title=nju 备用源预热未全绿::仅影响手动换源场景，不阻塞发布"
+
+
+  # ========== 3. 创建 GitHub Release ==========
+  release:
+    name: Release
+    needs: [prepare, manifest]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create or Update Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.prepare.outputs.version }}
+          name: v${{ needs.prepare.outputs.version }}
+          body: ${{ needs.prepare.outputs.changelog }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+
+  # ========== 4. Gitee Release 自动补发（v1.6.21 起替代手工 POST） ==========
+  # 定案背景：Gitee 无 webhook 自动 release，历史做法是发版后手动补最新
+  # 一条（"只发最新版"规矩）。此 job 把该人工步骤自动化：body 取
+  # CHANGELOG 对应版本段、target_commitish 必带（API 缺省行为不可靠）、
+  # 幂等（已存在同 tag 跳过）、401 时给出 BOM/凭据排障提示
+  # （.gitee_token 曾带 UTF-8 BOM 致 API 崩，Secret 值必须是纯 ASCII token）。
+  gitee-release:
+    name: Gitee Release
+    needs: [prepare, release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create Gitee Release (idempotent)
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          GITEE_REPO: ${{ github.repository }}  # gitee 侧假定同名仓（双远端规矩）
+          COMMIT: ${{ github.sha }}
+          # v1.7.12（第 6 轮审计 I-4）：prepare 已生成过 CHANGELOG 段/兜底
+          # 正文——直传复用，不再两处独立解析（漂移源 + 缺段崩 job）
+          PREPARED: ${{ needs.prepare.outputs.changelog }}
+        run: |
+          set -eu
+          if [ -z "${GITEE_TOKEN:-}" ]; then
+            echo "::error title=GITEE_TOKEN 未配置::仓库 Settings→Secrets→Actions 添加 GITEE_TOKEN（纯 ASCII，勿带 BOM）"
+            exit 1
+          fi
+          case "$GITEE_TOKEN" in
+            *[![:print:]]*|$'\xef'*) echo "::error title=GITEE_TOKEN 含异常字节::疑似复制进 BOM/换行，重新设置纯 token"; exit 1;;
+          esac
+          python3 - <<'PY'
+          import io, json, os, sys, urllib.request
+          ver, sha = os.environ["VERSION"], os.environ["COMMIT"]
+          tok = os.environ["GITEE_TOKEN"].strip()
+          if not tok.isascii():
+              print("::error title=GITEE_TOKEN 非 ASCII::含 BOM 或不可见字符"); sys.exit(1)
+          api = "https://gitee.com/api/v5/repos/" + os.environ["GITEE_REPO"]
+          def call(url, data=None):
+              req = urllib.request.Request(
+                  url,
+                  data=json.dumps(data).encode() if data else None,
+                  method="POST" if data else "GET",
+                  headers={"Content-Type": "application/json"} if data else {})
+              return json.load(urllib.request.urlopen(req, timeout=30))
+          existing = call(f"{api}/releases?access_token={tok}&per_page=100")
+          if any(r.get("tag_name") == f"v{ver}" for r in existing):
+              print(f"v{ver} Gitee Release 已存在，跳过（幂等）"); sys.exit(0)
+          body = ""
+          if os.path.exists("CHANGELOG.md"):
+              log = io.open("CHANGELOG.md", encoding="utf-8").read()
+              if f"## [{ver}]" in log:
+                  i = log.index(f"## [{ver}]")
+                  rest = log[i + 1:]
+                  j = rest.index("## [", 3) if "## [" in rest[3:] else len(rest)
+                  body = log[i:i + 1 + j].strip()
+          if not body:
+              # v1.7.12（审计 I-4）：缺段不再 ValueError 崩 job——优先复用
+              # prepare 产物（含其 git-log 兜底），仍无则给最小说明
+              body = (os.environ.get("PREPARED") or "").strip()
+              if not body:
+                  body = f"## v{ver}\n\n完整变更记录见 GitHub Release v{ver}。"
+          body = body + "\n\n---\n完整记录见 GitHub 仓库 CHANGELOG.md 与 Release v%s。" % ver
+          title_line = body.splitlines()[0]
+          r = call(f"{api}/releases?access_token={tok}", {
+              "tag_name": f"v{ver}", "name": f"v{ver}", "body": body,
+              "target_commitish": sha, "prerelease": False})
+          print(f"Gitee Release 已创建: id={r['id']} tag={r['tag_name']}")
+          PY

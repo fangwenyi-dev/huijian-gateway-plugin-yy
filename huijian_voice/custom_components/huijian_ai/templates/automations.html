@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>传感器自动化管理</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f5f5; padding: 20px; color: #333; }
+        .container { max-width: 800px; margin: 0 auto; }
+        h1 { font-size: 24px; margin-bottom: 4px; color: #03a9f4; }
+        .subtitle { font-size: 14px; color: #999; margin-bottom: 12px; }
+        .nav-buttons { margin-bottom: 16px; }
+        .nav-buttons a { display: inline-block; background: #1976d2; color: white; text-decoration: none; padding: 8px 16px; border-radius: 4px; font-size: 14px; }
+        .nav-buttons a:hover { background: #1565c0; }
+        .card { background: white; border-radius: 8px; padding: 16px; margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.12); border-left: 4px solid #ff9800; }
+        .card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }
+        .card-trigger { font-size: 18px; font-weight: 600; color: #e65100; }
+        .card-tag { display: inline-block; background: #fff3e0; color: #e65100; padding: 2px 8px; border-radius: 4px; font-size: 12px; margin-left: 8px; vertical-align: middle; }
+        .delete-btn { background: #f44336; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 14px; }
+        .delete-btn:hover { background: #d32f2f; }
+        .delete-btn:disabled { background: #ccc; cursor: not-allowed; }
+        .info { font-size: 14px; color: #666; margin-bottom: 8px; }
+        .actions-box { background: #f5f5f5; border-radius: 4px; padding: 8px 12px; font-size: 13px; }
+        .actions-title { font-weight: 600; margin-bottom: 4px; color: #555; }
+        .action-item { padding: 2px 0; color: #777; }
+        .empty-state { text-align: center; padding: 40px; color: #999; }
+        .loading { text-align: center; padding: 40px; color: #666; }
+        .refresh-btn { background: #4caf50; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 14px; margin-bottom: 16px; }
+        .refresh-btn:hover { background: #388e3c; }
+        .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #333; color: white; padding: 12px 24px; border-radius: 4px; display: none; z-index: 1000; }
+        .toast.success { background: #4caf50; }
+        .toast.error { background: #f44336; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>传感器自动化</h1>
+        <div class="subtitle">当传感器数值满足条件时自动执行操作</div>
+        <div class="nav-buttons">
+            <a href="/api/huijian-ai/manage-page">&larr; 返回智能场景总览</a>
+        </div>
+        <button class="refresh-btn" onclick="loadAutomations()">刷新列表</button>
+        <div id="content">
+            <div class="loading">加载中...</div>
+        </div>
+    </div>
+    <div class="toast" id="toast"></div>
+
+    <script>
+        const API_BASE = '/api/huijian-ai/automations';
+
+        async function loadAutomations() {
+            const content = document.getElementById('content');
+            content.innerHTML = '<div class="loading">加载中...</div>';
+
+            try {
+                const response = await fetch(API_BASE);
+                const data = await response.json();
+
+                if (!data.success) {
+                    throw new Error(data.error || '加载失败');
+                }
+
+                const automations = data.automations || [];
+
+                if (automations.length === 0) {
+                    content.innerHTML = '<div class="empty-state">暂无传感器自动化<br><br>通过语音创建，如：<br>"当温度大于29度就打开窗户"</div>';
+                    return;
+                }
+
+                content.innerHTML = automations.map(a => {
+                    const triggerText = a.trigger_display || a.trigger_entity;
+                    return '<div class="card" id="auto-' + a.automation_id + '">' +
+                        '<div class="card-header">' +
+                            '<div><span class="card-trigger">' + escapeHtml(triggerText) + '</span>' +
+                            '<span class="card-tag">传感器自动化</span></div>' +
+                            '<button class="delete-btn" onclick="deleteAutomation(\'' + a.automation_id + '\', \'' + escapeHtml(triggerText) + '\')">删除</button>' +
+                        '</div>' +
+                        '<div class="info">' +
+                            '创建时间: ' + (a.created_at ? new Date(a.created_at).toLocaleString('zh-CN') : '未知') +
+                            (a.last_triggered ? ' | 上次触发: ' + new Date(a.last_triggered).toLocaleString('zh-CN') : ' | 尚未触发') +
+                        '</div>' +
+                        '<div class="actions-box">' +
+                            '<div class="actions-title">执行动作 (' + a.action_count + '个):</div>' +
+                            (a.action_summaries || []).map(function(s) { return '<div class="action-item">- ' + escapeHtml(s) + '</div>'; }).join('') +
+                        '</div>' +
+                    '</div>';
+                }).join('');
+
+            } catch (error) {
+                content.innerHTML = '<div class="empty-state">加载失败: ' + escapeHtml(error.message) + '</div>';
+            }
+        }
+
+        async function deleteAutomation(automationId, triggerText) {
+            if (!confirm('确定要删除传感器自动化 "' + triggerText + '" 吗？')) {
+                return;
+            }
+
+            const btn = event.target;
+            btn.disabled = true;
+            btn.textContent = '删除中...';
+
+            try {
+                const response = await fetch(API_BASE + '/' + automationId, { method: 'DELETE' });
+                const data = await response.json();
+                if (data.success) {
+                    showToast('删除成功', 'success');
+                    document.getElementById('auto-' + automationId).remove();
+                    const remaining = document.querySelectorAll('.card');
+                    if (remaining.length === 0) {
+                        document.getElementById('content').innerHTML =
+                            '<div class="empty-state">暂无传感器自动化<br><br>通过语音创建，如：<br>"当温度大于29度就打开窗户"</div>';
+                    }
+                } else {
+                    throw new Error(data.error || '删除失败');
+                }
+            } catch (error) {
+                showToast(error.message, 'error');
+                btn.disabled = false;
+                btn.textContent = '删除';
+            }
+        }
+
+        function showToast(message, type) {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.className = 'toast ' + type;
+            toast.style.display = 'block';
+            setTimeout(function() { toast.style.display = 'none'; }, 2000);
+        }
+
+        function escapeHtml(text) {
+            if (!text) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        loadAutomations();
+    </script>
+</body>
+</html>

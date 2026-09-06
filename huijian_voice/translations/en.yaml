@@ -1,0 +1,26 @@
+configuration:
+  model_auto_download:
+    name: Automatic model download
+    description: >-
+      When enabled, the voice models (~1.3 GB total: bilingual streaming STT +
+      multilang TTS) download automatically on first start, with a three-tier
+      mirror fallback. When disabled, place extracted model folders under
+      /data/models/import/ and restart — choose this for fully offline hosts.
+  auto_install_integration:
+    name: Auto-install huijian_ai integration
+    description: >-
+      Copies the bundled huijian_ai integration into HA custom_components on
+      every start (skipped when versions match). A HA Core restart is required
+      after first install or upgrade. Turn off only if you manage the
+      integration yourself.
+  idle_unload_minutes:
+    name: Idle unload (minutes)
+    description: >-
+      0 keeps models resident in RAM (default, fastest). Set N>0 to free
+      ASR/TTS memory after N idle minutes — useful on small devices; the next
+      utterance then pays a ~2 s reload. Applies live, no restart needed.
+  log_level:
+    name: Log level
+    description: >-
+      info is recommended. Use debug to trace every utterance through the NLU
+      cascade; a restart is required. warning/error for very quiet setups.

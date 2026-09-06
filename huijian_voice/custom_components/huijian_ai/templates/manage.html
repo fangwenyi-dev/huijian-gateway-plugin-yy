@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>智能场景管理</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f5f5; padding: 20px; color: #333; }
+        .container { max-width: 800px; margin: 0 auto; }
+        h1 { font-size: 24px; margin-bottom: 4px; color: #03a9f4; }
+        .subtitle { font-size: 14px; color: #999; margin-bottom: 20px; }
+        .section-title { font-size: 18px; font-weight: 600; color: #333; margin: 20px 0 12px 0; padding-bottom: 8px; border-bottom: 2px solid #e0e0e0; }
+        .card { background: white; border-radius: 8px; padding: 16px; margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
+        .card.scene { border-left: 4px solid #1976d2; }
+        .card.auto { border-left: 4px solid #ff9800; }
+        .card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }
+        .card-trigger { font-size: 18px; font-weight: 600; }
+        .card-trigger.scene { color: #1976d2; }
+        .card-trigger.auto { color: #e65100; }
+        .card-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; margin-left: 8px; vertical-align: middle; }
+        .card-tag.scene { background: #e3f2fd; color: #1976d2; }
+        .card-tag.auto { background: #fff3e0; color: #e65100; }
+        .delete-btn { background: #f44336; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 14px; }
+        .delete-btn:hover { background: #d32f2f; }
+        .delete-btn:disabled { background: #ccc; cursor: not-allowed; }
+        .edit-btn { background: #4caf50; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 14px; margin-left: 8px; }
+        .edit-btn:hover { background: #388e3c; }
+        .info { font-size: 14px; color: #666; margin-bottom: 8px; }
+        .actions-box { background: #f5f5f5; border-radius: 4px; padding: 8px 12px; font-size: 13px; }
+        .actions-title { font-weight: 600; margin-bottom: 4px; color: #555; }
+        .action-item { padding: 2px 0; color: #777; }
+        .empty-state { text-align: center; padding: 40px; color: #999; }
+        .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #333; color: white; padding: 12px 24px; border-radius: 4px; display: none; z-index: 1000; }
+        .toast.success { background: #4caf50; }
+        .toast.error { background: #f44336; }
+        .modal { display: none; position: fixed; z-index: 999; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); }
+        .modal-content { background: #fff; margin: 80px auto; padding: 24px; max-width: 500px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+        .modal-content h2 { font-size: 20px; margin-bottom: 16px; color: #333; }
+        .modal-content label { display: block; font-size: 14px; color: #555; margin-bottom: 4px; }
+        .edit-input { width: 100%; padding: 10px; margin-bottom: 16px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; box-sizing: border-box; }
+        .edit-input:focus { border-color: #03a9f4; outline: none; }
+        .modal-buttons { display: flex; gap: 8px; justify-content: flex-end; }
+        .save-btn { background: #03a9f4; color: white; border: none; padding: 10px 24px; border-radius: 4px; cursor: pointer; font-size: 16px; }
+        .save-btn:hover { background: #0288d1; }
+        .save-btn:disabled { background: #ccc; cursor: not-allowed; }
+        .cancel-btn { background: #999; color: white; border: none; padding: 10px 24px; border-radius: 4px; cursor: pointer; font-size: 16px; }
+        .cancel-btn:hover { background: #777; }
+        .unauth-box { text-align: center; padding: 60px 20px; }
+        .unauth-box .icon { font-size: 64px; color: #ff9800; margin-bottom: 16px; }
+        .unauth-box h2 { font-size: 20px; color: #333; margin-bottom: 8px; }
+        .unauth-box p { font-size: 14px; color: #999; margin-bottom: 20px; }
+        .login-btn { display: inline-block; background: #03a9f4; color: white; text-decoration: none; padding: 12px 32px; border-radius: 6px; font-size: 16px; }
+        .login-btn:hover { background: #0288d1; }
+        .test-btn { background: #00897b; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 14px; margin-left: 8px; }
+        .test-btn:hover { background: #00695c; }
+        .test-btn:disabled { background: #ccc; cursor: not-allowed; }
+        .log-section { margin-top: 24px; border-top: 2px solid #e0e0e0; padding-top: 16px; }
+        .log-header { font-size: 16px; font-weight: 600; color: #555; cursor: pointer; user-select: none; padding: 8px 0; }
+        .log-header:hover { color: #03a9f4; }
+        .log-content { max-height: 400px; overflow-y: auto; font-size: 13px; }
+        .log-table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+        .log-table th { background: #f5f5f5; padding: 6px 8px; text-align: left; font-weight: 600; color: #555; font-size: 12px; border-bottom: 2px solid #e0e0e0; }
+        .log-table td { padding: 6px 8px; border-bottom: 1px solid #eee; color: #666; font-size: 12px; }
+        .log-table tr:hover td { background: #fafafa; }
+        .log-empty { color: #999; padding: 16px; text-align: center; font-size: 14px; }
+        .log-badge { display: inline-block; background: #e0f2f1; color: #00695c; padding: 1px 6px; border-radius: 3px; font-size: 11px; margin-left: 8px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>智能场景</h1>
+        <div class="subtitle">语音场景 + 传感器自动化 统一管理</div>
+        <div id="content">{content_html}</div>
+        <div class="log-section">
+            <div class="log-header" onclick="toggleLogs()">&#9654; 触发日志 <span class="log-badge" id="logCount">0</span></div>
+            <div id="logContent" class="log-content" style="display:none;">
+                <div class="log-empty" id="logEmpty">暂无触发记录</div>
+                <table class="log-table" id="logTable" style="display:none;">
+                    <thead><tr><th>时间</th><th>自动化ID</th><th>传感器</th><th>值</th><th>原因</th></tr></thead>
+                    <tbody id="logBody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    <div class="toast" id="toast"></div>
+
+    <script>
+        const SCENES_API = '/api/huijian-ai/voice-scenes';
+        const AUTOS_API = '/api/huijian-ai/automations';
+
+        async function safeJson(resp) {
+            try { return await resp.json(); }
+            catch (e) {
+                const text = await resp.text();
+                throw new Error('服务器返回格式错误: ' + text.slice(0, 100));
+            }
+        }
+
+        async function deleteScene(sceneId, triggerPhrase) {
+            if (!confirm('确定要删除语音场景 "' + triggerPhrase + '" 吗？')) { return; }
+            const btn = event.target;
+            btn.disabled = true;
+            btn.textContent = '删除中...';
+            try {
+                const res = await fetch(SCENES_API + '/' + sceneId, { method: 'DELETE' });
+                const data = await safeJson(res);
+                if (data.success) {
+                    showToast('删除成功', 'success');
+                    var el = document.getElementById('scene-' + sceneId);
+                    if (el) el.remove();
+                } else { throw new Error(data.error || '删除失败'); }
+            } catch (e) {
+                showToast(e.message, 'error');
+                btn.disabled = false;
+                btn.textContent = '删除';
+            }
+        }
+
+        async function deleteAutomation(automationId, triggerText) {
+            if (!confirm('确定要删除传感器自动化 "' + triggerText + '" 吗？')) { return; }
+            const btn = event.target;
+            btn.disabled = true;
+            btn.textContent = '删除中...';
+            try {
+                const res = await fetch(AUTOS_API + '/' + automationId, { method: 'DELETE' });
+                const data = await safeJson(res);
+                if (data.success) {
+                    showToast('删除成功', 'success');
+                    var el = document.getElementById('auto-' + automationId);
+                    if (el) el.remove();
+                } else { throw new Error(data.error || '删除失败'); }
+            } catch (e) {
+                showToast(e.message, 'error');
+                btn.disabled = false;
+                btn.textContent = '删除';
+            }
+        }
+
+        function showToast(message, type) {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.className = 'toast ' + type;
+            toast.style.display = 'block';
+            setTimeout(function() { toast.style.display = 'none'; }, 2000);
+        }
+
+        /* -- Edit scene modal -- */
+        function openEditScene(sceneId, triggerPhrase) {
+            document.getElementById('editSceneId').value = sceneId;
+            document.getElementById('editTriggerPhrase').value = triggerPhrase;
+            document.getElementById('editModal').style.display = 'block';
+        }
+
+        async function saveEdit() {
+            const sceneId = document.getElementById('editSceneId').value;
+            const newPhrase = document.getElementById('editTriggerPhrase').value.trim();
+            if (!newPhrase) { showToast('请输入触发词', 'error'); return; }
+            const btn = document.getElementById('editSaveBtn');
+            btn.disabled = true; btn.textContent = '保存中...';
+            try {
+                const res = await fetch(SCENES_API + '/' + sceneId, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ trigger_phrase: newPhrase })
+                });
+                const data = await safeJson(res);
+                if (data.success) {
+                    showToast('更新成功', 'success');
+                    closeEdit();
+                    setTimeout(function() { location.reload(); }, 500);
+                } else { showToast(data.error || '更新失败', 'error'); }
+            } catch (e) { showToast(e.message || '网络错误', 'error'); }
+            btn.disabled = false; btn.textContent = '保存';
+        }
+
+        function closeEdit() {
+            document.getElementById('editModal').style.display = 'none';
+        }
+
+        /* -- Edit automation modal -- */
+        function openEditAuto(autoId, entityId, above, below) {
+            document.getElementById('editAutoId').value = autoId;
+            document.getElementById('editAutoEntity').value = entityId;
+            document.getElementById('editAutoAbove').value = (above && above !== 'None') ? above : '';
+            document.getElementById('editAutoBelow').value = (below && below !== 'None') ? below : '';
+            document.getElementById('editAutoModal').style.display = 'block';
+        }
+
+        async function saveAutoEdit() {
+            const autoId = document.getElementById('editAutoId').value;
+            const entity = document.getElementById('editAutoEntity').value.trim();
+            if (!entity) { showToast('请输入传感器实体ID', 'error'); return; }
+            const above = document.getElementById('editAutoAbove').value;
+            const below = document.getElementById('editAutoBelow').value;
+            const trigger = { entity_id: entity };
+            if (above) trigger.above = parseFloat(above);
+            if (below) trigger.below = parseFloat(below);
+            const btn = document.getElementById('autoEditSaveBtn');
+            btn.disabled = true; btn.textContent = '保存中...';
+            try {
+                const res = await fetch(AUTOS_API + '/' + autoId, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ trigger: trigger })
+                });
+                const data = await safeJson(res);
+                if (data.success) {
+                    showToast('更新成功', 'success');
+                    closeAutoEdit();
+                    setTimeout(function() { location.reload(); }, 500);
+                } else { showToast(data.error || '更新失败', 'error'); }
+            } catch (e) { showToast(e.message || '网络错误', 'error'); }
+            btn.disabled = false; btn.textContent = '保存';
+        }
+
+        function closeAutoEdit() {
+            document.getElementById('editAutoModal').style.display = 'none';
+        }
+
+        /* Test & log functions */
+        function escapeHtml(text) {
+            if (!text) return '';
+            return String(text).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+        }
+
+        async function testScene(triggerPhrase) {
+            if (!confirm('测试语音场景: "' + triggerPhrase + '"?')) return;
+            const btn = event.target;
+            btn.disabled = true;
+            btn.textContent = '测试中...';
+            try {
+                const res = await fetch('/api/huijian-ai/test-scene', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ trigger_phrase: triggerPhrase })
+                });
+                const data = await safeJson(res);
+                if (data.success) {
+                    showToast('测试成功', 'success');
+                } else {
+                    showToast(data.error || '测试失败', 'error');
+                }
+            } catch (e) {
+                showToast(e.message || '网络错误', 'error');
+            }
+            btn.disabled = false;
+            btn.textContent = '测试';
+        }
+
+        async function testAutomation(autoId) {
+            if (!confirm('测试触发此自动化?')) return;
+            const btn = event.target;
+            btn.disabled = true;
+            btn.textContent = '测试中...';
+            try {
+                const res = await fetch('/api/huijian-ai/test-automation', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ automation_id: autoId })
+                });
+                const data = await safeJson(res);
+                if (data.success) {
+                    showToast('测试成功，动作已执行', 'success');
+                    fetchLogs();
+                } else {
+                    showToast(data.error || '测试失败', 'error');
+                }
+            } catch (e) {
+                showToast(e.message || '网络错误', 'error');
+            }
+            btn.disabled = false;
+            btn.textContent = '测试';
+        }
+
+        async function fetchLogs() {
+            try {
+                const res = await fetch('/api/huijian-ai/automation-logs');
+                const logs = await safeJson(res);
+                const tbody = document.getElementById('logBody');
+                const empty = document.getElementById('logEmpty');
+                const table = document.getElementById('logTable');
+                const count = document.getElementById('logCount');
+                if (!logs || logs.length === 0) {
+                    empty.style.display = 'block';
+                    table.style.display = 'none';
+                    count.textContent = '0';
+                    return;
+                }
+                empty.style.display = 'none';
+                table.style.display = '';
+                count.textContent = logs.length;
+                tbody.innerHTML = logs.slice(0, 100).map(function(log) {
+                    return '<tr><td>' + escapeHtml(log.triggered_at || '') + '</td><td>' + escapeHtml(log.automation_id || '') + '</td><td>' + escapeHtml(log.entity_id || '') + '</td><td>' + escapeHtml(log.value || '') + '</td><td>' + escapeHtml(log.reason || '') + '</td></tr>';
+                }).join('');
+            } catch (e) {
+                console.error('Failed to fetch logs:', e);
+            }
+        }
+
+        function toggleLogs() {
+            const content = document.getElementById('logContent');
+            const header = document.querySelector('.log-header');
+            if (content.style.display === 'none') {
+                content.style.display = 'block';
+                header.innerHTML = '&#9660; 触发日志 <span class="log-badge" id="logCount">' + (document.getElementById('logCount').textContent || '0') + '</span>';
+                fetchLogs();
+            } else {
+                content.style.display = 'none';
+                header.innerHTML = '&#9654; 触发日志 <span class="log-badge" id="logCount">' + (document.getElementById('logCount').textContent || '0') + '</span>';
+            }
+        }
+
+        setInterval(function() {
+            const content = document.getElementById('logContent');
+            if (content && content.style.display !== 'none') {
+                fetchLogs();
+            }
+        }, 10000);
+
+        window.onclick = function(e) {
+            if (e.target === document.getElementById('editModal')) closeEdit();
+            if (e.target === document.getElementById('editAutoModal')) closeAutoEdit();
+        }
+    </script>
+
+    <div id="editModal" class="modal">
+        <div class="modal-content">
+            <h2>编辑语音场景</h2>
+            <input id="editSceneId" type="hidden">
+            <label>触发词</label>
+            <input id="editTriggerPhrase" type="text" class="edit-input" placeholder="例如: 当我说晚安的时候">
+            <div class="modal-buttons">
+                <button id="editSaveBtn" class="save-btn" onclick="saveEdit()">保存</button>
+                <button class="cancel-btn" onclick="closeEdit()">取消</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="editAutoModal" class="modal">
+        <div class="modal-content">
+            <h2>编辑传感器自动化</h2>
+            <input id="editAutoId" type="hidden">
+            <label>传感器实体ID</label>
+            <input id="editAutoEntity" type="text" class="edit-input" placeholder="例如: sensor.office_temperature">
+            <label>高于（度）</label>
+            <input id="editAutoAbove" type="number" step="0.1" class="edit-input" placeholder="留空则不限制">
+            <label>低于（度）</label>
+            <input id="editAutoBelow" type="number" step="0.1" class="edit-input" placeholder="留空则不限制">
+            <div class="modal-buttons">
+                <button id="autoEditSaveBtn" class="save-btn" onclick="saveAutoEdit()">保存</button>
+                <button class="cancel-btn" onclick="closeAutoEdit()">取消</button>
+            </div>
+        </div>
+    </div>
+
+</body>
+</html>

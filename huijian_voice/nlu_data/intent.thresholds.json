@@ -1,0 +1,17 @@
+{
+  "AdjustBrightness": 0.7,
+  "AdjustTemperature": 0.7,
+  "ControlWindow": 0.7,
+  "OOS": 0.85,
+  "OpenCover": 0.7,
+  "SceneTrigger": 0.5,
+  "SetColorTemp": 0.7,
+  "SetFanSpeed": 0.7,
+  "SetModeAuto": 0.7,
+  "SetModeCool": 0.7,
+  "SetModeDry": 0.7,
+  "SetModeFan": 0.7,
+  "SetModeHeat": 0.7,
+  "TurnDeviceOff": 0.7,
+  "TurnDeviceOn": 0.7
+}

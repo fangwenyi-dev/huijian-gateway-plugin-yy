@@ -1,0 +1,38 @@
+{
+  "_comment": [
+    "模型清单（单一事实源）：镜像只带 TextCNN(nlu_data ~2MB)，大模型首启下载到 /data/models/。",
+    "下载链：urls 顺序回退（国内代理→官方→镜像站），sha256 校验，tmp+rename 原子落盘；",
+    "model_auto_download=false 或下载全失败时，支持手动导入：把 tarball 放进 /data/models/import/ 即可。",
+    "sha256 为本地研究包实测值（2026-09-08，与官方 release 文件名一致；E2E 首跑若校验不过=官方更新同版本包，需人工复核后回填）。",
+    "top_dir=解包后的根目录名，解到 /data/models/<key>/ 时自动剥掉该前缀。",
+    "2026-09-08 复核：asr/sherpa-onnx-paraformer-zh-int8-2025-10-07.tar.bz2 经 tar 内 README 实证实为 WSChuan 四川话模型（ASLP-lab/WSChuan-ASR Paraformer-large-Chuan 导出），非普通话——已从清单剔除，主 ASR 定案为 bilingual 流式包（实测 RTF 0.042/RSS ~400MB）。"
+  ],
+  "asr_paraformer_bilingual": {
+    "display_name": "STT · Paraformer 中英双语流式 (int8)",
+    "default_provider": true,
+    "tarball": "sherpa-onnx-streaming-paraformer-bilingual-zh-en.tar.bz2",
+    "sha256": "5462a1fce42693deae572af1e8c4687124b12aa85fe61ff4d3168bb5280e205f",
+    "top_dir": "sherpa-onnx-streaming-paraformer-bilingual-zh-en",
+    "required_files": ["tokens.txt", "encoder.int8.onnx", "decoder.int8.onnx"],
+    "size_mb": 1000,
+    "urls": [
+      "https://gh-proxy.com/https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-paraformer-bilingual-zh-en.tar.bz2",
+      "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-paraformer-bilingual-zh-en.tar.bz2",
+      "https://hf-mirror.com/csukuangfj/sherpa-onnx-streaming-paraformer-bilingual-zh-en/resolve/main/sherpa-onnx-streaming-paraformer-bilingual-zh-en.tar.bz2"
+    ]
+  },
+  "tts_kokoro_multilang": {
+    "display_name": "TTS · Kokoro 中英多音色 (sid45 小北默认)",
+    "default_provider": true,
+    "tarball": "kokoro-multi-lang-v1_0.tar.bz2",
+    "sha256": "c133d26353d776da730870dac7da07dbfc9a5e3bc80cc5e8e83ab6e823be7046",
+    "top_dir": "kokoro-multi-lang-v1_0",
+    "required_files": ["model.onnx", "voices.bin", "tokens.txt", "lexicon-zh.txt", "dict/jieba.dict.utf8"],
+    "size_mb": 333,
+    "_file_note": "实测本地包结构（377 文件/400MB 解包）：model.onnx 325.6MB + voices.bin 27.7MB(53 音色) + lexicon-{zh,us-en,gb-en}.txt + dict/(jieba) + espeak-ng-data/ + {date,number,phone}-zh.fst。",
+    "urls": [
+      "https://gh-proxy.com/https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_0.tar.bz2",
+      "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_0.tar.bz2"
+    ]
+  }
+}

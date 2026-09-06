@@ -1,0 +1,195 @@
+"""Support for esphome devices."""
+
+from __future__ import annotations
+
+import logging
+
+from aioesphomeapi import APIClient, APIConnectionError
+from homeassistant.components import zeroconf
+from homeassistant.components.bluetooth import async_remove_scanner
+from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT, Platform
+from homeassistant.const import __version__ as ha_version
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.issue_registry import async_delete_issue
+from homeassistant.helpers.typing import ConfigType
+
+from . import assist_satellite, dashboard, ffmpeg_proxy
+from .api import async_setup_api
+from .const import CONF_BLUETOOTH_MAC_ADDRESS, CONF_NOISE_PSK, DOMAIN
+from .domain_data import DomainData
+from .encryption_key_storage import async_get_encryption_key_storage
+from .entry_data import ESPHomeConfigEntry, RuntimeEntryData
+from .huijian import LOGGER, Dict, get_entry_data, mcp_transport
+from .huijian.http import async_setup_https
+from .intent import async_setup_intents
+from .intent_automation import get_automation_manager, reset_automation_globals
+from .intent_voice_scene import reset_voice_scene_globals
+from .manager import (DEVICE_CONFLICT_ISSUE_FORMAT, ESPHomeManager,
+                      cleanup_instance)
+from .websocket_api import async_setup as async_setup_websocket_api
+
+_LOGGER = logging.getLogger(__name__)
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+CLIENT_INFO = f"Home Assistant {ha_version}"
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Set up the esphome component."""
+    ffmpeg_proxy.async_setup(hass)
+    await assist_satellite.async_setup(hass)
+    await dashboard.async_setup(hass)
+    async_setup_websocket_api(hass)
+
+    await async_setup_https(hass)
+    await async_setup_api(hass)
+    await async_setup_intents(hass)
+
+    manager = get_automation_manager(hass)
+    await manager.async_start()
+
+    return True
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> bool:
+    """Set up the esphome component."""
+    LOGGER.info("Setup entry: %s", [entry.title, entry.entry_id, entry.data])
+    config_type = entry.data.get("config_type")
+    if config_type == "assist":
+        PLATFORMS = set()
+        entry.runtime_data = Dict(loaded_platforms=PLATFORMS)
+        if entry.data.get("llm_endpoint"):
+            PLATFORMS.add(Platform.CONVERSATION)
+        if entry.data.get("stt_endpoint"):
+            PLATFORMS.add(Platform.STT)
+        if entry.data.get("tts_endpoint"):
+            PLATFORMS.add(Platform.TTS)
+        await mcp_transport.async_setup_entry(hass, entry)
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        return True
+
+    host: str = entry.data[CONF_HOST]
+    port: int = entry.data[CONF_PORT]
+    password: str | None = entry.data[CONF_PASSWORD]
+    noise_psk: str | None = entry.data.get(CONF_NOISE_PSK)
+
+    zeroconf_instance = await zeroconf.async_get_instance(hass)
+
+    cli = APIClient(
+        host,
+        port,
+        password,
+        client_info=CLIENT_INFO,
+        zeroconf_instance=zeroconf_instance,
+        noise_psk=noise_psk,
+        timezone=hass.config.time_zone,
+    )
+
+    domain_data = DomainData.get(hass)
+    entry_data = RuntimeEntryData(
+        client=cli,
+        entry_id=entry.entry_id,
+        title=entry.title,
+        store=domain_data.get_or_create_store(hass, entry),
+        original_options=dict(entry.options),
+    )
+    entry.runtime_data = entry_data
+
+    manager = ESPHomeManager(
+        hass, entry, host, password, cli, zeroconf_instance, domain_data
+    )
+    await manager.async_start()
+
+    await mcp_transport.async_setup_entry(hass, entry)
+    return True
+
+
+async def async_reload_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry):
+    """Handle update."""
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> bool:
+    """Unload an esphome config entry."""
+    this_data = get_entry_data(hass, entry)
+    for k in ["llm_transport", "stt_transport", "tts_transport"]:
+        if transport := this_data.get(k):
+            await transport.async_remove_entry()
+
+    unload_ok = await hass.config_entries.async_unload_platforms(
+        entry, entry.runtime_data.loaded_platforms
+    )
+    if unload_ok:
+        await cleanup_instance(entry)
+        reset_automation_globals()
+        reset_voice_scene_globals()
+    return unload_ok
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> None:
+    """Remove an esphome config entry."""
+    if bluetooth_mac_address := entry.data.get(CONF_BLUETOOTH_MAC_ADDRESS):
+        async_remove_scanner(hass, bluetooth_mac_address.upper())
+    async_delete_issue(
+        hass, DOMAIN, DEVICE_CONFLICT_ISSUE_FORMAT.format(entry.entry_id)
+    )
+    await DomainData.get(hass).get_or_create_store(hass, entry).async_remove()
+
+    if transport := get_entry_data(hass, entry, "mcp_transport"):
+        await transport.async_remove_entry()
+
+    await _async_clear_dynamic_encryption_key(hass, entry)
+
+
+async def _async_clear_dynamic_encryption_key(
+    hass: HomeAssistant, entry: ESPHomeConfigEntry
+) -> None:
+    """Clear the dynamic encryption key on the device and from storage."""
+    if entry.unique_id is None or entry.data.get(CONF_NOISE_PSK) is None:
+        return
+
+    # Only clear the key if it's stored in our storage, meaning it was
+    # dynamically generated by us and not user-provided
+    storage = await async_get_encryption_key_storage(hass)
+    if await storage.async_get_key(entry.unique_id) is None:
+        return
+
+    host: str = entry.data[CONF_HOST]
+    port: int = entry.data[CONF_PORT]
+    password: str | None = entry.data[CONF_PASSWORD]
+    noise_psk: str | None = entry.data.get(CONF_NOISE_PSK)
+
+    zeroconf_instance = await zeroconf.async_get_instance(hass)
+
+    cli = APIClient(
+        host,
+        port,
+        password,
+        client_info=CLIENT_INFO,
+        zeroconf_instance=zeroconf_instance,
+        noise_psk=noise_psk,
+        timezone=hass.config.time_zone,
+    )
+
+    try:
+        await cli.connect()
+        # Clear the encryption key on the device by passing an empty key
+        if not await cli.noise_encryption_set_key(b""):
+            _LOGGER.debug(
+                "Could not clear dynamic encryption key for ESPHome device %s: Device rejected key removal",
+                entry.unique_id,
+            )
+            return
+    except APIConnectionError as exc:
+        _LOGGER.debug(
+            "Could not connect to ESPHome device %s to clear dynamic encryption key: %s",
+            entry.unique_id,
+            exc,
+        )
+        return
+    finally:
+        await cli.disconnect()
+
+    await storage.async_remove_key(entry.unique_id)
