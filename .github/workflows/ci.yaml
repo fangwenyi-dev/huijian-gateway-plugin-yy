@@ -353,7 +353,7 @@ jobs:
           set -eu
           # 匿名认证链完全动态发现（不硬编码 realm，防 ACR 端点差异臆造）：
           # /v2/ 401 → WWW-Authenticate 解 realm/service → 匿名 pull token → GET manifest
-          HDR=$(curl -sI "$ACR/v2/" | tr -d '\r')
+          HDR=$(curl -sI "https://$ACR/v2/" | tr -d '\r')
           REALM=$(echo "$HDR" | sed -n 's/.*realm="\([^"]*\)".*/\1/p')
           SVC=$(echo "$HDR" | sed -n 's/.*service="\([^"]*\)".*/\1/p')
           [ -n "$REALM" ] || { echo "::error::ACR 未返回 auth realm，认证链异常"; exit 1; }
@@ -362,7 +362,7 @@ jobs:
           [ -n "$T" ] || { echo "::error::匿名 pull token 获取失败——公开读未生效，客户安装必失败"; exit 1; }
           IDX=$(curl -fsS -H "Authorization: Bearer $T" \
               -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json' \
-              "$ACR/v2/$ACR_REPO/manifests/$VERSION")
+              "https://$ACR/v2/$ACR_REPO/manifests/$VERSION")
           echo "$IDX" | python3 -c '
           import json,sys
           m=json.load(sys.stdin)
@@ -372,7 +372,7 @@ jobs:
           print("多架构 index 完整:", sorted(archs))'
           for CH in $(echo "$IDX" | python3 -c 'import json,sys;[print(e["digest"]) for e in json.load(sys.stdin)["manifests"]]'); do
             curl -fsS -H "Authorization: Bearer $T" -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
-              "$ACR/v2/$ACR_REPO/manifests/$CH" | python3 -c '
+              "https://$ACR/v2/$ACR_REPO/manifests/$CH" | python3 -c '
           import json,sys
           m=json.load(sys.stdin)
           bad=[l["mediaType"] for l in m["layers"] if l["mediaType"]!="application/vnd.oci.image.layer.v1.tar+gzip"]
