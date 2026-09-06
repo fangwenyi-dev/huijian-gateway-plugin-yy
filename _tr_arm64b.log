@@ -1,0 +1,42 @@
+[acr-transcode] 源 fangwenyi-dev/aarch64-huijian-voice@sha256:1bc62126a0d1: 17 层，config 17120B
+[acr-transcode]   blob 已存在（秒传）: layer0 20MB→26MB
+[acr-transcode]   blob 已存在（秒传）: layer1 7MB→9MB
+[acr-transcode]   blob 已存在（秒传）: layer2 0MB→0MB
+[acr-transcode]   blob 已存在（秒传）: layer3 0MB→0MB
+[acr-transcode]   blob 已存在（秒传）: layer4 25MB→30MB
+[acr-transcode]   blob 已存在（秒传）: layer5 0MB→0MB
+[acr-transcode]   ↑ layer6 65MB→72MB: 8388608/75891602B
+[acr-transcode]   ↑ layer6 65MB→72MB: 16777216/75891602B
+[acr-transcode]   ↑ layer6 65MB→72MB: 25165824/75891602B
+[acr-transcode]   ↑ layer6 65MB→72MB: 33554432/75891602B
+[acr-transcode]   ↑ layer6 65MB→72MB: 41943040/75891602B
+[acr-transcode]   ↑ layer6 65MB→72MB: 50331648/75891602B
+[acr-transcode]   ↑ layer6 65MB→72MB: 58720256/75891602B
+[acr-transcode]   ↑ layer6 65MB→72MB: 67108864/75891602B
+[acr-transcode]   ↑ layer6 65MB→72MB: 75497472/75891602B
+[acr-transcode]   ↑ layer6 65MB→72MB: 75891602/75891602B
+[acr-transcode]   blob 完成: layer6 65MB→72MB (75891602B)
+[acr-transcode]   ↑ layer7 0MB→0MB: 55416/55416B
+[acr-transcode]   blob 完成: layer7 0MB→0MB (55416B)
+[acr-transcode]   ↑ layer8 0MB→0MB: 1559/1559B
+[acr-transcode]   blob 完成: layer8 0MB→0MB (1559B)
+[acr-transcode]   ↑ layer9 1MB→1MB: 1745705/1745705B
+[acr-transcode]   blob 完成: layer9 1MB→1MB (1745705B)
+[acr-transcode]   ↑ layer10 0MB→0MB: 283868/283868B
+[acr-transcode]   blob 完成: layer10 0MB→0MB (283868B)
+[acr-transcode]   ↑ layer11 0MB→0MB: 9415/9415B
+[acr-transcode]   blob 完成: layer11 0MB→0MB (9415B)
+[acr-transcode]   ↑ layer12 0MB→0MB: 1682/1682B
+[acr-transcode]   blob 完成: layer12 0MB→0MB (1682B)
+[acr-transcode]   ↑ layer13 0MB→0MB: 840/840B
+[acr-transcode]   blob 完成: layer13 0MB→0MB (840B)
+[acr-transcode]   ↑ layer14 0MB→0MB: 215/215B
+[acr-transcode]   blob 完成: layer14 0MB→0MB (215B)
+[acr-transcode]   ↑ layer15 0MB→0MB: 1443/1443B
+[acr-transcode]   blob 完成: layer15 0MB→0MB (1443B)
+[acr-transcode]   blob 已存在（秒传）: layer16 0MB→0MB
+[acr-transcode]   ↑ config: 17120/17120B
+[acr-transcode]   blob 完成: config (17120B)
+[acr-transcode]   manifest 已推: fangwenyi-dev/huijian-gateway-plugin-yy@1.0.1-tr-arm64
+sha256:c03fb337d274a5926d5caa7186520b9acd5b3f7c654da67412e840217d53fd09
+[acr-transcode] ✅ 转码完成 crpi-92gcrmsz8v7vvdy1.cn-shanghai.personal.cr.aliyuncs.com/fangwenyi-dev/huijian-gateway-plugin-yy:1.0.1-tr-arm64 → sha256:c03fb337d274a5926d5caa7186520b9acd5b3f7c654da67412e840217d53fd09

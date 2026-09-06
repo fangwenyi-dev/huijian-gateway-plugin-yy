@@ -150,7 +150,8 @@ def test_image_source_acr_strategy():
     ci = (ROOT.parent / ".github" / "workflows" / "ci.yaml").read_text(encoding="utf-8")
     for gone in ("ghcr.1ms.run", "ghcr.nju.edu.cn", "warm-mirrors"):
         assert gone not in ci, f"CI 不得残留透传站体系：{gone}"
-    assert "push-acr" in ci and "buildx imagetools create" in ci, "ACR 合并推送链在位"
+    assert "push-acr" in ci and "acr_transcode.py" in ci, "ACR 转码推送链在位"
+    assert "buildx imagetools create" not in ci, "imagetools 复制路线已被转码取代（zstd 层 ACR 拒收）"
     docs = (ROOT / "DOCS.md").read_text(encoding="utf-8")
     assert "Downloading docker image" in docs, "FAQ 必须教客户识别卡下载症状"
     assert "ghcr.io/fangwenyi-dev/{arch}-huijian-voice" in docs, \

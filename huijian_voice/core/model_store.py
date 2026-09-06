@@ -122,6 +122,10 @@ class ModelStore:
             # 半写文件可被对方 rename 转正（双写者竞态）。
             fd, tmp = tempfile.mkstemp(dir=str(self.status_file.parent),
                                        prefix=".mst-", suffix=".tmp")
+            # mkstemp 默认 0600：rename 转正后 nginx worker 读走 13（v1.0.0 实机
+            # 实发：开下载起 models_status.json 被本写者反复刷回 600，与主循环
+            # _atomic_write 的 fchmod 同源教训——事实文件必须世界可读）。
+            os.fchmod(fd, 0o644)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(json.dumps({"updated": time.time(), "models": snap}, ensure_ascii=False, indent=2))
             os.replace(tmp, self.status_file)

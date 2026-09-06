@@ -48,7 +48,7 @@ class Publisher:
             self._zco.register_service(self._info)
             logger.warning("[mDNS] 广播 %s:%d @ %s", "_huijian-voice._tcp.local.", self.port, ip)
         except Exception as e:
-            logger.warning("[mDNS] 广播失败（不影响静态接入）: %s", e)
+            logger.warning("[mDNS] 广播失败（不影响静态接入）: %r", e)  # %r：v1.0.0 实机异常 str 为空，必须带类型显形
             if self._zco is not None:
                 try:   # register 失败也必须拆 Zeroconf（UDP socket/引擎线程），否则泄漏
                     self._zco.close()

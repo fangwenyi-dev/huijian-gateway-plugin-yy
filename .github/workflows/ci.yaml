@@ -288,28 +288,28 @@ jobs:
     name: Push ACR CN mirror
     needs: [prepare, manifest]
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40   # 转码=260MB 下载+重压+上传，留足带宽波动余量
     env:
       ACR: crpi-92gcrmsz8v7vvdy1.cn-shanghai.personal.cr.aliyuncs.com
       ACR_REPO: fangwenyi-dev/huijian-gateway-plugin-yy
       VERSION: ${{ needs.prepare.outputs.version }}
       OWNER: ${{ github.repository_owner }}
     steps:
-      - uses: docker/setup-buildx-action@v3
-      - name: Login to ACR
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.ACR }}
-          username: ${{ secrets.ACR_USER }}
-          password: ${{ secrets.ACR_PASS }}
-      - name: Merge ghcr arch repos into multi-arch index on ACR
+      - uses: actions/checkout@v4
+      - name: Transcode ghcr zstd layers to gzip and push ACR
+        env:
+          ACR_USER: ${{ secrets.ACR_USER }}
+          ACR_PASS: ${{ secrets.ACR_PASS }}
         run: |
           set -eu
-          # 首枪实发教训（v1.0.1 run1 403 "blob type invalid"）：hassio builder 推的
-          # 单架构仓 tag 是含 provenance attestation 的 index，imagetools 按 tag 复制
-          # 会连 attestation blob 一起搬——ACR 个人版拒收该 blob 类型。对策：先从源
-          # index 解析出【纯镜像子 manifest】的 digest，用 @digest 显式引用绕过 attestation。
-          child_digest() { # $1=repo $2=tag $3=oci_arch
+          # 两代实发教训：run1 按 tag 复制把 provenance attestation blob 搬去
+          # ACR→403；run2 @digest 绕过 attestation 仍 403——本地鉴别实验定案
+          # （真gzip流=202 / zstd魔数=403 / 纯字节=403）：ACR 个人版拒收一切
+          # 非 gzip 层流，而 hassio builder 推的层是 tar+zstd。唯一解=下载解压
+          # 重压缩 gzip 重写 manifest（scripts/acr_transcode.py，本地已对
+          # 1.0.1 全量端到端实证；config/diff_ids 不动，层内容零改变）。
+          python3 -m pip install --quiet --break-system-packages zstandard
+          child_digest() { # $1=repo $2=tag $3=oci_arch → 纯镜像子 manifest digest
             local TOK J
             TOK=$(curl -fsS "https://ghcr.io/token?service=ghcr.io&scope=repository:${OWNER}/$1:pull" \
                   | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
@@ -326,27 +326,29 @@ jobs:
               assert hit, f"index 中无 {sys.argv[1]}/linux 纯镜像条目"
               print(hit[0]["digest"])
           else:
-              # tag 直指纯 image manifest（无 attestation 形态）——自报 digest
-              import hashlib
-              print("sha256:"+hashlib.sha256(sys.stdin.buffer.read(0) or b"").hexdigest() if False else "")
               sys.exit(2)' "$3" || {
-              # 纯 manifest 分支：digest 从 Docker-Content-Digest 头拿
+              TOK=$(curl -fsS "https://ghcr.io/token?service=ghcr.io&scope=repository:${OWNER}/$1:pull" \
+                    | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
               curl -fsSI -H "Authorization: Bearer $TOK" \
                 -H 'Accept: application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json' \
                 "https://ghcr.io/v2/${OWNER}/$1/manifests/$2" | tr -d '\r' \
                 | sed -n 's/^Docker-Content-Digest: *\(sha256:[0-9a-f]*\).*/\1/p'; }
           }
+          AM=$(child_digest "amd64-huijian-voice" "$VERSION" amd64)
+          AR=$(child_digest "aarch64-huijian-voice" "$VERSION" arm64)
+          [ -n "$AM" ] && [ -n "$AR" ] || { echo "::error::源纯镜像 digest 解析失败"; exit 1; }
+          echo "源纯镜像 digest: amd64=$AM arm64=$AR"
+          DA=$(python3 scripts/acr_transcode.py transcode --src ghcr.io \
+                 --src-repo "$OWNER/amd64-huijian-voice" --src-ref "$AM" \
+                 --dst "$ACR" --dst-repo "$ACR_REPO" --dst-tag "$VERSION-amd64" | tail -1)
+          DR=$(python3 scripts/acr_transcode.py transcode --src ghcr.io \
+                 --src-repo "$OWNER/aarch64-huijian-voice" --src-ref "$AR" \
+                 --dst "$ACR" --dst-repo "$ACR_REPO" --dst-tag "$VERSION-arm64" | tail -1)
           for TGT in "$VERSION" latest; do
-            AM=$(child_digest "amd64-huijian-voice" "$TGT" amd64)
-            AR=$(child_digest "aarch64-huijian-voice" "$TGT" arm64)
-            [ -n "$AM" ] && [ -n "$AR" ] || { echo "::error::源 digest 解析失败 amd64=$AM arm64=$AR"; exit 1; }
-            echo "纯镜像 digest: amd64=$AM aarch64=$AR"
-            docker buildx imagetools create \
-              -t "$ACR/$ACR_REPO:$TGT" \
-              "ghcr.io/$OWNER/amd64-huijian-voice@$AM" \
-              "ghcr.io/$OWNER/aarch64-huijian-voice@$AR"
+            python3 scripts/acr_transcode.py index --dst "$ACR" --dst-repo "$ACR_REPO" \
+              --tag "$TGT" --member "amd64=$DA" --member "arm64=$DR" | tail -1
           done
-      - name: Self-verify anonymous pull + dual-arch index
+      - name: Self-verify anonymous pull + dual-arch gzip index
         run: |
           set -eu
           # 匿名认证链完全动态发现（不硬编码 realm，防 ACR 端点差异臆造）：
@@ -366,7 +368,36 @@ jobs:
           m=json.load(sys.stdin)
           archs={e["platform"]["architecture"] for e in m.get("manifests",[])}
           assert {"amd64","arm64"} <= archs, f"index 缺架构: {archs}"
-          print("✅ ACR 匿名可拉，多架构 index 完整:", sorted(archs))'
+          assert not {"unknown","attestation"} & archs, f"attestation 混入: {archs}"
+          print("多架构 index 完整:", sorted(archs))'
+          for CH in $(echo "$IDX" | python3 -c 'import json,sys;[print(e["digest"]) for e in json.load(sys.stdin)["manifests"]]'); do
+            curl -fsS -H "Authorization: Bearer $T" -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
+              "$ACR/v2/$ACR_REPO/manifests/$CH" | python3 -c '
+          import json,sys
+          m=json.load(sys.stdin)
+          bad=[l["mediaType"] for l in m["layers"] if l["mediaType"]!="application/vnd.oci.image.layer.v1.tar+gzip"]
+          assert not bad, f"子镜像含非 gzip 层（转码回退!）: {set(bad)}"
+          small=min(m["layers"], key=lambda l:l["size"])
+          print("层全 gzip ✓ 抽样层:", small["digest"][:19], small["size"], "B")'
+          done
+          # 端到端字节级：匿名真拉最小层并验 sha256（防“manifest 在位 blob 缺失”假成功）
+          python3 - "$ACR" "$ACR_REPO" "$T" <<'PYX'
+          import hashlib, json, sys, urllib.request
+          acr, repo, t = sys.argv[1:4]
+          def get(p, accept=None, binary=False):
+              h = {"Authorization": "Bearer " + t}
+              if accept: h["Accept"] = accept
+              r = urllib.request.urlopen(f"https://{acr}{p}", headers=h, timeout=60)
+              return r.read()
+          idx = json.loads(get(f"/v2/{repo}/manifests/latest", "application/vnd.oci.image.index.v1+json"))
+          child = json.loads(get(f"/v2/{repo}/manifests/{idx['manifests'][0]['digest']}",
+                                 "application/vnd.oci.image.manifest.v1+json"))
+          l0 = min(child["layers"], key=lambda l: l["size"])
+          blob = get(f"/v2/{repo}/blobs/{l0['digest']}")
+          assert "sha256:" + hashlib.sha256(blob).hexdigest() == l0["digest"], "blob 字节损坏"
+          assert blob[:2] == b"\x1f\x8b", "非 gzip 流"
+          print("✅ ACR 匿名端到端实证：index→manifest→层 blob 字节+sha256+gzip 全对")
+          PYX
 
 
   # ========== 3. 创建 GitHub Release ==========

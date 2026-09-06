@@ -6,22 +6,20 @@
 ## [1.0.1] - 2026-09-08
 
 ### Added
-- **手动镜像补热 workflow（`warm.yaml`，workflow_dispatch）**：HA OS 实机首装
-  v1.0.0 停在 `Downloading docker image` 实发诊断——镜像与 manifest 三源
-  （ghcr.io/1ms/nju）均完好（17 层 132MB），但透传站对新 tag 的 blob 边缘
-  缓存未热：1ms 实测 33KB/s 慢滴、nju 12s 零字节假活；CI 发版预热只覆盖
-  runner 命中的少数边缘，客户 DNS 分到冷边缘即干等。新增对任意 tag 全量
-  GET 全部 blob（amd64/aarch64 × 双站）的手动补热通道，多触发几轮=多命中
-  边缘；本批推送后立即对 1.0.0 补热救援卡装用户。
 - **镜像主源迁至自有阿里云 ACR（v1.0.0 首装卡下载的根治，用户开通）**：
   `config.yaml` image 改 `crpi-…cn-shanghai.personal.cr.aliyuncs.com/
   fangwenyi-dev/huijian-gateway-plugin-yy`（个人版公开仓，**单仓多架构 OCI
   index**——Supervisor 拉同 tag 由 docker 自动选架构，弃 `{arch}` 仓名模板）。
-  CI 新增 `push-acr` job：manifest 验证过后用 `buildx imagetools create`
-  在 registry 侧把 ghcr 双架构仓合并推送 ACR（零本地转手），并自带匿名拉取
-  +双架构完整性实证步骤；**push-acr 为 release 硬前置**（image 指 ACR，
-  推送失败即不发布）。凭据 `ACR_USER/ACR_PASS` 已入 GitHub Secrets。
-  ghcr.io 双架构仓+manifest 原样保留=灾备源（DOCS FAQ 给完整可抄换源串）。
+  CI 新增 `push-acr` job（**release 硬前置**）：`scripts/acr_transcode.py`
+  从 ghcr 双架构仓下载层 → zstd 解压 → 重压缩 gzip → 校验 diff_ids → 重写
+  manifest 推 ACR，再合成 `$VERSION`/`latest` 双 tag index；自带匿名端到端
+  实证（index→子 manifest 层全 gzip→真拉层 blob 验 sha256+魔数）。凭据
+  `ACR_USER/ACR_PASS` 入 GitHub Secrets。ghcr.io 双架构仓+manifest 原样
+  保留=灾备源（DOCS FAQ 给完整可抄换源串）。
+  两代实发教训：imagetools 按 tag 复制连 provenance attestation blob 一起
+  搬→ACR 403；@digest 绕过后 zstd 层仍 403——本地鉴别实验（真 gzip=202 /
+  zstd 魔数=403 / 纯字节=403）定案 **ACR 个人版层流仅收 gzip**，复制无解、
+  必须转码（层内容零改变，config/diff_ids 原样）。
 - **透传站体系整体退役**：`warm-mirrors` job 与手动补热 `warm.yaml` 删除
   （1ms/nju 边缘缓存覆盖靠运气的结构性缺陷实锤：新 tag blob 33KB/s 慢滴/
   0B 假活）；钉桩 `test_image_source_acr_strategy` 禁复活 +
@@ -33,6 +31,20 @@
   `name`（商店卡片权威源）、Ingress 管理页 title/H1、商店 DOCS 全部卡片话术
   （用户照文案找卡片，一处不能漏）、根 README。slug `huijian_voice` 与镜像名
   `huijian-voice` 不变——改 slug 会断老用户升级路径。
+
+### Fixed（v1.0.0 实机日志三修，钉桩 ×3 于 test_concurrency_guards）
+- **`models_status.json` 权限回写 bug**：ModelStore 进度写者 `_write_status`
+  用 mkstemp（0600）漏 fchmod——每次下载进度落盘都把主循环写好的 644 文件
+  刷回 600，nginx worker 读走 13 → 管理页模型状态整段刷不出（v1.0.0 实机
+  开下载后 `Permission denied` 日志刷屏根因）。
+- **aiohttp 每请求 WARNING 刷屏**：`web.AppRunner(..., access_logger=None)`
+  是臆造 kwargs（3.12+ 起每次建请求 handler 打
+  `Failed to create request handler with custom kwargs` 回落告警）；官方
+  禁访问日志参数是 `access_log=None`，两 Runner 均已改。
+- **mDNS 阻塞与失败显形**：Zeroconf 构造/register/unregister 含阻塞网络
+  I/O，从事件循环直调改为 `asyncio.to_thread`（启动期曾卡 tick 11s）；
+  广播失败日志 `%s`→`%r`（v1.0.0 实机异常文本为空无从诊断，下次带类型
+  显形）。`host_network: true` 在位，静态端口接入不受影响。
 
 ## [1.0.0] - 2026-09-08
 

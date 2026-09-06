@@ -87,7 +87,7 @@ class Service:
         await self.ha.start()
         self.settings.add_listener(self._on_settings_change)
         await self._start_http()
-        self.mdns.start()
+        await asyncio.to_thread(self.mdns.start)  # 构造+register 含阻塞 I/O，禁在 loop 内直调
         self._tasks += [
             asyncio.create_task(self._loop_models(), name="models"),
             asyncio.create_task(self._loop_status(), name="status"),
@@ -103,10 +103,10 @@ class Service:
         await self.shutdown()
 
     async def _start_http(self) -> None:
-        ws_runner = web.AppRunner(make_ws_app(self.ctx), access_logger=None)
+        ws_runner = web.AppRunner(make_ws_app(self.ctx), access_log=None)
         await ws_runner.setup()
         await web.TCPSite(ws_runner, "0.0.0.0", const.WS_PORT).start()
-        admin_runner = web.AppRunner(make_admin_app(self.ctx), access_logger=None)
+        admin_runner = web.AppRunner(make_admin_app(self.ctx), access_log=None)
         await admin_runner.setup()
         await web.TCPSite(admin_runner, "127.0.0.1", const.ADMIN_PORT).start()
         self._runners = (ws_runner, admin_runner)
@@ -218,7 +218,7 @@ class Service:
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(
                 asyncio.gather(*self._tasks, return_exceptions=True), timeout=5)
-        self.mdns.close()
+        await asyncio.to_thread(self.mdns.close)  # unregister 亦阻塞网络 I/O
         if getattr(self, "_runners", None):
             for r in self._runners:
                 await r.cleanup()

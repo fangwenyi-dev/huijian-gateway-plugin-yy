@@ -333,3 +333,43 @@ def test_stt_on_close_cancels_inflight():
         assert sess._task.cancelled()
         sess.close_work()          # 幂等：已取消再调无事
     asyncio.run(go())
+
+
+# ── v1.0.0 实机日志三修钉桩（2026-09-07 用户实发，v1.0.1 并入）──────────────
+
+_CORE = Path(__file__).resolve().parent.parent / "core"
+
+
+def test_status_file_writer_chmod_guard():
+    """models_status.json 双写者必须同守「世界可读」：mkstemp 默认 0600，
+    rename 转正后 nginx worker 读走 13（v1.0.0 实机开下载后日志刷屏根因——
+    model_store._write_status 漏 fchmod，每次进度写把主循环 644 文件刷回 600）。
+    钉桩：两写者源文本 mkstemp 之后、fdopen/rename 之前必须出现 fchmod 0o644。"""
+    import re
+    ms = (_CORE / "model_store.py").read_text(encoding="utf-8")
+    main_src = (_CORE / "main.py").read_text(encoding="utf-8")
+    for src, fn in ((ms, "model_store._write_status"), (main_src, "main._atomic_write")):
+        i = src.index("mkstemp")
+        j = src.index("os.replace", i)
+        seg = src[i:j]
+        assert re.search(r"fchmod\([^)]*0o644", seg), f"{fn}: mkstemp 与 replace 之间缺 fchmod(0o644)"
+
+
+def test_aiohttp_access_log_kwarg_guard():
+    """access_logger 是臆造 kwargs——aiohttp 3.12+ 每请求打
+    'Failed to create request handler with custom kwargs' WARNING（v1.0.0 实机
+    刷屏）。官方禁访问日志参数=access_log=None（AppRunner 构造子显式形参）。"""
+    src = (_CORE / "main.py").read_text(encoding="utf-8")
+    assert "access_logger" not in src, "臆造 kwargs 回潮"
+    assert src.count("access_log=None") == 2, "两 Runner 各一，缺位即回退"
+
+
+def test_mdns_blocking_calls_off_loop():
+    """Zeroconf 构造/register/unregister 均含阻塞网络 I/O，禁在事件循环直调
+    （v1.0.0 实机启动期卡 tick + 失败异常 str 为空）。定案：asyncio.to_thread
+    包裹 + 失败日志用 %r（类型必须显形，否则远程无法诊断）。"""
+    main_src = (_CORE / "main.py").read_text(encoding="utf-8")
+    assert "asyncio.to_thread(self.mdns.start)" in main_src
+    assert "asyncio.to_thread(self.mdns.close)" in main_src
+    mdns_src = (_CORE / "mdns.py").read_text(encoding="utf-8")
+    assert "%r\", e)" in mdns_src.replace("'", '"'), "广播失败日志须 %r 携带异常类型"

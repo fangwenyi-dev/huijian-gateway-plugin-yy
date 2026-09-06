@@ -1,0 +1,78 @@
+[acr-transcode] 源 fangwenyi-dev/aarch64-huijian-voice@sha256:1bc62126a0d1: 17 层，config 17120B
+[acr-transcode]   ↑ layer0 20MB→26MB: 8388608/28092401B
+[acr-transcode]   ↑ layer0 20MB→26MB: 16777216/28092401B
+[acr-transcode]   ↑ layer0 20MB→26MB: 25165824/28092401B
+[acr-transcode]   ↑ layer0 20MB→26MB: 28092401/28092401B
+[acr-transcode]   blob 完成: layer0 20MB→26MB (28092401B)
+[acr-transcode]   ↑ layer1 7MB→9MB: 8388608/10242100B
+[acr-transcode]   ↑ layer1 7MB→9MB: 10242100/10242100B
+[acr-transcode]   blob 完成: layer1 7MB→9MB (10242100B)
+[acr-transcode]   blob 已存在（秒传）: layer2 0MB→0MB
+[acr-transcode]   ↑ layer3 0MB→0MB: 1816/1816B
+[acr-transcode]   blob 完成: layer3 0MB→0MB (1816B)
+[acr-transcode]   ↑ layer4 25MB→30MB: 8388608/32249602B
+[acr-transcode]   ↑ layer4 25MB→30MB: 16777216/32249602B
+[acr-transcode]   ↑ layer4 25MB→30MB: 25165824/32249602B
+[acr-transcode]   ↑ layer4 25MB→30MB: 32249602/32249602B
+[acr-transcode]   blob 完成: layer4 25MB→30MB (32249602B)
+[acr-transcode]   ↑ layer5 0MB→0MB: 1068/1068B
+[acr-transcode]   blob 完成: layer5 0MB→0MB (1068B)
+[acr-transcode]   ↑ layer6 65MB→72MB: 8388608/75891602B
+[acr-transcode]   ↑ layer6 65MB→72MB: 16777216/75891602B
+[acr-transcode]   ↑ layer6 65MB→72MB: 25165824/75891602B
+[acr-transcode]   ↑ layer6 65MB→72MB: 33554432/75891602B
+[acr-transcode]   ↑ layer6 65MB→72MB: 41943040/75891602B
+[acr-transcode]   ↑ layer6 65MB→72MB: 50331648/75891602B
+[acr-transcode]   ↑ layer6 65MB→72MB: 58720256/75891602B
+Traceback (most recent call last):
+  File "/mnt/e/AI/huijian-gateway-plugin-yy/scripts/acr_transcode.py", line 300, in <module>
+    main()
+    ~~~~^^
+  File "/mnt/e/AI/huijian-gateway-plugin-yy/scripts/acr_transcode.py", line 296, in main
+    a.fn(a)
+    ~~~~^^^
+  File "/mnt/e/AI/huijian-gateway-plugin-yy/scripts/acr_transcode.py", line 249, in cmd_transcode
+    push_blob(dst, a.dst_repo, nl["digest"], data, f"layer{i} {len(raw)//2**20}MB→{len(data)//2**20}MB")
+    ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/e/AI/huijian-gateway-plugin-yy/scripts/acr_transcode.py", line 183, in push_blob
+    _, nloc, _ = dst.request(
+                 ~~~~~~~~~~~^
+        "PATCH", use + sep + "stage=1", repo, part,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<2 lines>...
+                 "Content-Length": str(len(part))},
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        status_ok=(202, 200))
+        ^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/e/AI/huijian-gateway-plugin-yy/scripts/acr_transcode.py", line 150, in request
+    c.request(method, path, body=body, headers=h)
+    ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.14/http/client.py", line 1367, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.14/http/client.py", line 1413, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.14/http/client.py", line 1362, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+    ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.14/http/client.py", line 1122, in _send_output
+    self.send(msg)
+    ~~~~~~~~~^^^^^
+  File "/usr/lib/python3.14/http/client.py", line 1066, in send
+    self.connect()
+    ~~~~~~~~~~~~^^
+  File "/usr/lib/python3.14/http/client.py", line 1501, in connect
+    super().connect()
+    ~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.14/http/client.py", line 1032, in connect
+    self.sock = self._create_connection(
+                ~~~~~~~~~~~~~~~~~~~~~~~^
+        (self.host,self.port), self.timeout, self.source_address)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.14/socket.py", line 870, in create_connection
+    raise exceptions[0]
+  File "/usr/lib/python3.14/socket.py", line 855, in create_connection
+    sock.connect(sa)
+    ~~~~~~~~~~~~^^^^
+OSError: [Errno 101] Network is unreachable
