@@ -87,9 +87,14 @@ def test_watchdog_matches_upstream_regex():
         f"watchdog `{m.group(1)}` 不符合上游商店校验正则——加载项会被拒收"
 
 
-# —— v1.7.17 定案（网关镜像主源事故复盘）：image 只钉「域白名单 + {arch} 模板」，
-# 具体主源以 config.yaml 定案注释为唯一权威；禁把镜像域名硬编码成单值断言。
-_IMAGE_WHITELIST = ("ghcr.1ms.run", "ghcr.io", "ghcr.nju.edu.cn")
+# —— v1.0.1 定案（v1.0.0 首装卡下载实发）：主源=用户自有阿里云 ACR 个人版
+# （上海地域公开仓，国内原生线路；单仓多架构 manifest，docker 自动选架构，
+# 故不再用 {arch} 仓名模板）。ghcr.io 保留灾备（FAQ 换源话术）。1ms/nju 透传
+# 站退役——实测新 tag blob 33KB/s 慢滴/0B 假活，边缘覆盖靠运气。
+# 与网关旧规矩「禁单值断言」的改道理由：当年主源是随时可能换的公共透传站，
+# 如今主源是自有仓（域名即资产），单值钉死正是防"手滑改回透传站"的防线。
+_ACR_HOST = "crpi-92gcrmsz8v7vvdy1.cn-shanghai.personal.cr.aliyuncs.com"
+_IMAGE_WHITELIST = (_ACR_HOST, "ghcr.io")
 
 
 def test_image_field_domain_whitelist_and_template():
@@ -98,7 +103,10 @@ def test_image_field_domain_whitelist_and_template():
     img = m.group(1)
     host = img.split("/")[0]
     assert host in _IMAGE_WHITELIST, f"镜像域 {host} 不在白名单 {list(_IMAGE_WHITELIST)}"
-    assert "{arch}-huijian-voice" in img, "image 必须含 {arch} 模板与规范镜像名"
+    assert host == _ACR_HOST, "主源必须是自有 ACR（透传站已退役，禁回退）"
+    assert "{arch}" not in img, "ACR 路线=单仓多架构 index，image 不该再有 {arch}"
+    assert img == f"{_ACR_HOST}/fangwenyi-dev/huijian-gateway-plugin-yy", \
+        "ACR 路径必须与用户控制台实建仓逐字一致（空仓 push 前 registry 不认，勿改着玩）"
 
 
 def test_homepage_and_repo_name_aligned():

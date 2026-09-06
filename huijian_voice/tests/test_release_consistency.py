@@ -78,7 +78,11 @@ def test_zh_hans_and_zh_cn_identical():
 def test_slug_and_naming():
     cfg = _config()
     assert cfg["slug"] == "huijian_voice"
-    assert "huijian-voice" in cfg["image"]
+    # v1.0.1：ACR 单仓多架构路线下镜像仓名=仓库名（用户在 ACR 控制台实建的
+    # huijian-gateway-plugin-yy），"镜像名含 slug 词根"的 ghcr 时代规矩由
+    # test_store_schema 的逐字路径钉桩接管；ghcr 灾备仓仍守 huijian-voice 词根
+    # （见 DOCS FAQ 灾备串）。
+    assert cfg["image"].endswith("/fangwenyi-dev/huijian-gateway-plugin-yy")
     assert cfg["arch"] == ["amd64", "aarch64"]
     assert cfg["watchdog"].startswith("tcp://")
 
@@ -121,37 +125,36 @@ def test_workflow_uses_supported_builder_args():
         assert act in raw, f"缺网关同款 action：{act}"
     assert "uses: home-assistant/builder@" not in raw, "禁回退单体 builder"
     assert set(jobs) == {"lint", "prepare", "init", "build", "e2e", "manifest",
-                         "warm-mirrors", "release", "gitee-release"}, "九 job 链形变"
+                         "push-acr", "release", "gitee-release"}, "九 job 链形变"
     assert jobs["manifest"]["needs"] == ["prepare", "init", "build", "e2e"], \
         "manifest 必须以真镜像 e2e 为硬前置"
     assert jobs["e2e"]["needs"] == ["prepare", "build"]
     assert not jobs["e2e"].get("continue-on-error"), "e2e 是发布硬门禁，禁软"
     assert not jobs["manifest"].get("continue-on-error")
-    assert jobs["warm-mirrors"].get("continue-on-error") is True, "预热是 best-effort"
+    # v1.0.1 ACR 主源：push-acr 是发布硬前置（image 指 ACR，ACR 无 tag 即发布=
+    # 全体客户安装失败）——透传站 warm-mirrors（best-effort）已随主源退役。
+    assert not jobs["push-acr"].get("continue-on-error"), "push-acr 是硬门禁，禁软"
+    assert "push-acr" in jobs["release"]["needs"], "release 必须等 ACR 推送成功"
     assert jobs["gitee-release"]["needs"] == ["prepare", "release"]
 
 
-def test_manual_warm_workflow_and_docs_faq():
-    """v1.0.1 实发教训：1ms/nju 透传站多边缘缓存，CI 发版预热只覆盖 runner
-    命中的少数边缘——客户 DNS 分到冷边缘时首装停在 Downloading（实测 blob
-    33KB/s、nju 0B/12s 假活）。结构性对策两件，缺一不可：
-    ① workflows/warm.yaml 手动补热通道（对任意 tag 全量 GET 全部 blob，
-       多触发几轮=多命中些边缘）；② DOCS 商店页给客户"等1h→重装→移除重加
-       →改回 ghcr.io"分级处置话术。缺任一 = 下次发版客户再次干等。"""
+def test_image_source_acr_strategy():
+    """v1.0.1 定案钉桩（v1.0.0 首装卡下载实发）：主源=自有 ACR 单仓多架构，
+    ghcr.io 灾备；透传站体系（1ms/nju 预热 job、warm.yaml 手动补热通道）整体
+    退役且**禁复活**——域名白名单钉桩在 test_store_schema，本测试守 CI 面与
+    文档面：①warm.yaml 不得存在（复活=双分发体系漂移）；②ci.yaml 不得再引用
+    透传站；③DOCS FAQ 必须给客户「卡下载→等 ACR 恢复期→改 ghcr.io 灾备」话术
+    （灾备仓名 {arch}-huijian-voice 与 ghcr 实仓一致，抄了就能装）。"""
     warm_path = ROOT.parent / ".github" / "workflows" / "warm.yaml"
-    assert warm_path.is_file(), "缺手动补热 workflow"
-    doc = yaml.safe_load(warm_path.read_text(encoding="utf-8"))
-    trig = doc.get("on", doc.get(True))  # YAML 1.1 把裸 on: 键解析为布尔 True
-    assert "workflow_dispatch" in trig, "补热必须是手动触发"
-    assert "tag" in trig["workflow_dispatch"]["inputs"], "必须可指定任意历史 tag"
-    script = list(doc["jobs"].values())[0]["steps"][-1]["run"]
-    assert "blobs/" in script and "bytes=" not in script, \
-        "必须无 Range 全量 GET（预热整 blob 入边缘缓存，Range 只热片段）"
-    for reg in ("ghcr.1ms.run", "ghcr.nju.edu.cn"):
-        assert reg in script, f"补热必须覆盖 {reg}"
+    assert not warm_path.exists(), "透传站手动补热通道已退役，禁复活"
+    ci = (ROOT.parent / ".github" / "workflows" / "ci.yaml").read_text(encoding="utf-8")
+    for gone in ("ghcr.1ms.run", "ghcr.nju.edu.cn", "warm-mirrors"):
+        assert gone not in ci, f"CI 不得残留透传站体系：{gone}"
+    assert "push-acr" in ci and "buildx imagetools create" in ci, "ACR 合并推送链在位"
     docs = (ROOT / "DOCS.md").read_text(encoding="utf-8")
-    assert "Downloading docker image" in docs, "商店 FAQ 必须教客户识别该卡点"
-    assert "卸载再重装" in docs and "ghcr.io" in docs, "FAQ 必须有分级处置（重装+兜底换源）"
+    assert "Downloading docker image" in docs, "FAQ 必须教客户识别卡下载症状"
+    assert "ghcr.io/fangwenyi-dev/{arch}-huijian-voice" in docs, \
+        "FAQ 灾备换源串必须完整可抄（含 {arch} 模板）"
 
 
 def test_repo_standard_artifacts():

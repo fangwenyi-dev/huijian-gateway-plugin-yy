@@ -26,9 +26,11 @@ ESP 语音卫星设备（小智协议子集）直连本加载项即可对话控�
    进度见加载项「文档/信息」下方的管理页 → 模型区）；
 3. 重启一次 HA Core（首次安装时落盘的 `huijian_ai` 集成需要，管理页有提示）。
 
-国内加速：`config.yaml` 的 image 指向 `ghcr.1ms.run` 透传站（缓存由 CI 发版时
-预热，见网关仓同款方案）；若安装失败可手动改为 `ghcr.io` 源站
-（Supervisor → 加载项 → 配置无此项时通过修改本仓文件本地安装）。
+国内加速：`config.yaml` 的 image 指向自有阿里云 ACR 公开仓（v1.0.1 起，单仓
+多架构 OCI index 自动匹配 amd64/aarch64；CI `push-acr` job 用 buildx imagetools
+把 ghcr 已过 e2e 门禁的双架构仓在 registry 侧合并推送，为 release 硬前置）。
+历史：v1.0.0 曾走 ghcr.1ms.run 透传站，因新 tag 边缘缓存冷致首装卡下载而退役。
+若 ACR 故障可手动改 image 为 `ghcr.io` 灾备源（DOCS FAQ 有完整换源串）。
 
 ### 什么时候需要重启 HA？
 
@@ -66,9 +68,9 @@ ESP 语音卫星设备（小智协议子集）直连本加载项即可对话控�
 ## 开发
 
 - 架构与实证结论：[huijian_voice/README.md](huijian_voice/README.md)
-- 测试：`cd huijian_voice && python -m pytest tests -q`（115 项钉桩）
+- 测试：`cd huijian_voice && python -m pytest tests -q`（116 项钉桩）
 - CI 全链门禁：lint → build(双架构) → **e2e 真镜像三通道** → manifest →
-  镜像预热 → GitHub/Gitee 双 Release（[.github/workflows/ci.yaml](.github/workflows/ci.yaml)）
+  **push-acr（国内主源，硬前置）** → GitHub/Gitee 双 Release（[.github/workflows/ci.yaml](.github/workflows/ci.yaml)）
 - 贡献规则与陷阱清单：[CLAUDE.md](CLAUDE.md)
 
 ## 版本与历史

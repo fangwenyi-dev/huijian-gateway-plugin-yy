@@ -83,5 +83,7 @@ HUIJIAN_HA_TOKEN=x HUIJIAN_MODELS_DIR=<模型解包父目录> python -m core
 - 改 `config.yaml` version + 更新根 `CHANGELOG.md`（`## [x.y.z]` 头）→ push main：
   CI 九 job 全链 lint→prepare→init→build×2→**e2e 真镜像**→manifest(+匿名可拉
   检查)→国内镜像站预热→GitHub Release→Gitee Release 自动补发。
-- 商店安装走 `ghcr.1ms.run` 透传站（image 字段），CI 推 ghcr.io 源站并预热。
+- 商店安装走自有 ACR（image 字段，v1.0.1 起）；CI 同时推 ghcr.io 双架构仓+统一
+  manifest 作为灾备源（DOCS FAQ 有换源串）。曾走 `ghcr.1ms.run` 透传站，因新 tag
+  边缘缓存冷致首装卡下载而退役。
 - 真机 E2E（HA OS aarch64 + 固件 + 小程序）为发布前人工补测项，本机/CI 绿≠可交付。

@@ -45,7 +45,11 @@ host_network: true
 # 商店安装统一走 ghcr.1ms.run 透传站（网关定案：Supervisor 单 URL 无多源回退，
 # 国内直连 ghcr.io 握手失败率不可忽略；CI 每次发版双架构全 blob 预热，缓存必命中；
 # 透传站故障时客户手动换回 ghcr.io 同 tag 即可，见 DOCS「排障」）。
-image: ghcr.1ms.run/fangwenyi-dev/{arch}-huijian-voice
+# v1.0.1 主源=自有阿里云 ACR 个人版（上海，公开仓，单仓多架构 manifest，
+# Supervisor 拉 image:version 由 docker 自动匹配本机架构）。v1.0.0 曾用
+# ghcr.1ms.run 透传站——新 tag 边缘冷致首装卡"下载"（实测 blob 33KB/s 慢滴），
+# 已退役。ghcr.io/fangwenyi-dev/{arch}-huijian-voice 保留为灾备源（DOCS FAQ）。
+image: crpi-92gcrmsz8v7vvdy1.cn-shanghai.personal.cr.aliyuncs.com/fangwenyi-dev/huijian-gateway-plugin-yy
 
 # 挂载：
 #  homeassistant_config:rw —— run.sh 落盘安装 huijian_ai 集成（体验层融合三件套之一）

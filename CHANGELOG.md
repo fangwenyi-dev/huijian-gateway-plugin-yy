@@ -13,9 +13,19 @@
   runner 命中的少数边缘，客户 DNS 分到冷边缘即干等。新增对任意 tag 全量
   GET 全部 blob（amd64/aarch64 × 双站）的手动补热通道，多触发几轮=多命中
   边缘；本批推送后立即对 1.0.0 补热救援卡装用户。
-- **DOCS 排障升级**：「安装一直停在下载」分级处置（等 1h→卸载重装→仓库
-  移除重加→兜底改回 ghcr.io），钉桩 `test_manual_warm_workflow_and_docs_faq`
-  （dispatch 触发/任意 tag/无 Range 全量 GET/双站覆盖 + FAQ 话术在位）。
+- **镜像主源迁至自有阿里云 ACR（v1.0.0 首装卡下载的根治，用户开通）**：
+  `config.yaml` image 改 `crpi-…cn-shanghai.personal.cr.aliyuncs.com/
+  fangwenyi-dev/huijian-gateway-plugin-yy`（个人版公开仓，**单仓多架构 OCI
+  index**——Supervisor 拉同 tag 由 docker 自动选架构，弃 `{arch}` 仓名模板）。
+  CI 新增 `push-acr` job：manifest 验证过后用 `buildx imagetools create`
+  在 registry 侧把 ghcr 双架构仓合并推送 ACR（零本地转手），并自带匿名拉取
+  +双架构完整性实证步骤；**push-acr 为 release 硬前置**（image 指 ACR，
+  推送失败即不发布）。凭据 `ACR_USER/ACR_PASS` 已入 GitHub Secrets。
+  ghcr.io 双架构仓+manifest 原样保留=灾备源（DOCS FAQ 给完整可抄换源串）。
+- **透传站体系整体退役**：`warm-mirrors` job 与手动补热 `warm.yaml` 删除
+  （1ms/nju 边缘缓存覆盖靠运气的结构性缺陷实锤：新 tag blob 33KB/s 慢滴/
+  0B 假活）；钉桩 `test_image_source_acr_strategy` 禁复活 +
+  `test_store_schema` 域名白名单换 `{ACR, ghcr.io}` 并逐字钉死主源路径。
 
 ### Changed
 - **商店显示名「慧尖语音助手」→「慧尖HA语音插件」**（用户定案）：与 LoRa
