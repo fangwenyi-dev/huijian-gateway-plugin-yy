@@ -145,6 +145,19 @@ def test_repo_standard_artifacts():
     # （v1.7.17 定案：禁在此类测试硬编码具体镜像主源域名）。
 
 
+def test_dockerfile_pre_from_scope_only_args():
+    """首个 FROM 前是全局作用域，Docker 只接受 ARG/parser-directive/comment。
+    v1.0.0 CI 首炸实证：stage 前放 LABEL → buildx 报 "no build stage in current
+    context"，两架构 build job 双红、e2e/manifest/release 全链 skipped。"""
+    txt = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    m = re.search(r"^FROM\s", txt, re.M)
+    assert m, "Dockerfile 无 FROM？"
+    for ln in txt[:m.start()].splitlines():
+        t = ln.strip()
+        assert not t or t.startswith("#") or re.match(r"^(ARG\s|syntax\s*=|\/\/#)", t), \
+            f"FROM 之前出现非法全局指令：{t[:60]}"
+
+
 def test_www_ingress_relative_and_static_root_clean():
     www = (ROOT / "www" / "index.html").read_text(encoding="utf-8")
     assert "INGRESS_BASE" in www, "www 缺 Ingress 前缀适配（网关同款范式）"

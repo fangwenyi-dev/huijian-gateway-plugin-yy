@@ -72,7 +72,7 @@ Supervisor 的 `RE_SCHEMA_ELEMENT` 只接受
 ```
 huijian_voice/          # 交付物本体（加载项目录）
 ├── core/               # 运行时（ws/admin/nlu/asr/tts/model_store/…）
-├── tests/              # 110 项钉桩 + e2e/（真镜像 CI 门禁 + run_local 本地）
+├── tests/              # 111 项钉桩 + e2e/（真镜像 CI 门禁 + run_local 本地）
 ├── www/                # Ingress 管理页（全中文，版本四源之一）
 ├── custom_components/  # 随镜像分发的 huijian_ai（D1 补丁，版本对齐加载项）
 ├── DOCS.md / README.md # 商店文档页 / 开发架构文档

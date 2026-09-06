@@ -92,8 +92,18 @@
 - **`_loop_models` pend NameError 边缘**（异常路径打死模型保障循环）+ 商店清单
   更名 `repository.yaml`（新规范）。
 
+### Fixed — CI 首跑实证修（v1.0.0 发布过程中，2026-09-08 首推 run 34033427692）
+
+- **Dockerfile 全局作用域违规**：`LABEL org.opencontainers.image.source` 误置于首个
+  `FROM` 之前——Docker 规定 stage 之前只接受 ARG/parser 指令/注释，buildx 报
+  `no build stage in current context`，amd64/aarch64 双 build job 同炸，
+  e2e/manifest/release 全链级联 skip（门禁设计如此，未发布任何半成品 ✓）。
+  修复：LABEL 移入 stage 内；钉桩 `test_dockerfile_pre_from_scope_only_args`
+  静态扫描 FROM 前所有非注释行，复发即红。
+
+
 ### 验证与测试基线
-- **110 项 pytest 钉桩**全绿（NLU 矩阵/WS 协议契约/管理面路由/并发守卫/基建契约/
+- **111 项 pytest 钉桩**全绿（NLU 矩阵/WS 协议契约/管理面路由/并发守卫/基建契约/
   发布一致性），CI lint 硬门禁。
 - **Windows 全栈 E2E-lite**（真 sherpa-onnx + 真 onnxruntime + 真 Kokoro + 真
   libopus）：三通道两轮 + 卸载/惰性重载/busy 避让/single-flight 实测。

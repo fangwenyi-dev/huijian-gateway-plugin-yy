@@ -4,11 +4,13 @@
 # → 必须 Debian glibc；hassio-addons/debian-base 自带 s6-overlay v3 + bashio。
 # 版本一致性：BUILD_VERSION 由 HA 构建器从 config.yaml 注入（CI 矩阵双架构）。
 # ═══════════════════════════════════════════════════════════════════
-# CI 元数据（builder 版不支持 --label，OCI 标签按文档走 Dockerfile LABEL）
-LABEL org.opencontainers.image.source="https://github.com/fangwenyi-dev/huijian-gateway-plugin-yy"
-
+# 首个 FROM 之前 Dockerfile 全局作用域只准放 ARG/解析指令——LABEL 等必须落 stage 内
+# （v1.0.0 CI 首炸实证：stage 前 LABEL → buildx "no build stage in current context"）
 ARG BUILD_FROM=ghcr.io/hassio-addons/debian-base:7.8.3
 FROM ${BUILD_FROM}
+
+# OCI 元数据（builder split-action 不传 --label，按文档走 Dockerfile LABEL）
+LABEL org.opencontainers.image.source="https://github.com/fangwenyi-dev/huijian-gateway-plugin-yy"
 
 ARG BUILD_ARCH=amd64
 ARG BUILD_VERSION=0.0.0
