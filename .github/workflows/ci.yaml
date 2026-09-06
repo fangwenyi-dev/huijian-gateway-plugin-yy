@@ -305,11 +305,46 @@ jobs:
       - name: Merge ghcr arch repos into multi-arch index on ACR
         run: |
           set -eu
+          # 首枪实发教训（v1.0.1 run1 403 "blob type invalid"）：hassio builder 推的
+          # 单架构仓 tag 是含 provenance attestation 的 index，imagetools 按 tag 复制
+          # 会连 attestation blob 一起搬——ACR 个人版拒收该 blob 类型。对策：先从源
+          # index 解析出【纯镜像子 manifest】的 digest，用 @digest 显式引用绕过 attestation。
+          child_digest() { # $1=repo $2=tag $3=oci_arch
+            local TOK J
+            TOK=$(curl -fsS "https://ghcr.io/token?service=ghcr.io&scope=repository:${OWNER}/$1:pull" \
+                  | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+            J=$(curl -fsS -H "Authorization: Bearer $TOK" \
+                -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json' \
+                "https://ghcr.io/v2/${OWNER}/$1/manifests/$2")
+            printf '%s' "$J" | python3 -c '
+          import json,sys
+          m=json.load(sys.stdin)
+          if "manifests" in m:
+              hit=[e for e in m["manifests"]
+                   if e.get("platform",{}).get("architecture")==sys.argv[1]
+                   and e.get("platform",{}).get("os")=="linux"]
+              assert hit, f"index 中无 {sys.argv[1]}/linux 纯镜像条目"
+              print(hit[0]["digest"])
+          else:
+              # tag 直指纯 image manifest（无 attestation 形态）——自报 digest
+              import hashlib
+              print("sha256:"+hashlib.sha256(sys.stdin.buffer.read(0) or b"").hexdigest() if False else "")
+              sys.exit(2)' "$3" || {
+              # 纯 manifest 分支：digest 从 Docker-Content-Digest 头拿
+              curl -fsSI -H "Authorization: Bearer $TOK" \
+                -H 'Accept: application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json' \
+                "https://ghcr.io/v2/${OWNER}/$1/manifests/$2" | tr -d '\r' \
+                | sed -n 's/^Docker-Content-Digest: *\(sha256:[0-9a-f]*\).*/\1/p'; }
+          }
           for TGT in "$VERSION" latest; do
+            AM=$(child_digest "amd64-huijian-voice" "$TGT" amd64)
+            AR=$(child_digest "aarch64-huijian-voice" "$TGT" arm64)
+            [ -n "$AM" ] && [ -n "$AR" ] || { echo "::error::源 digest 解析失败 amd64=$AM arm64=$AR"; exit 1; }
+            echo "纯镜像 digest: amd64=$AM aarch64=$AR"
             docker buildx imagetools create \
               -t "$ACR/$ACR_REPO:$TGT" \
-              "ghcr.io/$OWNER/amd64-huijian-voice:$TGT" \
-              "ghcr.io/$OWNER/aarch64-huijian-voice:$TGT"
+              "ghcr.io/$OWNER/amd64-huijian-voice@$AM" \
+              "ghcr.io/$OWNER/aarch64-huijian-voice@$AR"
           done
       - name: Self-verify anonymous pull + dual-arch index
         run: |
