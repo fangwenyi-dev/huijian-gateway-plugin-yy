@@ -4,6 +4,11 @@
 ESP 语音卫星设备（小智协议子集）直连本加载项即可对话控制 Home Assistant，
 不经任何公网服务器。
 
+**⚠ 这是独立项目**：本仓（慧尖**语音**加载项）与慧尖 LoRa 网关项目
+[ha-gateway-plugin](https://github.com/fangwenyi-dev/ha-gateway-plugin) 代码、
+发版、远端**完全分离**——仓名仅一字之差（`-yy` 后缀），任何提交/推送前务必核对
+`git remote -v`，严禁互推。
+
 姊妹仓 [ha-gateway-plugin](https://github.com/fangwenyi-dev/ha-gateway-plugin)
 （LoRa 网关加载项）负责设备接入层，本仓负责语音层；两者独立发版、互不阻塞
 （v4.1 定案「同仓双镜像/独立升级」，本仓可独立添加，也可后续并入）。
