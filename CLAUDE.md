@@ -79,6 +79,9 @@ Supervisor 的 `RE_SCHEMA_ELEMENT` 只接受
 | WSL `ln -s` 建的符号链接 Windows 侧 1920 | 用 `cmd /c mklink /J` junction；model_dir_for 有 OSError 守卫 |
 | bash 命令行里 pkill/kill -f | 禁——先 write 成脚本再执行，或 netstat 定位精确 PID |
 | 版本 bump 全局 sed | 只准替换字段值行；测试四源一致兜底 |
+| Dockerfile 写 `CMD ["/init"]`（base ENTRYPOINT 已是 /init）→ `/init /init` argv 污染，s6 v3 legacy services 全停摆（v1.0.0 CI e2e 实炸） | 删 CMD；钉桩 `test_dockerfile_no_redundant_init_cmd` |
+| split-action 时代 `ARG BUILD_VERSION` 不被注入 → ENV 烘 0.0.0 毒值进版本显示（v1.0.0 e2e 前瞻拦截） | boot 版本戳权威源=镜像内 www/version.json；const 过滤 0.0.0/dev；钉桩 `test_version_stamp_poison_guard` |
+| e2e 客户端拷进容器 /tmp 后按仓内相对层级找 core → ModuleNotFound（v1.0.0 run5 实炸） | `E2E_APP_ROOT` 显式指定；编排+客户端两侧对齐 |
 
 ## 目录职责
 
