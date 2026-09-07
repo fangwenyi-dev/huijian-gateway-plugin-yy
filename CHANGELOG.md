@@ -5,6 +5,11 @@
 
 ## [1.0.2] - 2026-09-XX
 
+- **修复（内嵌集成 config_flow）**：设备配对数据等待窗 60s→**300s**——实机日志
+`Timeout waiting for setup data` 根因：扫码→贴令牌→BLE CMD20→设备 POST 的人肉链路
+远超 60s；超时日志带可操作指引，setup_data 缺失时给中文引导话术（不再裸报
+「配置类型未知」）；行为钉桩 test_integration_config_flow（3 条）。
+
 ### Added（三项目完美适配战役·批次1：加载项侧三修）
 - **`:8000 GET /discover` 无凭据端点发现面**（判定书缺口2）：小程序/设备侧
   三扇门全关（/api/endpoints 被 nginx ACL 403、endpoints.json 不落静态根、

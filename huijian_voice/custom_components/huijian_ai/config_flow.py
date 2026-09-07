@@ -164,6 +164,11 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
             "haid": await get_haid(self.hass),
             "uuid": self.setup_uuid,
             "home_name": self.hass.config.location_name,
+            # 判定书 v1.0.2（用户实机 setup-data 超时根治）：二维码正文是 external
+            # （配置了远程访问即公网/反代地址），而设备 CMD20 后 POST 目标直接取该
+            # 正文——固件 HTTP 客户端到公网 TLS/中转常不可达，setup_data 永不到达。
+            # 追加局域网直连字段，小程序给设备的地址以它为准。
+            "ha_internal": internal,
         }
         reconfig_entry = self._get_reconfig_entry()
         if reconfig_entry and reconfig_entry.data.get("mac"):
@@ -202,9 +207,20 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
             user_input = {}
 
         _LOGGER.info("setup_data: %s", self.setup_data)
-        config_type = (
-            self.setup_data.get("config_type", "device") if self.setup_data else None
-        )
+        if not self.setup_data:
+            return self.async_show_form(
+                step_id="qrcode_done",
+                errors={"base": "unknown_config_type"},
+                data_schema=vol.Schema({}),
+                description_placeholders={
+                    "tip": (
+                        "等待超时：未收到设备配对数据（约 5 分钟）。"
+                        "请确认设备处于配网模式、小程序已完成“连接 Home Assistant”"
+                        "配对（CMD20），然后重新扫码。"
+                    ),
+                },
+            )
+        config_type = self.setup_data.get("config_type", "device")
         mcp_endpoint = self.setup_data.get("mcp_endpoint") if self.setup_data else None
         _LOGGER.info("mcp_endpoint: %s", mcp_endpoint)
 
@@ -298,12 +314,24 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
             },
         )
 
+    # 判定书 v1.0.2 补丁：设备配对数据（CMD20→设备 POST）的人肉链路远超 60s——
+    # 扫码→贴令牌→BLE 连接→发送→设备同步 POST，实测窗口常 >2min，原 60s
+    # 必超时（用户日志 Timeout waiting for setup data 即此）。放宽至 5min。
+    _WAIT_SETUP_ROUNDS = 1000
+    _WAIT_SETUP_INTERVAL = 0.3
+
     async def _wait_for_setup_data(self):
-        for _ in range(200):
+        for _ in range(self._WAIT_SETUP_ROUNDS):
             if self.setup_data:
                 return
-            await asyncio.sleep(0.3)
-        _LOGGER.warning("Timeout waiting for setup data for %s", self.setup_uuid)
+            await asyncio.sleep(self._WAIT_SETUP_INTERVAL)
+        self._setup_wait_timed_out = True
+        _LOGGER.error(
+            "Timeout waiting for setup data for %s (waited %.0fs)；"
+            "请确认设备已被小程序配对（BLE CMD20 完成后设备会 POST 本流程）",
+            self.setup_uuid,
+            self._WAIT_SETUP_ROUNDS * self._WAIT_SETUP_INTERVAL,
+        )
 
     def _get_reconfig_entry(self):
         if getattr(self, "_reauth_entry", None):
