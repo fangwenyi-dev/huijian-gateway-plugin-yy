@@ -1,14 +1,17 @@
-"""理解级联编排（v4.1 §2-E）：
-  T0 正则 → T1 TextCNN → 场景触发（含于 T0/T1 内） → 查询族 → LLM(默认关) → 固定兜底
+"""理解级联编排（v1.0.9 三层定位）：
+  scene 契约 > 慧尖独占意图(窗/模式/调节/场景自动化管理) > klar 标准控制 >
+  字面表剩余(t0/T1) > 查询族 > LLM(用户配置才启用) > 固定兜底；
+  执行期两路互为降级（慧尖意图挂→klar 直调兜底；klar 挂→字面表回退）。
 外加执行结果旁路：huijian_voice_utterance 事件（回合留痕，HA 自动化可消费）。
 本级联是 LLM 通道 detect 的业务内核；STT/TTS 通道不经过它。
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 from . import const
 from .nlu.fast_path import FastPath, Plan
@@ -16,19 +19,58 @@ from .nlu.klar_client import KlarClient
 
 logger = logging.getLogger("huijian.pipeline")
 
-# 级联仲裁（v1.0.8 klar 一级 NLU）：字面表恒优先于任何模型/引擎——场景触发词/
-# 正则表是产品契约（用户配了就必须 100% 命中）。klar = "一级 NLU"（先于
-# TextCNN T1），与字面表不是一层竞品。来源以 t0/scene 命名者 = 字面表族。
-LITERAL_SOURCES = frozenset({"t0", "t0_strip", "t0_prefix", "t0_pinyin", "scene"})
+# ── 级联仲裁（v1.0.9 三层定位，用户拍板）──────────────────────────
+# ① scene = 用户触发词契约，恒最高优先；
+# ② 慧尖意图只负责 klar 做不了的类型：窗户（开合器=按钮按压语义）、模式
+#    （能力探测+剔除 off）、相对/属性调节、语音场景与自动化管理、实时上下文；
+#    目标名含窗类词（窗帘/纱窗除外——它们是标准 cover）同样归慧尖意图；
+# ③ 标准控制（开/关/调亮/温度…）klar 恒优先：引擎 grounded entity_id 直调
+#    服务，不依赖 huijian_ai 集成——集成没加载的路也有（指令①）；
+# ④ 两路互为降级（select_fallback_plan），仍失败且用户配了 LLM 才复议（指令③）。
+HUIJIAN_ONLY_INTENTS = frozenset({
+    "ControlWindow", "SetDeviceMode", "AdjustDeviceAttribute",
+    "HassTriggerVoiceScene", "HassCreateVoiceScene", "HassDeleteVoiceScene",
+    "HassListVoiceScenes", "HassCreateAutomation", "HassDeleteAutomation",
+    "HassListAutomations", "HassUpdateAutomation", "HuijianGetLiveContext",
+})
+
+_INTEGRATION_HINTS = ("集成",)
+
+
+def _mentions_window_device(args: Any) -> bool:
+    """慧尖场景里「窗」多为开合器按钮，cover 服务表达不了内倒/暂停。
+    先剔除窗帘/纱窗（标准 cover，klar 干得好）。永不抛。"""
+    try:
+        t = json.dumps(args or {}, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return False
+    t = t.replace("窗帘", "").replace("纱窗", "")
+    return any(w in t for w in ("窗", "开合器", "内倒", "推拉门"))
 
 
 def select_primary_plan(fp: Optional[Plan], kl: Optional[Plan]) -> Optional[Plan]:
-    """纯裁决函数（可单测）：字面表 > klar > TextCNN T1。"""
-    if fp is not None and fp.source in LITERAL_SOURCES:
-        return fp
+    """纯裁决函数（可单测）：scene 契约 > 慧尖独占 > klar 标准 > 字面表剩余。"""
+    if fp is not None:
+        if fp.source == "scene":
+            return fp
+        if fp.intent in HUIJIAN_ONLY_INTENTS or _mentions_window_device(fp.args):
+            return fp
     if kl is not None:
         return kl
     return fp
+
+
+def select_fallback_plan(primary: Optional[Plan], fp: Optional[Plan],
+                         kl: Optional[Plan], speech: str) -> Optional[Plan]:
+    """纯函数：主计划执行失败后的降级选择；None = 不降级（如实报+LLM 复议）。"""
+    if primary is None:
+        return None
+    if primary.source != "klar":
+        # 慧尖意图失败：常见根因就是「集成还没加载」——klar 直调不依赖集成，
+        # 只要 klar 同句有命中（裁决时让位给契约/独占类），值得一试。
+        return kl if (kl is not None and kl is not primary) else None
+    # klar 失败（实体漂移/服务拒绝）：非场景类的字面表命中可作替代路径。
+    return fp if (fp is not None and fp is not primary and fp.source != "scene") else None
 
 
 @dataclass
@@ -77,7 +119,7 @@ class Pipeline:
         return reply
 
     async def _cascade(self, text: str) -> Reply:
-        # ⓪①②③④ klar 一级 NLU 与 T0/T1/场景并行判定，按字面表 > klar > T1 仲裁
+        # ⓪①②③④ klar 引擎与 T0/T1/场景并行判定，三层裁决（见模块头）
         try:
             fp_plan = await self.fast_path.match(text)
         except Exception:
@@ -91,15 +133,29 @@ class Pipeline:
         plan = select_primary_plan(fp_plan, kl_plan)
         if plan:
             ok, speech = await self.executor.run(plan)
+            trace = list(plan.trace)
+            if not ok:
+                fb = select_fallback_plan(plan, fp_plan, kl_plan, speech)
+                if fb is not None:
+                    logger.info("[级联] %s 执行失败 → 降级 %s:%s（%r）",
+                                plan.source, fb.source, fb.intent, speech[:24])
+                    ok2, speech2 = await self.executor.run(fb)
+                    trace.append(f"降级→{fb.source}:{fb.intent}" + ("✓" if ok2 else "✗"))
+                    if ok2:
+                        return Reply(speech2, fb.source, True, trace)
+                    # 两路全挂：降级话术点破「集成」根因者更可用（用户指令①的诊断价值）
+                    if (any(h in speech2 for h in _INTEGRATION_HINTS)
+                            and not any(h in speech for h in _INTEGRATION_HINTS)):
+                        speech = speech2
             if ok:
-                return Reply(speech, plan.source, True, plan.trace)
-            # 执行失败：LLM 开着则让 LLM 再尝试一次理解，否则如实播失败
+                return Reply(speech, plan.source, True, trace)
+            # 快速通道（klar+慧尖意图）双双用尽：LLM 配置了就复议，没配如实播失败
             if self.agent and self.agent.enabled:
                 logger.info("[级联] 快速通道执行失败 → LLM 复议: %s", speech)
                 llm = await self._llm(text)
                 if llm:
                     return llm
-            return Reply(speech, plan.source, False, plan.trace)
+            return Reply(speech, plan.source, False, trace)
         # ⑤ 查询族
         try:
             ans = await self.query.answer(text)
@@ -137,8 +193,8 @@ class Pipeline:
     async def dry_run(self, text: str) -> dict:
         """调试面板内核：只跑理解，不执行设备指令；查询族为只读 REST，可放心真答。
 
-        v1.0.8：plan 展示**真实会被执行的裁决结果**（字面表>klar>T1），并附
-        fast_path / klar 两路原始命中，调试面板可直视分派依据。"""
+        v1.0.9：plan 展示**真实会被执行的裁决结果**（scene>慧尖独占>klar>
+        字面表剩余），并附 fast_path / klar 两路原始命中，调试面板直视分派依据。"""
         fp_plan = await self.fast_path.match(text)
         try:
             kl_plan = await self.klar.match(text)

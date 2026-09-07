@@ -6,8 +6,9 @@
    （宁漏勿错，留给 TextCNN/查询族/LLM 既有链）。
 ② fail-open：引擎缺席/非 200/形制漂移 → match 恒 None 不抛；5 连败熔断
    300s，熔断期连 socket 都不碰（每句零延迟代价）。
-③ 级联仲裁：字面表(T0/场景) > klar > TextCNN T1——用户配的触发词是产品
-   契约，任何模型不许抢。
+③ 级联仲裁（v1.0.9 三层定位）：scene 契约 > 慧尖独占（窗/模式/调节/场景
+   自动化管理/目标含窗）> klar 标准控制 > 字面表剩余；执行期两路互为降级，
+   仍失败且用户配置了 LLM 才复议（没配 = 无视）。
 ④ 基建形状：boot 分发（sha256 核验）、s6 服务只绑回环、Dockerfile 装配、
    settings 默认开——任何一环被重构悄悄拆掉都要红。
 """
@@ -19,7 +20,7 @@ import pytest
 from core.executor import Executor
 from core.nlu.fast_path import Plan
 from core.nlu.klar_client import KLAR_CONTROL_INTENTS, KlarClient
-from core.pipeline import select_primary_plan
+from core.pipeline import select_fallback_plan, select_primary_plan
 
 _ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -204,15 +205,48 @@ def test_token_header_when_configured():
     assert s.calls[0]["headers"] == {"x-klar-token": "sekret"}
 
 
-# ── ③ 级联仲裁 ─────────────────────────────────────────────────
-def _plan(source, intent="X"):
-    return Plan(intent=intent, args={}, source=source)
+# ── ③ 级联仲裁（v1.0.9 三层定位）────────────────────────────────
+def _plan(source, intent="X", args=None):
+    return Plan(intent=intent, args=args or {}, source=source)
 
 
-def test_literal_tables_beat_klar():
-    for src in ("t0", "t0_strip", "t0_prefix", "t0_pinyin", "scene"):
-        fp, kl = _plan(src), _plan("klar", "HassTurnOn")
-        assert select_primary_plan(fp, kl) is fp, src
+def _std_on(area="办公室", name="射灯"):
+    return {"target": [{"area": area,
+                        "devices": [{"name": name, "domains": ["light"]}]}]}
+
+
+def test_scene_contract_beats_klar():
+    fp, kl = _plan("scene", "HassTriggerVoiceScene"), _plan("klar", "HassTurnOn")
+    assert select_primary_plan(fp, kl) is fp
+
+
+def test_huijian_only_intents_keep_literal():
+    for it in ("ControlWindow", "SetDeviceMode", "AdjustDeviceAttribute",
+               "HassCreateVoiceScene", "HassListAutomations", "HuijianGetLiveContext"):
+        fp, kl = _plan("t0", it), _plan("klar", "HassTurnOn")
+        assert select_primary_plan(fp, kl) is fp, it
+
+
+def test_window_device_names_keep_literal():
+    kl = _plan("klar", "HassTurnOn")
+    for nm in ("书房窗户", "客厅天窗", "内倒窗", "开合器", "推拉门"):
+        fp = _plan("t0_prefix", "TurnDeviceOff", _std_on("书房", nm))
+        assert select_primary_plan(fp, kl) is fp, nm
+
+
+def test_curtain_is_standard_cover_klar_wins():
+    fp = _plan("t0", "TurnDeviceOn", _std_on("客厅", "窗帘"))
+    kl = _plan("klar", "HassTurnOn")
+    # 窗帘=标准 cover：klar 命中即接管（用户指令②）
+    assert select_primary_plan(fp, kl) is kl
+
+
+def test_standard_control_klar_first():
+    # 用户指令②：t0 字面表的标准设备句，klar 引擎同句命中时让位——
+    # grounded entity_id 直调服务，不依赖慧尖集成（旧契约「字面表恒先」反转）
+    fp = _plan("t0", "TurnDeviceOn", _std_on())
+    kl = _plan("klar", "HassTurnOn")
+    assert select_primary_plan(fp, kl) is kl
 
 
 def test_klar_beats_textcnn():
@@ -224,6 +258,97 @@ def test_fallbacks_untouched():
     assert select_primary_plan(None, None) is None
     assert select_primary_plan(_plan("t1"), None).source == "t1"
     assert select_primary_plan(None, _plan("klar")).source == "klar"
+    assert select_primary_plan(_plan("t0", "TurnDeviceOn", _std_on()), None).source == "t0"
+
+
+# ── ③b 执行期降级（指令①：集成没加载 → klar 直调兜底；klar 挂 → 回退字面表）─
+def test_fallback_huijian_fail_goes_klar():
+    fp = _plan("t0", "AdjustDeviceAttribute", {"attribute": "brightness", "delta": "60"})
+    kl = _plan("klar", "HassLightSet")
+    assert select_fallback_plan(fp, fp, kl, "抱歉，慧尖 AI 集成还没生效") is kl
+    assert select_fallback_plan(fp, fp, kl, "抱歉，没找到符合条件的设备") is kl
+
+
+def test_fallback_klar_fail_returns_to_literal():
+    fp = _plan("t0", "TurnDeviceOn", _std_on())
+    kl = _plan("klar", "HassTurnOn")
+    assert select_fallback_plan(kl, fp, kl, "抱歉，设备清单里没匹配到") is fp
+
+
+def test_fallback_scene_never_becomes_second_path():
+    fp = _plan("scene", "HassTriggerVoiceScene")
+    kl = _plan("klar", "HassTurnOn")
+    assert select_fallback_plan(kl, fp, kl, "抱歉") is None
+    assert select_fallback_plan(fp, fp, None, "抱歉") is None
+
+
+def test_fallback_none_primary():
+    assert select_fallback_plan(None, None, None, "") is None
+
+
+# ── ③c _cascade 行为（降级链 + LLM 复议次序）────────────────────
+class SeqExecutor:
+    def __init__(self, results):        # plan.source → (ok, speech)
+        self.results, self.order = results, []
+
+    async def run(self, plan):
+        self.order.append(plan.source)
+        return self.results.get(plan.source, (True, "好的"))
+
+
+class FakeAgent:
+    enabled = True
+
+    async def answer(self, text, hist):
+        yield "LLM 复议结果"
+
+
+def _mk_pipe(fp_plan, kl_plan, ex, agent=None):
+    from core.pipeline import Pipeline
+    p = Pipeline.__new__(Pipeline)
+    class _M:
+        def __init__(self, pl): self.pl = pl
+        async def match(self, t): return self.pl
+    class _Q:
+        async def answer(self, t): return None
+    p.fast_path, p.klar, p.executor, p.agent, p.query = _M(fp_plan), _M(kl_plan), ex, agent, _Q()
+    return p
+
+
+def test_cascade_standard_goes_klar_directly():
+    fp = _plan("t0", "TurnDeviceOn", _std_on())
+    kl = _plan("klar", "HassTurnOn")
+    ex = SeqExecutor({"klar": (True, "好的，开了")})
+    r = arun(_mk_pipe(fp, kl, ex)._cascade("打开办公室射灯"))
+    assert r.ok and r.source == "klar" and ex.order == ["klar"]
+
+
+def test_cascade_huijian_only_fail_falls_to_klar():
+    fp = _plan("t0", "AdjustDeviceAttribute", {"attribute": "brightness"})
+    kl = _plan("klar", "HassLightSet")
+    ex = SeqExecutor({"t0": (False, "抱歉，慧尖 AI 集成还没生效——请安装集成"),
+                      "klar": (True, "好的，亮度60%了")})
+    r = arun(_mk_pipe(fp, kl, ex)._cascade("亮度调到60"))
+    assert r.ok and r.source == "klar"
+    assert ex.order == ["t0", "klar"] and any("降级→klar" in t for t in r.trace)
+
+
+def test_cascade_both_fail_picks_integration_speech():
+    kl = _plan("klar", "HassTurnOn")
+    fp = _plan("t0", "TurnDeviceOn", _std_on())
+    ex = SeqExecutor({"klar": (False, "抱歉，设备清单里没匹配到，请换个叫法试试"),
+                      "t0": (False, "抱歉，慧尖 AI 集成还没生效——请安装集成")})
+    r = arun(_mk_pipe(fp, kl, ex)._cascade("打开办公室射灯"))
+    assert not r.ok and "集成还没生效" in r.text and r.source == "klar"
+    assert any("降级→t0:TurnDeviceOn✗" in t for t in r.trace)
+
+
+def test_cascade_llm_deliberates_after_no_fallback():
+    fp = _plan("t1", "TurnDeviceOn", _std_on())
+    ex = SeqExecutor({"t1": (False, "抱歉，慧尖 AI 集成还没生效")})
+    r = arun(_mk_pipe(fp, None, ex, agent=FakeAgent())._cascade("打开灯"))
+    assert r.ok and r.source == "llm" and r.text == "LLM 复议结果"
+    assert ex.order == ["t1"]           # klar 无命中 → 无处降级 → LLM（指令③）
 
 
 # ── ④ 执行层（多分句 + klar 播报优先）──────────────────────────
