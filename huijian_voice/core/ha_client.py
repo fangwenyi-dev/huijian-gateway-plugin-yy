@@ -119,6 +119,37 @@ class HAClient:
             self.last_error = str(e)
             return {"success": False, "message": "HA 通道异常", "raw": None}
 
+    async def call_service(self, domain: str, service: str, data: dict,
+                           timeout: float = 10.0) -> dict:
+        """POST /api/services/<domain>/<service>。klar grounded 步骤（引擎已把
+        名称解析成 entity_id）绕开 intent handler 直调服务——与 klar 自家集成
+        dispatch.py 同路线。永不抛：失败折叠 {success:False, message}。"""
+        if not self.ok or self._session is None:
+            return {"success": False, "message": "HA 通道未就绪", "raw": None}
+        try:
+            async with self._session.post(
+                    self._url(f"/api/services/{domain}/{service}"), json=data,
+                    timeout=aiohttp.ClientTimeout(total=timeout)) as r:
+                self._reachable = r.status < 500
+                payload = await r.text()
+                if r.status in (200, 201):
+                    return {"success": True, "message": "", "raw": payload}
+                try:
+                    msg = (json.loads(payload) or {}).get("message", "") \
+                        if payload else ""
+                except Exception:
+                    msg = payload[:200]
+                return {"success": False,
+                        "message": msg or f"HA 拒绝({r.status})", "raw": payload}
+        except asyncio.TimeoutError:
+            self.last_error = f"{domain}.{service} 执行超时"
+            return {"success": False, "message": "执行超时", "raw": None}
+        except Exception as e:
+            self._reachable = False
+            self.last_error = str(e)
+            logger.warning("[HA] service %s.%s 调用异常: %s", domain, service, e)
+            return {"success": False, "message": "HA 通道异常", "raw": None}
+
     @staticmethod
     def _normalize_result(status: int, payload: str, name: str) -> dict:
         """防御式归一。可能的响应形制：

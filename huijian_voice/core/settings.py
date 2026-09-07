@@ -36,7 +36,8 @@ DEFAULTS: dict[str, Any] = {
         "provider": "local_kokoro",           # local_kokoro | cloud_openai_compat
         "sid": 45,                             # 定案默认音色：小北（女）。音色表见 web/sid 选项
         "speed": 1.0,                          # 0.8–1.2
-        "cloud": {"provider": "", "base_url": "", "api_key": "", "model": "", "voice": ""},
+        "cloud": {"provider": "", "base_url": "", "api_key": "", "model": "", "voice": "",
+                  "response_format": "", "sample_rate": 0},   # 预设透传项（空/0=pcm@24k）
     },
     "nlu": {
         "enabled": True,
@@ -44,6 +45,16 @@ DEFAULTS: dict[str, Any] = {
         "query_local": True,                   # 查询族（"客厅多少度"）本地读回（M1 定案）
         "thresholds_override": {},             # 按类阈值微调（默认用 intent.thresholds.json）
         "corrections_extra": {},               # 用户自定义热词纠错（追加到 58 条基础表）
+    },
+    "klar": {
+        # 一级确定性 NLU（klar-ha-nlu 引擎，容器内 s6 服务 loopback :10520）。
+        # 关/引擎缺失/连续失败熔断 → 恒降级 TextCNN，语音链不断（fail-open）。
+        "enabled": True,
+        "url": "http://127.0.0.1:10520",
+        "language": "zh-CN",                   # 按请求绑定语言包（防多包词表碰撞）
+        "timeout_s": 2.0,
+        "min_confidence": 0.80,                # 客户端第二道门（与引擎 execute band 同值）
+        "token": "",                           # loopback 默认免 token；外接远端引擎才需
     },
     "llm": {
         "enabled": False,                      # v4.1 定案默认关；4C8G 无可用本地 LLM

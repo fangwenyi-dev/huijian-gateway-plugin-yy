@@ -86,6 +86,16 @@
                 "data": {
                     "submit_confirm": "Confirmed"
                 }
+            },
+            "assist_reconfigure": {
+                "title": "Reconfigure voice engine endpoints",
+                "description": "Edit the huijian AI voice engine WebSocket endpoints (defaults point at the local add-on: ws://<HA host>:8000/xiaozhi/v1...). If the add-on moved or changed port, set the real addresses here; if token enforcement is enabled in the add-on, append ?token=<add-on token> to each endpoint. The entry reloads on submit.",
+                "data": {
+                    "llm_endpoint": "LLM endpoint",
+                    "stt_endpoint": "STT endpoint",
+                    "tts_endpoint": "TTS endpoint",
+                    "mcp_endpoint": "MCP endpoint (optional)"
+                }
             }
         },
         "progress": {

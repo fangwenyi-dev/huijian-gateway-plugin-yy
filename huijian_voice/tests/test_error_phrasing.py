@@ -44,6 +44,20 @@ def test_zh_error_internal_maps_to_restart_hint():
     assert "重启" in out and "（）" not in out
 
 
+def test_zh_error_internal_hint_covers_fresh_install():
+    """2026-09-11 web 调试台实锤：全新环境未装集成 → HA 对无 handler 的 intent
+    回 5xx → 旧话术只说『刚升级没重启』，用户完全被误导。新话术必须双场景。"""
+    out = zh_error("HA 内部错误(500)")
+    assert "安装" in out, "500 话术缺『未安装集成』分支——全新环境用户无从定位"
+
+
+def test_zh_error_unknown_intent_maps_to_install_hint():
+    """HA 若以 400 透出 'Unknown intent' 文本，也要映射到安装指引而非英文兜底。"""
+    out = zh_error("Unknown intent TurnDeviceOn")
+    assert "集成" in out and "安装" in out
+    assert "Unknown intent" not in out, "英文原文漏进播报"
+
+
 def test_zh_error_never_empty_parens_from_pipeline():
     """上游保证 raw 非空；函数层空括号模板仍在（兜底行为不变）。"""
     assert zh_error("") == "抱歉，这一步没有执行成功（），可以换个说法再试"

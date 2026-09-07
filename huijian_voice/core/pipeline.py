@@ -12,8 +12,23 @@ from typing import Optional
 
 from . import const
 from .nlu.fast_path import FastPath, Plan
+from .nlu.klar_client import KlarClient
 
 logger = logging.getLogger("huijian.pipeline")
+
+# 级联仲裁（v1.0.8 klar 一级 NLU）：字面表恒优先于任何模型/引擎——场景触发词/
+# 正则表是产品契约（用户配了就必须 100% 命中）。klar = "一级 NLU"（先于
+# TextCNN T1），与字面表不是一层竞品。来源以 t0/scene 命名者 = 字面表族。
+LITERAL_SOURCES = frozenset({"t0", "t0_strip", "t0_prefix", "t0_pinyin", "scene"})
+
+
+def select_primary_plan(fp: Optional[Plan], kl: Optional[Plan]) -> Optional[Plan]:
+    """纯裁决函数（可单测）：字面表 > klar > TextCNN T1。"""
+    if fp is not None and fp.source in LITERAL_SOURCES:
+        return fp
+    if kl is not None:
+        return kl
+    return fp
 
 
 @dataclass
@@ -25,13 +40,15 @@ class Reply:
 
 
 class Pipeline:
-    def __init__(self, settings, ha, scenes, textcnn, executor, agent=None):
+    def __init__(self, settings, ha, scenes, textcnn, executor, agent=None, klar=None):
         self.settings = settings
         self.ha = ha
         self.fast_path = FastPath(scenes, textcnn, settings)
         self.scenes = scenes
         self.executor = executor
         self.agent = agent
+        # 一级确定性 NLU（fail-open：引擎缺失/熔断恒 None，级联照旧）
+        self.klar = klar if klar is not None else KlarClient(settings)
         from .nlu.query import QueryZone
         self.query = QueryZone(ha, settings)
         self._last: dict[str, tuple[float, str]] = {}   # utterance → (ts, reply) 短时去重
@@ -60,12 +77,18 @@ class Pipeline:
         return reply
 
     async def _cascade(self, text: str) -> Reply:
-        # ①②③④ T0/T1/场景
+        # ⓪①②③④ klar 一级 NLU 与 T0/T1/场景并行判定，按字面表 > klar > T1 仲裁
         try:
-            plan = await self.fast_path.match(text)
+            fp_plan = await self.fast_path.match(text)
         except Exception:
             logger.exception("[级联] fast_path 异常（视为未命中）")
-            plan = None
+            fp_plan = None
+        try:
+            kl_plan = await self.klar.match(text)
+        except Exception:
+            logger.exception("[级联] klar 异常（fail-open，视为未命中）")
+            kl_plan = None
+        plan = select_primary_plan(fp_plan, kl_plan)
         if plan:
             ok, speech = await self.executor.run(plan)
             if ok:
@@ -112,10 +135,24 @@ class Pipeline:
 
     # Web UI「理解调试」用：只走级联不执行
     async def dry_run(self, text: str) -> dict:
-        """调试面板内核：只跑理解，不执行设备指令；查询族为只读 REST，可放心真答。"""
-        plan = await self.fast_path.match(text)
-        out = {"plan": None if plan is None else {"intent": plan.intent, "args": plan.args,
-               "source": plan.source, "trace": plan.trace}}
+        """调试面板内核：只跑理解，不执行设备指令；查询族为只读 REST，可放心真答。
+
+        v1.0.8：plan 展示**真实会被执行的裁决结果**（字面表>klar>T1），并附
+        fast_path / klar 两路原始命中，调试面板可直视分派依据。"""
+        fp_plan = await self.fast_path.match(text)
+        try:
+            kl_plan = await self.klar.match(text)
+        except Exception:
+            logger.exception("[级联] dry_run klar 异常（按未命中显示）")
+            kl_plan = None
+        plan = select_primary_plan(fp_plan, kl_plan)
+
+        def _dump(p):
+            return None if p is None else {
+                "intent": p.intent, "args": p.args, "source": p.source,
+                "trace": p.trace, "speech": getattr(p, "speech", ""),
+                "extra_steps": getattr(p, "extra_steps", [])}
+        out = {"plan": _dump(plan), "fast_path": _dump(fp_plan), "klar": _dump(kl_plan)}
         if plan is None:
             try:
                 out["query_answer"] = await self.query.answer(text)

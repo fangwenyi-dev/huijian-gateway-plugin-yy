@@ -58,10 +58,12 @@ COPY www/             /usr/share/nginx/html/
 COPY boot.sh   /etc/cont-init.d/01-huijian-voice.sh
 COPY run.sh    /etc/services.d/huijian-core/run
 COPY nginx.sh  /etc/services.d/nginx/run
+COPY klar-engine.sh /etc/services.d/klar-engine/run
 COPY nginx-huijian.conf /etc/huijian/nginx.conf
 RUN chmod +x /etc/cont-init.d/01-huijian-voice.sh \
              /etc/services.d/huijian-core/run \
-             /etc/services.d/nginx/run
+             /etc/services.d/nginx/run \
+             /etc/services.d/klar-engine/run
 
 # 注意：**禁止**再写 CMD/ENTRYPOINT ["/init"]。base 的 ENTRYPOINT 已是 /init
 # （ghcr 7.8.3 config 实证），重复 CMD 会变成 `/init /init`——s6-overlay v3 的

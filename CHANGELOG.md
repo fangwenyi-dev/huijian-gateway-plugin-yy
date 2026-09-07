@@ -3,6 +3,90 @@
 所有版本变更记录在此文件中。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [1.0.8] - 2026-09-11
+
+### 修复
+- **B0（严重）assist 自动注册真机失效根治**：v1.0.7 的
+  `__init__._assist_default_data` 使用 `CONF_DEVICE_NAME` 键但漏了 import——
+  真机只要 host 解析成功即抛 NameError，SOURCE_IMPORT 自动补建从未生效
+  （fire-and-forget 任务异常无人收割，v1.0.7 的字符串钉桩测不到这类 bug）。
+  现改用 async_step_import 实际消费的 `speak_name` 键，并把端点推导调用点
+  一并纳入 try（推导异常也 fail-open，绝不产生未收割任务异常）。
+- **B1 assist 条目 reauth 死端**：端点 401/失效时 ws_transport 清空端点并触发
+  reauth，但 `async_step_reauth` 对 assist 条目仍进 qrcode 流 5 分钟死等设备
+  POST（assist 无设备侧 POST 来源）。现 reauth 与 reconfigure 同款分流：
+  assist → 直接进端点编辑表单（复用 async_step_assist_reconfigure）。
+- **执行失败话术误导修正（web 调试台实锤）**：全新环境未安装 huijian_ai
+  集成时，HA 对 `POST /api/intent/handle` 的未注册 intent（TurnDeviceOn
+  等由集成注册）回 5xx → 旧 500 专属话术只说"刚升级没重启"，完全误导。
+  现 500 话术双场景（首次安装指引 + 升级重启指引），并新增
+  "Unknown intent" → 安装指引映射。
+- **B4 assist 条目名与 uuid 便签**：`async_step_import` 现兼容
+  speak_name/device_name 两种键（条目 device_name 不再静默落空串）；
+  `_async_create_or_update_assist` finalize 前 `clean_setup()` 弹掉
+  `hass.data[DOMAIN]` 的 uuid 便签（create_entry 路径不经 async_abort，
+  原实现每次 boot 自动补建都滞留一条内存泄漏）。
+
+### 新增
+- **一级确定性 NLU：接入 klar-ha-nlu 引擎（架构扩展）**。Rust 规则引擎
+  （MIT，FABBricate-IT-Solutions/klar-ha-nlu v2026.9.2）随加载项以 s6 服务
+  运行（新 klar-engine.sh → services.d/klar-engine/run，仅绑回环 :10520，
+  home graph 直读 /homeassistant/.storage——零额外挂载、零快照推送）；
+  boot.sh 拉官方 GitHub release 二进制并强制 SHA-256 digest 核验（缺
+  digest 拒装），无网可容忍（只警告，版本戳幂等）。分派仲裁：
+  字面表（T0/场景触发）> klar > TextCNN T1——用户配的触发词是产品契约，
+  任何模型不许抢；klar 仅在 decision=execute、多分句全部命中标准控制族
+  白名单（HassTurnOn/Off/Toggle/LightSet/ClimateSetTemperature/SetPosition/
+  Lock/Unlock/Fan/Vacuum…，HA 内置 handler 可直接执行、不依赖 huijian_ai
+  集成）、置信 ≥0.80 时接管，查询/媒体/计时/日历放行给既有查询族/LLM。
+  引擎自带中文播报优先于话术层模板；多分句按序执行。全程 fail-open：
+  缺席/超时/形制漂移恒降级，连续 5 败熔断 300s（熔断期零外拨零延迟），
+  引擎不存在时行为与 v1.0.7 逐字一致。配置键 `klar.enabled/url/language/
+  timeout_s/min_confidence/token`（默认即开，Supervisor options 零新增）。
+- `assist_reconfigure` 步骤中英双语 UI 文案（含"加载项开启 token 强制校验时
+  端点追加 ?token="指引）。
+
+### Web（平台预设一键接入）
+- **STT/TTS/LLM 三张卡新增「平台预设」下拉**：选平台即填好 Base URL/模型名/
+  音色并标注 API Key 申请入口，用户只剩粘贴 Key 一步。收录纪律 = 仅标准
+  OpenAI 兼容端点：LLM 12 家（DeepSeek/百炼/火山方舟/智谱/Kimi/硅基流动/讯飞星火/
+  Gemini/OpenAI/Ollama 局域网免 Key 等）、STT 5 家（百炼 Qwen3-ASR/硅基
+  SenseVoice/Groq/OpenAI/302.AI）、TTS 3 家（硅基 CosyVoice2 八预置中文音色/
+  OpenAI/302.AI）；讯飞/火山/腾讯/百度语音为私有协议**明确不收**（注释钉纪律 +
+  测试红线防回潮）。对照小智官方平台清单逐项核实兼容端点。
+- **云 TTS 健壮性配套**：预设透传 response_format/sample_rate（硅基 pcm 默认
+  44.1kHz 坑）；RIFF/WAVE 嗅探自动拆封取真实采样率（平台不守 format 也不出爆音），
+  mp3/ogg 明确报错指引改配置；TTS 云档新增「模型名」输入框（此前只能改 settings 文件）。
+
+### 文档
+- **商店源容灾指引（真机客户故障 2026-09-07 实证）**：Supervisor 对三个商店
+  仓库 `git ls-remote` 全刷 `SSL unexpected eof / StoreGitError`——GitHub 被
+  网络侧干扰，商店拉不到清单即看不到新版本（已装加载项不受影响，镜像走 ACR）。
+  源码实证根因边界：**2026 版 Supervisor 已无「互联网代理」配置项**，老教程
+  `--proxy-url` 不再适用，国内唯一硬解 = 镜像源。落地：根 README（原为空
+  文件，补齐商店入口页）、repository.yaml 用法注释、DOCS 安装步 + 排障新增
+  Gitee 镜像源指引（`gitee.com/fangwenyi-dev/…` 逐提交同步实测、二选一勿
+  同加、静态 DNS 缓解、第三方仓库可移除消刷屏）；姊妹仓网关商店 README
+  安装步同步双源。发布纪律追加：**每次推送必双推（GitHub+Gitee），否则
+  Gitee 源客户看不到新版**。
+
+### 测试
+- `test_integration_config_flow.py` +4 钉桩：assist reauth 分流、import
+  键名兼容、clean_setup 泄漏清理，以及**模块级名字解析 AST 静态钉桩**
+  （_unresolved_names 扫 `__init__.py`/`config_flow.py`，B0 这类
+  "用了未导入的名字"从此被测试拦下）。
+- 新增 `test_klar_nlu.py` 35 项：裁决纪律（execute-only / 白名单
+  all-or-nothing / 置信门 / slot 形制容忍）、fail-open 与熔断计数、级联仲裁
+  纯函数、多分句顺序执行与 klar 播报优先，以及 boot 分发 / s6 只绑回环 /
+  Dockerfile 装配 / settings 默认值的形状钉桩。顺手修复 `_EN_ERR_MAP`
+  死键 "no.*match"（该表按子串字面匹配，正则键永不命中；改为 "no match"）
+  ——klar 走 HA 内置 handler 的 no-match 400 由此才有中文话术；klar grounded
+  步骤（引擎已解析出 entity_id）新增 `HAClient.call_service` 直调通道
+  （intent handler 不认 entity_id 槽，klar 自家集成亦走此路线），含锁 D7
+  语义对齐、灯光属性键裁剪、多目标列表透传等 9 项执行映射测试。
+- `test_cloud_presets.py` 17 项：RIFF 拆封/奇数块对齐/mp3·opus 拒收/wav 实际
+  采样率优先/请求体透传/预设目录形状与私有协议红线钉桩。220 全绿。
+
 ## [1.0.7] - 2026-09-11
 
 ### 新增

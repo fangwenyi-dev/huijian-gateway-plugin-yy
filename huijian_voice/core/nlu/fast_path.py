@@ -143,9 +143,12 @@ _WINDOW_ACTION_SCAN = [
 class Plan:
     intent: str                                   # 直传 /api/intent/handle 的 name
     args: dict
-    source: str = ""                              # t0|t0_strip|t0_prefix|t0_pinyin|scene|t1
+    source: str = ""                              # klar|t0|t0_strip|t0_prefix|t0_pinyin|scene|t1
     utterance: str = ""
     trace: list[str] = field(default_factory=list)
+    # ── klar 一级 NLU 专用（其余来源恒默认值，构造全兼容）──
+    speech: str = ""                              # 引擎自带的中文播报（优先于话术层）
+    extra_steps: list = field(default_factory=list)  # 多分句后续步骤 [{name,args}]
 
 
 def _extract_text(raw: Any) -> str:

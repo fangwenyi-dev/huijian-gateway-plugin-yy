@@ -11,13 +11,22 @@
 - ✅ 局域网语音链路服务器：`huijian_ai` 集成作为消费端连 `ws://<HA>:8000/xiaozhi/v1/…`
   （慧尖卫星固件走「模式 B」= ESPHome API :6053 入 HA，由 HA 语音管线调度；
   matter-broker 形态卫星与小程序也可按端点直连该 WS——三通道对 LAN 开放）
-- ✅ HA 意图执行器：`打开客厅的灯` → `POST /api/intent/handle`（huijian_ai 14 意图）
+- ✅ 双引擎理解级联（v1.0.8 起）：**Klar 一级确定性 NLU**（klar-ha-nlu 引擎，
+  随镜像 s6 服务、仅回环 :10520，home graph 直读、零配置）+ TextCNN 二级兜底。
+  裁决顺序：字面表（T0/场景触发）> Klar > TextCNN > 查询族 > LLM。Klar 只接管
+  标准控制族（execute 判定 + 白名单 + 置信 ≥0.80），引擎缺席/失败全程
+  fail-open——行为与单引擎版逐字一致
+- ✅ HA 意图执行器：`打开客厅的灯` → Klar 解析出的**标准 Hass\* 意图**直调
+  HA 服务（无需安装集成即可控制灯/空调/窗帘/锁/扫地机）；慧尖 14 意图
+  （内倒、属性调节、场景族等）由 TextCNN 层执行（需 huijian_ai 集成）
 - ❌ 不是公网小智服务器的替代品（公网链路已退役；不提供账号/唤醒云服务）
 - ❌ 不自带大模型（LLM 兜底默认关闭，可自配 OpenAI 兼容端点）
 
 ## 安装（3 步）
 
-1. 加载项商店添加本仓库 → 安装「慧尖HA语音插件」→ 启动。
+1. 加载项商店添加本仓库（GitHub 拉不动时改用 Gitee 镜像源
+   `https://gitee.com/fangwenyi-dev/huijian-gateway-plugin-yy`，逐提交同步，
+   二选一勿同加）→ 安装「慧尖HA语音插件」→ 启动。
 2. 首启自动下载语音模型（约 1.3 GB；离线环境见「模型」页的 import 投放口）。
 3. **重启一次 HA Core**（加载自动落盘的 huijian_ai 集成）。
 
@@ -45,10 +54,40 @@ HA 桥接不可达→检查 HA 重启过没有；「调试」页输入一句看�
 
 **Q：音色能换吗？** 设置页 12 个内置音色（默认 小北 sid45），云端 TTS 亦可配。
 
+**Q：想接在线大模型 / 云端 STT·TTS？** 设置页三张卡各有「平台预设」下拉：选中平台即自动
+填好 Base URL/模型名/音色，**只需粘贴 API Key → 保存**。预设收录纪律 = 仅标准
+OpenAI 兼容端点：
+
+- **LLM 兜底（12 家）**：DeepSeek、阿里百炼、火山方舟（豆包）、智谱 GLM
+  （glm-4-flash 免费）、Kimi、硅基流动、讯飞星火、Gemini、OpenAI、302 类代理网关、
+  局域网 Ollama（免 Key，改 IP 即用）。
+- **云端 STT（5 家）**：百炼 Qwen3-ASR、硅基流动 SenseVoice、Groq Whisper、
+  OpenAI Whisper、302.AI；云端失败自动回落本地 Paraformer。
+- **云端 TTS（3 家）**：硅基流动 CosyVoice2（8 种中文预置音色 anna/alex 等）、
+  OpenAI TTS、302.AI；平台回 wav 自动解包取实际采样率，回 mp3/opus 会明确
+  提示改输出格式。
+
+每个预设下方直接标注 Key 申请入口；平台改模型名属常态——直接在模型名框改即可，
+无需等插件更新。讯飞/火山/腾讯/百度的**语音**接口是私有协议，OpenAI 兼容通道
+接不了，故不收（它们的 LLM 是标准兼容，可选）。
+
 **Q：完全离线？** 用 `/data/models/import/` 投放模型 + 关闭自动下载即可，无任何出网需求。
 
 ## 排障
 
+- **Supervisor 日志刷 `supervisor.store.git … unexpected eof while reading` /
+  `Could not reload repository … StoreGitError`**：GitHub 被你的网络侧干扰
+  （SNI 重置/DNS 污染），商店拉不到仓库**清单**——**不是加载项故障**：已装
+  加载项照常运行（镜像走阿里云 ACR、运行纯局域网，均不依赖 GitHub），只是
+  看不到新版本、商店不刷新。处置按序：
+  ① 慧尖系仓库换 Gitee 镜像源（逐提交同步内容一致）：「仓库」里删 GitHub
+  源、加 `https://gitee.com/fangwenyi-dev/huijian-gateway-plugin-yy`
+  （网关仓库为 …/ha-gateway-plugin）——**二选一，勿同加**（同 slug 会重复）；
+  ② 给 HA 主机设静态 DNS（223.5.5.5 / 119.29.29.29）可缓解 DNS 污染型失败；
+  ③ 第三方仓库（如 AlexxIT、songloft）无国内镜像可换：可暂时从「仓库」列表
+  移除消除刷屏，需要更新时再加回；Supervisor 本身会自动周期重试。
+  注意：**当前版 Supervisor 已无「互联网代理」配置项**（源码实证），网上老
+  教程的 `ha supervisor options --proxy-url` 不再适用，勿照做。
 - **商店里看不到「慧尖HA语音插件」卡片**：先看 Supervisor 日志（系统→诊断）里有无
   `Can't read .../config.yaml`。加载项仓库清单是**整份校验失败即整体静默跳过**
   （无前端报错）——历史上网关加载项就因一行臆造的 schema 语法踩过此坑，

@@ -66,7 +66,11 @@ def _assist_default_data(hass: HomeAssistant) -> dict | None:
     data = {
         CONF_CONFIG_TYPE: "assist",
         CONF_MCP_ENDPOINT: None,
-        CONF_DEVICE_NAME: "huijian AI 语音引擎",
+        # B0 根治：原写 CONF_DEVICE_NAME 键但本模块并未 import 该常量 →
+        # 真机 host 解析成功即 NameError，自动补建从未生效（v1.0.7 实锤）。
+        # async_step_import 消费的键是 speak_name（与 qrcode setup_data 同名，
+        # 由 config_flow 落进条目 data 的 device_name），此处直接给 speak_name。
+        "speak_name": "huijian AI 语音引擎",
     }
     for channel in VOICE_CHANNELS:
         data[f"{channel}_endpoint"] = f"ws://{host}:{VOICE_WS_PORT}/xiaozhi/v1/{channel}"
@@ -91,7 +95,14 @@ async def _async_auto_ensure_assist(hass: HomeAssistant, entry: ESPHomeConfigEnt
             CONF_CONFIG_TYPE
         ) == "assist":
             return  # 已有 assist 引擎条目（用户手建或此前自动建）
-    data = _assist_default_data(hass)
+    try:
+        # 包 try 而非只包 async_init：端点推导纯函数同样必须 fail-open，
+        # 任何异常（B0 这类 NameError、get_url 行为变化等）都不得逃出
+        # fire-and-forget 任务留下 "Task exception was never retrieved"。
+        data = _assist_default_data(hass)
+    except Exception:  # noqa: BLE001
+        LOGGER.exception("assist 端点推导失败（设备装配不受影响）")
+        return
     if not data:
         LOGGER.debug("assist 自动补建跳过：无法解析本机加载项 host（internal URL 缺失）")
         return

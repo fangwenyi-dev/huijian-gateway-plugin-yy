@@ -1,5 +1,7 @@
 # 慧尖加载项仓库 · 商店清单
-# 用法：HA「设置→加载项→商店→⋮→仓库」添加本仓库 GitHub URL 即可。
+# 用法：HA「设置→加载项→商店→⋮→仓库」添加本仓库 URL 即可；国内 GitHub
+# 被干扰（store.git unexpected eof/StoreGitError）时改用 Gitee 镜像源
+# https://gitee.com/fangwenyi-dev/huijian-gateway-plugin-yy（逐提交同步，二选一勿同加）。
 # 加载项自动发现：Supervisor 扫描一级子目录的 config.yaml（网关同款范式，
 # repository.yaml 规范实证于姊妹仓 huijian-gateway-plugin 真机运行）。
 # 同仓双镜像定案（v4.1）：网关与语音各自独立加载项目录、独立镜像、独立升级。

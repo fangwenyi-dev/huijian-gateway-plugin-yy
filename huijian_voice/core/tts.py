@@ -191,19 +191,52 @@ class TtsEngine:
         body = {"model": str(cloud.get("model") or "tts-1"),
                 "voice": str(cloud.get("voice") or "alloy"),
                 "input": text,
-                "response_format": "pcm",
+                "response_format": str(cloud.get("response_format") or "pcm"),
                 "speed": float(self.settings.get("tts.speed", 1.0))}
+        # 平台预设透传：如硅基流动 pcm 默认 44.1kHz，须显式指定才与预期一致
+        if sr_req := cloud.get("sample_rate"):
+            body["sample_rate"] = int(sr_req)
         timeout = aiohttp.ClientTimeout(total=30, connect=8)
         async with aiohttp.ClientSession(timeout=timeout) as sess:
             async with sess.post(f"{base}/audio/speech", json=body, headers=headers) as r:
                 if r.status != 200:
                     raise RuntimeError(f"HTTP {r.status}: {(await r.text())[:160]}")
                 raw = await r.read()
-        src_rate = int(cloud.get("sample_rate", 24000))   # OpenAI pcm = s16le@24k
+        # 部分 OpenAI 兼容平台无视 response_format 直接回 wav，甚至 mp3——
+        # RIFF 嗅探自动拆封取真实采样率；不可解码格式报明确指令改配置
+        pcm, src_rate = self._unwrap_audio(raw, int(cloud.get("sample_rate") or 24000))
         # F5：整段重采样+编码为秒级 CPU 活，出事件循环
         loop = asyncio.get_running_loop()
-        for pkt in await loop.run_in_executor(None, self._resample_encode, raw, src_rate):
+        for pkt in await loop.run_in_executor(None, self._resample_encode, pcm, src_rate):
             yield pkt
+
+    @staticmethod
+    def _unwrap_audio(raw: bytes, default_rate: int) -> tuple:
+        """返回 (s16le mono pcm, rate)。RIFF/WAVE 拆封；mp3/ogg 显式报错。"""
+        import struct
+        if len(raw) >= 44 and raw[:4] == b"RIFF" and raw[8:12] == b"WAVE":
+            pos, sr, bits, data = 12, 0, 0, None
+            while pos + 8 <= len(raw):
+                cid = raw[pos:pos + 4]
+                csz = struct.unpack("<I", raw[pos + 4:pos + 8])[0]
+                body = raw[pos + 8:pos + 8 + csz]
+                if cid == b"fmt " and len(body) >= 16:
+                    sr = struct.unpack("<I", body[4:8])[0]
+                    bits = struct.unpack("<H", body[14:16])[0]
+                elif cid == b"data":
+                    data = body
+                    break
+                pos += 8 + csz + (csz & 1)      # 块按偶数字节对齐
+            if data is None or not sr:
+                raise RuntimeError("云 TTS wav 头损坏（缺 fmt/data 块）")
+            if bits != 16:
+                raise RuntimeError(f"云 TTS wav 位深 {bits} 不支持（仅 16-bit）")
+            return data, sr
+        if raw[:3] == b"ID3" or (raw[:1] == b"\xff" and len(raw) > 1 and raw[1] & 0xE0 == 0xE0):
+            raise RuntimeError("云 TTS 返回 mp3：请在该平台改输出格式为 pcm 或 wav")
+        if raw[:4] == b"OggS":
+            raise RuntimeError("云 TTS 返回 ogg/opus：请在该平台改输出格式为 pcm 或 wav")
+        return raw, default_rate
 
     @staticmethod
     def _resample_encode(raw: bytes, src_rate: int) -> list:

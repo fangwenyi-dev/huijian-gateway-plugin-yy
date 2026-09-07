@@ -188,3 +188,117 @@ def test_init_auto_ensure_assist_hook():
     assert "async def _async_auto_ensure_assist" in s, "自动补建 helper 被回退"
     assert "_async_auto_ensure_assist(hass, entry)" in s, "device 装配后未触发自动补建"
     assert "SOURCE_IMPORT" in s
+
+
+def _fn_seg(name, source=None, async_only=True):
+    """取 config_flow 中某个函数定义的源码段（结构断言用）。"""
+    import ast
+    src = source if source is not None else _src()
+    want = ast.AsyncFunctionDef if async_only else (ast.FunctionDef, ast.AsyncFunctionDef)
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, want) and n.name == name)
+    return ast.get_source_segment(src, fn)
+
+
+def test_assist_reauth_branches_away_from_qrcode():
+    """B1（三端复核）：assist 条目 reauth 必须分流到端点编辑步。
+
+    触发链真实存在：加载项开 require_token 或端点失效 → ws_transport 收 401
+    清空端点并停重连 → 下次对话 get_entry_transport 抛 EntryAuthFailedError →
+    entry.async_start_reauth。assist 没有设备侧 POST 来源，reauth 走 qrcode
+    即 5 分钟必超时死等。v1.0.7 只分流了 reconfigure，本钉桩堵 reauth 缺口。
+    """
+    seg = _fn_seg("async_step_reauth")
+    assert "CONF_CONFIG_TYPE" in seg and '"assist"' in seg, (
+        "assist reauth 未分流——用户点『重新认证』会进扫码等待死端"
+    )
+    assert "async_step_assist_reconfigure" in seg, "assist reauth 应复用端点编辑表单"
+
+
+def test_import_assist_accepts_device_name_alias():
+    """B4：SOURCE_IMPORT 兼容 speak_name/device_name 两种键，条目名不再落空。"""
+    src = _src()
+    assert 'data.get("speak_name") or data.get(CONF_DEVICE_NAME' in src, (
+        "import 只认 speak_name 时，调用方给 device_name 会被静默吞成空串"
+    )
+
+
+def test_create_or_update_assist_cleans_uuid_scratch():
+    """B4：finalize 前 clean_setup 弹掉 hass.data[DOMAIN] 的 uuid 便签（防泄漏）。"""
+    seg = _fn_seg("_async_create_or_update_assist")
+    assert "self.clean_setup()" in seg, "create_entry 路径不过 async_abort，uuid 便签会永久滞留"
+
+
+# ── B0：模块级名字解析钉桩（防 NameError 级失明回归）──
+# 背景：v1.0.7 的 __init__._assist_default_data 用 CONF_DEVICE_NAME 键但漏
+# import——真机 host 解析成功即 NameError，assist 自动注册从未生效；本仓
+# 测试惯例是源码字符串钉桩，字符串断言对"用了未导入的名字"完全失明。此钉桩
+# 用 AST 静态解析模块作用域，堵住这一类 bug。
+
+_SPECIAL_GLOBALS = {
+    "__name__", "__file__", "__doc__", "__package__", "__spec__",
+    "__loader__", "__builtins__", "__debug__", "__class__", "__all__",
+}
+
+
+def _collect_bindings(node, out):
+    import ast
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Name) and isinstance(sub.ctx, (ast.Store, ast.Del)):
+            out.add(sub.id)
+        elif isinstance(sub, ast.arg):
+            out.add(sub.arg)
+        elif isinstance(sub, ast.ExceptHandler) and sub.name:
+            out.add(sub.name)
+        elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out.add(sub.name)
+        elif isinstance(sub, ast.Lambda):
+            for grp in (sub.args.posonlyargs, sub.args.args, sub.args.kwonlyargs):
+                for a in grp:
+                    out.add(a.arg)
+            if sub.args.vararg:
+                out.add(sub.args.vararg.arg)
+            if sub.args.kwarg:
+                out.add(sub.args.kwarg.arg)
+        elif isinstance(sub, (ast.Import, ast.ImportFrom)):
+            for a in sub.names:
+                if a.name != "*":
+                    out.add((a.asname or a.name).split(".")[0])
+        elif isinstance(sub, (ast.Global, ast.Nonlocal)):
+            for nm in sub.names:
+                out.add(nm)
+
+
+def _unresolved_names(src):
+    import ast
+    import builtins
+    tree = ast.parse(src)
+    if any(isinstance(n, (ast.Import, ast.ImportFrom))
+           and any(a.name == "*" for a in n.names) for n in ast.walk(tree)):
+        return []  # 星号导入环境判不了，放行
+    module_names = set(dir(builtins)) | _SPECIAL_GLOBALS
+    star_ok = True
+    for node in tree.body:
+        _collect_bindings(node, module_names)
+    problems = []
+    for fn in ast.walk(tree):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            local = set()
+            _collect_bindings(fn, local)
+            for n in ast.walk(fn):
+                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
+                    if n.id not in module_names and n.id not in local \
+                            and not hasattr(builtins, n.id):
+                        problems.append((fn.name, n.id, n.lineno))
+    return star_ok and problems
+
+
+def test_integration_module_names_all_resolvable():
+    """B0 钉桩：__init__/config_flow 禁止引用未定义模块级名字（NameError 类回归）。"""
+    import pathlib
+    base = pathlib.Path(CONFIG_FLOW).parent
+    for fname in ("__init__.py", "config_flow.py"):
+        src = (base / fname).read_text(encoding="utf-8")
+        problems = _unresolved_names(src)
+        assert not problems, f"{fname} 存在运行时必 NameError 的名字: {problems}"
+

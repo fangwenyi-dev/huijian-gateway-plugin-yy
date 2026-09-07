@@ -411,6 +411,10 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
         SOURCE_IMPORT(device 自动注册)、SOURCE_RECONFIGURE(用户改端点)。
         """
         haid = await get_haid(self.hass)
+        # create_entry 路径不会走 async_abort→clean_setup，uuid 便签若不清会
+        # 永久滞留 hass.data[DOMAIN]（每 boot 一条）；update 路径 abort 钩子再
+        # pop 一次也幂等安全（B4 泄漏清理）。config_data 已含 uuid 值，先清无碍。
+        self.clean_setup()
         if entry := self.hass.config_entries.async_entry_for_domain_unique_id(
             DOMAIN, haid
         ):
@@ -446,7 +450,9 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
         self.this_data[self.setup_uuid] = {
             CONF_CONFIG_TYPE: "assist",
             "speak_id": data.get("speak_id"),
-            "speak_name": data.get("speak_name", ""),
+            # speak_name 为主键（与 qrcode setup_data 同名）；兼容调用方直接给
+            # device_name 键的写法，二选一都能落进条目的 device_name（B4）。
+            "speak_name": data.get("speak_name") or data.get(CONF_DEVICE_NAME, ""),
             CONF_MCP_ENDPOINT: data.get(CONF_MCP_ENDPOINT),
             CONF_LLM_ENDPOINT: data.get(CONF_LLM_ENDPOINT),
             CONF_STT_ENDPOINT: data.get(CONF_STT_ENDPOINT),
@@ -486,6 +492,14 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Handle a flow initialized by a reauth event."""
         self._reauth_entry = self._get_reauth_entry()
+        # assist 语音引擎条目 reauth 分流（三端复核 B1）：端点 401/失效由
+        # ws_transport 清空端点并触发 EntryAuthFailedError→reauth；修复手段
+        # 是编辑 llm/stt/tts/mcp 端点。assist 没有设备侧 POST 来源，走
+        # qrcode 流即 5 分钟必超时死等（v1.0.7 只分流了 reconfigure，漏了
+        # reauth 这条真实触发链）。_reconfig_entry 赋值复用 assist 表单。
+        if self._reauth_entry.data.get(CONF_CONFIG_TYPE) == "assist":
+            self._reconfig_entry = self._reauth_entry
+            return await self.async_step_assist_reconfigure()
         self._host = entry_data.get(CONF_HOST)
         self._port = entry_data.get(CONF_PORT)
         self._password = entry_data.get(CONF_PASSWORD)

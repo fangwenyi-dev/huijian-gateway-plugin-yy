@@ -14,8 +14,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#030712">
 <title>慧尖HA语音插件</title>
-<link rel="stylesheet" href="css/huijian.css?v=1.0.7">
-<link rel="stylesheet" href="css/voice.css?v=1.0.7">
+<link rel="stylesheet" href="css/huijian.css?v=1.0.8">
+<link rel="stylesheet" href="css/voice.css?v=1.0.8">
 </head>
 <body>
 <!-- 「星辰大海」背景层（与网关加载项同一设计标准/同一固定种子＝同一片天）：
@@ -76,6 +76,8 @@
         </select></div>
     </div>
     <div id="sttCloudBox" style="display:none">
+      <div class="hj-row"><div style="flex:1 1 100%"><label class="hj-field">平台预设（选完只需粘贴 API Key）</label><select id="stt_preset"></select></div></div>
+      <div id="stt_preset_hint" class="hint" style="display:none"></div>
       <div class="hj-row">
         <div><label class="hj-field">Base URL</label><input id="stt_cloud_base" placeholder="https://api.example.com/v1"></div>
         <div><label class="hj-field">模型名</label><input id="stt_cloud_model" placeholder="whisper-1"></div>
@@ -96,8 +98,11 @@
       <div style="flex:0 1 140px"><label class="hj-field">语速 0.6–2.0</label><input id="tts_speed" type="number" step="0.05" min="0.6" max="2"></div>
     </div>
     <div id="ttsCloudBox" style="display:none">
+      <div class="hj-row"><div style="flex:1 1 100%"><label class="hj-field">平台预设（选完只需粘贴 API Key）</label><select id="tts_preset"></select></div></div>
+      <div id="tts_preset_hint" class="hint" style="display:none"></div>
       <div class="hj-row">
         <div><label class="hj-field">Base URL</label><input id="tts_cloud_base"></div>
+        <div><label class="hj-field">模型名</label><input id="tts_cloud_model" placeholder="tts-1"></div>
         <div><label class="hj-field">音色名</label><input id="tts_cloud_voice" placeholder="alloy"></div>
       </div>
       <label class="hj-field">API Key</label><input id="tts_cloud_key" type="password">
@@ -118,6 +123,8 @@
     <div class="hj-row">
       <div><label><input id="llm_enabled" type="checkbox" style="width:auto"> 启用（快速通道未命中时交给大模型；需填端点）</label></div>
     </div>
+    <div class="hj-row"><div style="flex:1 1 100%"><label class="hj-field">平台预设（选完只需粘贴 API Key）</label><select id="llm_preset"></select></div></div>
+    <div id="llm_preset_hint" class="hint" style="display:none"></div>
     <div class="hj-row">
       <div><label class="hj-field">Base URL（OpenAI 兼容）</label><input id="llm_base" placeholder="https://…/v1"></div>
       <div><label class="hj-field">模型</label><input id="llm_model" placeholder="qwen-plus / gpt-4o-mini …"></div>
@@ -199,7 +206,7 @@
 
 <script>
 "use strict";
-const CURRENT_VERSION = "1.0.7";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
+const CURRENT_VERSION = "1.0.8";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
 // 音色表 = kokoro-multi-lang-v1_0 官方 sid 映射（docs/source/onnx/tts/pretrained_models/kokoro.rst 实证）
 const VOICES = [
   [45,"zf_xiaobei · 小北（默认）"],[46,"zf_xiaoni · 小尼"],[47,"zf_xiaoxiao · 晓晓"],[48,"zf_xiaoyi · 小艺"],
@@ -265,6 +272,52 @@ async function refreshStatus(){
 setInterval(refreshStatus, 4000); refreshStatus();
 
 /* ── 设置 ── */
+/* 平台预设目录（v1.0.8）：只收录标准 OpenAI 兼容端点——选中即填好 Base URL/模型/音色，
+   用户只剩粘贴 API Key 一步。讯飞星火/火山豆包/腾讯云/百度云/MiniMax 的语音接口为
+   私有协议，本加载项云通道不兼容，故不收录（LLM 档位讯飞/火山是标准兼容，收录）。 */
+const PRESETS = {
+  stt: [
+    {id:"bailian", name:"阿里百炼 · Qwen3-ASR（国内推荐）", base:"https://dashscope.aliyuncs.com/compatible-mode/v1", model:"qwen3-asr-flash", key:"bailian.console.aliyun.com → API-KEY", hint:"模型名如平台调整以百炼文档为准"},
+    {id:"siliconflow", name:"硅基流动 · SenseVoice（有免费额度）", base:"https://api.siliconflow.cn/v1", model:"FunAudioLLM/SenseVoiceSmall", key:"cloud.siliconflow.cn → API 密钥"},
+    {id:"groq", name:"Groq · Whisper turbo（免费快）", base:"https://api.groq.com/openai/v1", model:"whisper-large-v3-turbo", key:"console.groq.com", hint:"需可直连海外"},
+    {id:"openai", name:"OpenAI · Whisper", base:"https://api.openai.com/v1", model:"whisper-1", key:"platform.openai.com"},
+    {id:"302ai", name:"302.AI · 聚合代理（国内直连）", base:"https://api.302ai.cn/v1", model:"whisper-1", key:"302.ai"},
+  ],
+  tts: [
+    {id:"siliconflow", name:"硅基流动 · CosyVoice2（中文，推荐）", base:"https://api.siliconflow.cn/v1", model:"FunAudioLLM/CosyVoice2-0.5B", voice:"anna", fmt:"pcm", rate:24000, key:"cloud.siliconflow.cn → API 密钥", hint:"预置音色：男 alex/benjamin/charles/david，女 anna/bella/claire/diana，可改音色名"},
+    {id:"openai", name:"OpenAI · TTS", base:"https://api.openai.com/v1", model:"tts-1", voice:"alloy", fmt:"pcm", rate:24000, key:"platform.openai.com", hint:"模型名可换 gpt-4o-mini-tts；音色 alloy/echo/fable 等"},
+    {id:"302ai", name:"302.AI · 聚合代理（国内直连）", base:"https://api.302ai.cn/v1", model:"tts-1", voice:"alloy", fmt:"pcm", rate:24000, key:"302.ai"},
+  ],
+  llm: [
+    {id:"deepseek", name:"DeepSeek（性价比高）", base:"https://api.deepseek.com/v1", model:"deepseek-chat", key:"platform.deepseek.com"},
+    {id:"bailian", name:"阿里百炼 · 通义千问", base:"https://dashscope.aliyuncs.com/compatible-mode/v1", model:"qwen-plus", key:"bailian.console.aliyun.com → API-KEY"},
+    {id:"volc", name:"火山引擎 · 豆包", base:"https://ark.cn-beijing.volces.com/api/v3", model:"doubao-seed-1-6-250615", key:"console.volcengine.com → 火山方舟", hint:"模型名=推理接入点(ep-xxx)或模型 ID，按方舟控制台填"},
+    {id:"zhipu", name:"智谱 GLM（glm-4-flash 免费）", base:"https://open.bigmodel.cn/api/paas/v4", model:"glm-4-flash", key:"open.bigmodel.cn"},
+    {id:"kimi", name:"Kimi · Moonshot", base:"https://api.moonshot.cn/v1", model:"moonshot-v1-8k", key:"platform.moonshot.cn", hint:"可按控制台切换 kimi 新模型名"},
+    {id:"siliconflow", name:"硅基流动", base:"https://api.siliconflow.cn/v1", model:"deepseek-ai/DeepSeek-V3", key:"cloud.siliconflow.cn"},
+    {id:"spark", name:"科大讯飞 · 星火", base:"https://spark-api-open.xf-yun.com/v1", model:"4.0Ultra", key:"讯飞开放平台 → Spark 大模型 HTTP", hint:"模型名按控制台（如 generalv3.5 / 4.0Ultra）"},
+    {id:"gemini", name:"Google Gemini（免费档）", base:"https://generativelanguage.googleapis.com/v1beta/openai", model:"gemini-2.5-flash", key:"aistudio.google.com", hint:"需可直连海外"},
+    {id:"ollama", name:"Ollama · 局域网（免 Key）", base:"http://192.168.1.100:11434/v1", model:"qwen2.5:7b", hint:"把 IP 改成你 Ollama 主机的局域网地址；无需 API Key"},
+    {id:"openai", name:"OpenAI", base:"https://api.openai.com/v1", model:"gpt-4o-mini", key:"platform.openai.com"},
+  ]
+};
+let ttsFmt = "", ttsRate = 0;
+function wirePresets(){
+  ["stt","tts","llm"].forEach(function(kind){
+    const sel = $("#"+kind+"_preset"), hint = $("#"+kind+"_preset_hint");
+    if (!sel) return;
+    PRESETS[kind].forEach(function(p){ sel.add(new Option(p.name, p.id)); });
+    sel.onchange = function(){
+      const p = PRESETS[kind].find(function(x){ return x.id===sel.value; });
+      if (!p) { hint.style.display="none"; return; }
+      if (kind==="stt"){ $("#stt_provider").value="cloud"; $("#stt_cloud_base").value=p.base; $("#stt_cloud_model").value=p.model; }
+      else if (kind==="tts"){ $("#tts_provider").value="cloud"; $("#tts_cloud_base").value=p.base; $("#tts_cloud_model").value=p.model; $("#tts_cloud_voice").value=p.voice; ttsFmt=p.fmt||""; ttsRate=p.rate||0; }
+      else { $("#llm_base").value=p.base; $("#llm_model").value=p.model; $("#llm_enabled").checked=true; }
+      hint.textContent = (p.key ? "Key 申请："+p.key+"。" : "") + (p.hint||"");
+      hint.style.display=""; syncBoxes(); toast("预设已填入，粘贴 API Key 后点保存");
+    };
+  });
+}
 let S = null;
 async function loadSettings(){
   try { S = await api("/api/settings"); } catch(e){ toast("读取设置失败："+e.message); return; }
@@ -276,6 +329,7 @@ async function loadSettings(){
   $("#tts_provider").value = S.tts.provider==="cloud" ? "cloud" : "local_kokoro";
   $("#stt_cloud_base").value = S.stt.cloud?.base_url||""; $("#stt_cloud_model").value = S.stt.cloud?.model||"";
   $("#tts_cloud_base").value = S.tts.cloud?.base_url||""; $("#tts_cloud_voice").value = S.tts.cloud?.voice||"";
+  $("#tts_cloud_model").value = S.tts.cloud?.model||""; ttsFmt = S.tts.cloud?.response_format||""; ttsRate = S.tts.cloud?.sample_rate||0;
   $("#stt_cloud_key").value = ""; $("#stt_cloud_key").placeholder = S.stt.cloud?.api_key||"";
   $("#tts_cloud_key").value = ""; $("#tts_cloud_key").placeholder = S.tts.cloud?.api_key||"";
   $("#nlu_enabled").checked = S.nlu.enabled !== false;
@@ -295,11 +349,12 @@ function syncBoxes(){
   $("#ttsCloudBox").style.display = $("#tts_provider").value==="cloud"?"":"none";
 }
 $("#stt_provider").onchange=syncBoxes; $("#tts_provider").onchange=syncBoxes;
+wirePresets();
 $("#saveBtn").onclick = async ()=>{
   const body = {
     stt:{ provider:$("#stt_provider").value, cloud:{ base_url:$("#stt_cloud_base").value, model:$("#stt_cloud_model").value, ...( $("#stt_cloud_key").value?{api_key:$("#stt_cloud_key").value}:{}) } },
     tts:{ provider:$("#tts_provider").value, sid:parseInt($("#tts_sid").value,10), speed:parseFloat($("#tts_speed").value)||1,
-          cloud:{ base_url:$("#tts_cloud_base").value, voice:$("#tts_cloud_voice").value, ...( $("#tts_cloud_key").value?{api_key:$("#tts_cloud_key").value}:{}) } },
+          cloud:{ base_url:$("#tts_cloud_base").value, model:$("#tts_cloud_model").value, voice:$("#tts_cloud_voice").value, ...(ttsFmt?{response_format:ttsFmt}:{}), ...(ttsRate?{sample_rate:ttsRate}:{}), ...( $("#tts_cloud_key").value?{api_key:$("#tts_cloud_key").value}:{}) } },
     nlu:{ enabled:$("#nlu_enabled").checked, textcnn_enabled:$("#nlu_textcnn").checked, query_local:$("#nlu_query").checked, corrections_extra: safeJson($("#nlu_corr").value, {}) },
     llm:{ enabled:$("#llm_enabled").checked, base_url:$("#llm_base").value, model:$("#llm_model").value, ...( $("#llm_key").value?{api_key:$("#llm_key").value}:{}) },
     security:{ require_token:$("#req_token").checked },
@@ -389,6 +444,6 @@ $("#regenBtn").onclick = async ()=>{
   try { await post("/api/token/regenerate",{}); toast("已重置"); loadEndpoints(); } catch(e){ toast(e.message); }
 };
 </script>
-<script src="js/starsky.js?v=1.0.7"></script>
+<script src="js/starsky.js?v=1.0.8"></script>
 </body>
 </html>

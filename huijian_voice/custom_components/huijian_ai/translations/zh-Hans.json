@@ -86,6 +86,16 @@
                 "data": {
                     "submit_confirm": "确认无误"
                 }
+            },
+            "assist_reconfigure": {
+                "title": "重新配置语音引擎端点",
+                "description": "编辑慧尖 AI 语音引擎的 WebSocket 端点（默认指向本机慧尖语音加载项 ws://<HA 地址>:8000/xiaozhi/v1/…）。加载项换机/改端口后在此改成实际地址；若加载项开启了 token 强制校验，请在端点后追加 ?token=<加载项令牌>。提交后条目自动重载。",
+                "data": {
+                    "llm_endpoint": "LLM 端点",
+                    "stt_endpoint": "语音识别（STT）端点",
+                    "tts_endpoint": "语音合成（TTS）端点",
+                    "mcp_endpoint": "MCP 端点（可留空）"
+                }
             }
         },
         "progress": {

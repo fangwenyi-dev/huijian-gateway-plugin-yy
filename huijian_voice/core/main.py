@@ -27,6 +27,7 @@ from .executor import Executor
 from .ha_client import HAClient
 from .mdns import Publisher, local_ip
 from .model_store import ModelStore
+from .nlu.klar_client import KlarClient
 from .nlu.query import QueryZone  # noqa: F401  (pipeline 内部实例化，此处仅保证包完整)
 from .nlu.scenes import SceneCache
 from .nlu.textcnn import TextCNN
@@ -61,8 +62,9 @@ class Service:
         self.agent = Agent(self.settings, self.ha, self.executor)
         self.asr = AsrEngine(self.settings, self.store)
         self.tts = TtsEngine(self.settings, self.store)
+        self.klar = KlarClient(self.settings)
         self.pipeline = Pipeline(self.settings, self.ha, self.scenes, self.textcnn,
-                                 self.executor, agent=self.agent)
+                                 self.executor, agent=self.agent, klar=self.klar)
         self.host = local_ip()
         self.ctx = AppContext(settings=self.settings, ha=self.ha, asr=self.asr, tts=self.tts,
                               pipeline=self.pipeline, scenes=self.scenes, textcnn=self.textcnn,
@@ -223,6 +225,7 @@ class Service:
             for r in self._runners:
                 await r.cleanup()
         await self.agent.close()
+        await self.klar.close()
         await self.ha.close()
         logger.warning("[退出] 完成")
 

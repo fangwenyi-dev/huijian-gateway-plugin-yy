@@ -44,6 +44,55 @@ else
   bashio::log.info "auto_install_integration=false：不自动落盘集成"
 fi
 
+# ── Klar NLU 引擎分发（一级确定性 NLU；全程 fail-open）───────────
+# 引擎 = klar-ha-nlu（MIT）Rust 静态二进制，GitHub release 资产
+# klar-linux-<arch>.tar.gz；SHA-256 用 GitHub API asset.digest 字段核验
+# （与其自家集成 archive.py require_sha256 同法）。缺网/缺资产 → 只警告，
+# 一级 NLU 由 KlarClient 的熔断自动降级为 TextCNN，语音链不受影响。
+KLAR_VER="${HUIJIAN_KLAR_VERSION:-2026.9.2}"
+KLAR_REPO="FABBricate-IT-Solutions/klar-ha-nlu"
+case "$(uname -m)" in
+  x86_64|amd64)  KLAR_ASSET="klar-linux-x86_64.tar.gz" ;;
+  aarch64|arm64) KLAR_ASSET="klar-linux-aarch64.tar.gz" ;;
+  *)             KLAR_ASSET="" ;;
+esac
+if [ -z "$KLAR_ASSET" ]; then
+  bashio::log.warning "Klar 引擎：架构 $(uname -m) 无官方构建，一级 NLU 降级为本地 TextCNN"
+elif [ "$(cat /data/klar/.version 2>/dev/null || echo none)" = "$KLAR_VER" ] && [ -x /data/klar/klar ]; then
+  bashio::log.info "Klar 引擎 v${KLAR_VER} 已就位，跳过下载"
+else
+  klar_ok=0
+  for tag in "v${KLAR_VER}" "${KLAR_VER}"; do
+    meta=$(curl -fsSL --max-time 20 "https://api.github.com/repos/${KLAR_REPO}/releases/tags/${tag}" 2>/dev/null || true)
+    url=$(echo "$meta"   | jq -r --arg a "$KLAR_ASSET" '.assets[]? | select(.name==$a) | .browser_download_url' 2>/dev/null | head -1)
+    digest=$(echo "$meta" | jq -r --arg a "$KLAR_ASSET" '.assets[]? | select(.name==$a) | .digest' 2>/dev/null | head -1)
+    [ -n "$url" ] && [ "$url" != "null" ] && break
+  done
+  if [ -z "${url:-}" ] || [ "$url" = "null" ]; then
+    bashio::log.warning "Klar 引擎：release ${KLAR_VER} 无本架构资产或网络不可达 → 一级 NLU 降级为本地 TextCNN"
+  elif [[ "${digest:-}" != sha256:* ]]; then
+    bashio::log.warning "Klar 引擎：release 资产缺 SHA-256 digest，拒装（供应链纪律）→ 降级本地"
+  else
+    mkdir -p /data/klar
+    if curl -fsSL --max-time 180 -o /data/klar/tmp.tar.gz "$url" \
+      && echo "${digest#sha256:}  /data/klar/tmp.tar.gz" | sha256sum -c - >/dev/null 2>&1; then
+      rm -rf /data/klar/x && mkdir -p /data/klar/x
+      # 成员名兼容 "klar" 与 "klar-linux-*"（其集成 pick_klar_member 同款规则）
+      if tar -xzf /data/klar/tmp.tar.gz -C /data/klar/x 2>/dev/null; then
+        bin=$(find /data/klar/x -maxdepth 1 -type f \( -name klar -o -name 'klar-linux-*' \) | head -1)
+        if [ -n "$bin" ]; then
+          mv -f "$bin" /data/klar/klar && chmod 755 /data/klar/klar
+          echo "$KLAR_VER" > /data/klar/.version
+          klar_ok=1
+          bashio::log.info "Klar 引擎 v${KLAR_VER} 落位 /data/klar/klar（sha256 已核验；s6 服务将拉起 loopback :10520）"
+        fi
+      fi
+    fi
+    [ "$klar_ok" = 0 ] && bashio::log.warning "Klar 引擎下载/校验/解包失败 → 一级 NLU 降级为本地 TextCNN"
+    rm -rf /data/klar/tmp.tar.gz /data/klar/x
+  fi
+fi
+
 # ── 自检 ─────────────────────────────────────────────────────────
 if ! /opt/huijian/bin/python -c "import sherpa_onnx, onnxruntime, aiohttp, opuslib_next, numpy" 2>/dev/null; then
   bashio::log.error "运行时依赖自检失败！"
