@@ -22,6 +22,7 @@ async def async_setup_https(hass: HomeAssistant):
     hass.http.register_view(HuijianRemoveView)
     hass.http.register_view(HuijianSetNameView)
     hass.http.register_view(HuijianTtsSttView)
+    hass.http.register_view(HuijianDeviceInfoView)
 
 
 class HuijianHttpView(HomeAssistantView):
@@ -124,6 +125,52 @@ class HuijianSetNameView(HuijianHttpView):
         device_registry.async_update_device(device_entry.id, name=name)
         hass.config_entries.async_update_entry(entry, title=name)
         return self.json_message("ok")
+
+
+class HuijianDeviceInfoView(HuijianHttpView):
+    """按 mac（或 speak_id）查卫星设备入驻信息——小程序 queryHaDevice 的缺失路由。
+
+    三项目适配判定书缺口4：小程序 ha-connect/setup 配网后需拿设备
+    host:port（6053，供显示设备网页配置入口/后续 mcp 跳转），但集成
+    历史上没有这个 View → queryHaDevice 404 静默失败（setup.js 只置空
+    host，不炸但功能缺）。
+    数据真源=config entry data（_async_make_config_data 写入的
+    CONF_HOST/CONF_PORT + speak_id/mac/mcp_endpoint/device_name）。
+    安全：requires_auth=True——返回内网拓扑，必须 HA token；mac 匹配
+    不区分大小写（entry 存小写，设备上报可能大写）。
+    """
+
+    requires_auth = True
+    url = "/api/huijian-ai/device-info"
+    name = "api:huijian-ai:device-info"
+
+    async def get(self, request: web.Request):
+        hass = request.app[KEY_HASS]
+        mac = (request.query.get("mac") or "").lower().strip()
+        speak_id = request.query.get("speak_id") or ""
+        if not mac and not speak_id:
+            return self.json_message("mac or speak_id required", 400)
+        for entry in hass.config_entries.async_loaded_entries(DOMAIN):
+            hit = (mac and str(entry.data.get("mac", "")).lower() == mac) or (
+                speak_id and entry.data.get("speak_id") == speak_id
+            )
+            if not hit:
+                continue
+            host = entry.data.get("host")          # CONF_HOST 字面值
+            port = entry.data.get("port", 6053)   # CONF_PORT；卫星 API 默认 6053
+            if not host:
+                continue                          # assist 类 entry 无 host，跳过
+            return self.json({
+                "ok": True,
+                "host": host,
+                "port": port,
+                "mac": entry.data.get("mac", ""),
+                "speak_id": entry.data.get("speak_id", ""),
+                "device_name": entry.data.get("device_name", entry.title),
+                "mcp_endpoint": entry.data.get("mcp_endpoint", ""),
+                "config_type": entry.data.get("config_type", "device"),
+            })
+        return self.json_message("device not found", 404)
 
 
 class HuijianTtsSttView(HuijianHttpView):

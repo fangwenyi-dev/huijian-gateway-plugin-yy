@@ -46,6 +46,7 @@ def make_ws_app(ctx: AppContext) -> web.Application:
     app[CTX_KEY] = ctx          # 处理器经 request.app 取用（闭包全局名是移植手误）
     app.router.add_get("/xiaozhi/v1/{channel}", _ws_handler)
     app.router.add_get("/healthz", _health)
+    app.router.add_get("/discover", _discover)
     return app
 
 
@@ -95,6 +96,35 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
         logger.info("[WS] %s 通道断开 %s（%.0fs）", channel, session.device_hint,
                     __import__("time").time() - session.created)
     return ws
+
+
+async def _discover(request: web.Request) -> web.Response:
+    """无凭据设备端点发现（:8000 面向 LAN 设备/小程序的自描述端点）。
+
+    背景：小程序侧三扇门全关——`/api/endpoints` 被 nginx server 级白名单
+    403（LAN 直连 :8001 一律拒，见 nginx-huijian.conf）、`/data/run/
+    endpoints.json` 不落静态根、微信 mDNS 读不到 TXT——设备拿不到端点。
+    本端点在 :8000（本就对 LAN 开放）提供发现，是判定书 D-2/缺口2 的修法。
+
+    安全边界：只回端点路径 + 是否强制校验，**永不回 token**（含 require_
+    token=true 时）。require_token=false 场景 token 本非必需（LAN 免 token
+    即连）；true 场景设备必须带 query token，端点路径不含凭据可安全下发。
+    """
+    ctx = request.app[CTX_KEY]
+    settings = ctx.settings
+    require = bool(settings.get("security.require_token", False))
+    host = (ctx.host or request.headers.get("Host", "").split(":")[0] or "")
+    return web.json_response({
+        "ok": True,
+        "name": "huijian_voice",
+        "version": const.addon_version(),
+        "require_token": require,
+        "endpoints": {k: f"ws://{host}:{const.WS_PORT}/xiaozhi/v1/{k}"
+                      for k in ("stt", "tts", "llm")},
+        "channels": ["stt", "tts", "llm"],
+        "audio": {"format": "opus", "sample_rate": const.SAMPLE_RATE,
+                  "frame_ms": const.FRAME_MS},
+    })
 
 
 async def _health(request: web.Request) -> web.Response:

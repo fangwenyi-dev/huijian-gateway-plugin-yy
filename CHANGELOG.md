@@ -3,6 +3,26 @@
 所有版本变更记录在此文件中。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [1.0.2] - 2026-09-XX
+
+### Added（三项目完美适配战役·批次1：加载项侧三修）
+- **`:8000 GET /discover` 无凭据端点发现面**（判定书缺口2）：小程序/设备侧
+  三扇门全关（/api/endpoints 被 nginx ACL 403、endpoints.json 不落静态根、
+  微信 mDNS 读不到 TXT）。新端点回三通道路径+音频参数(require 16k/60ms)+
+  require_token 状态；**响应体永不回 token**（含强制校验模式），契约测试
+  双模钉桩（test_protocol_ws +2：结构+泄漏断言）。
+- **huijian_ai `/api/huijian-ai/device-info`**（判定书缺口4）：小程序
+  queryHaDevice 按 mac/speak_id 查设备 host:port（真源=config entry data），
+  此前 404 静默失败（配网页设备 IP 恒空）。`requires_auth=True`——回内网
+  拓扑必须 HA token；assist 类无 host 条目跳过不误报。
+
+### Fixed
+- **DOCS「卫星固件直连 :8000」话术修正（判定书 D-8）**：本仓 xiaozhi 卫星
+  （0513gujian）主路径是模式 B（ESPHome API :6053 → HA 管线），直连 :8000
+  为集成消费端与 matter-broker 形态；端口表补 /discover 行。
+- 测试 fixture 残留 `access_logger=None` 臆造 kwargs → `access_log=None`
+  （与 v1.0.1 core 侧修复同族）。
+
 ## [1.0.1] - 2026-09-08
 
 ### Added

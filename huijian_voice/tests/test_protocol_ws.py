@@ -93,7 +93,7 @@ def server():
     th.start()
 
     async def start():
-        runner = web.AppRunner(app, access_logger=None)
+        runner = web.AppRunner(app, access_log=None)
         await runner.setup()
         site = web.TCPSite(runner, "127.0.0.1", 0)
         await site.start()
@@ -321,3 +321,68 @@ def test_healthz(server):
                 obj = await r.json()
                 assert obj["ok"] and obj["asr_ready"]
     _run(go())
+
+
+# ── /discover 端点自描述（三项目适配判定书缺口2 的服务器侧修法）──────────
+
+
+async def _get(port, path="/discover"):
+    async with ClientSession() as sess:
+        async with sess.get(f"http://127.0.0.1:{port}{path}") as r:
+            return r.status, await r.json()
+
+
+@pytest.fixture()
+def discover_server():
+    def _mk(require, token="sekret-token-abc"):
+        ctx = AppContext(settings=FakeSettings(require=require, token=token))
+        loop = asyncio.new_event_loop()
+        holder = {}
+
+        def run():
+            asyncio.set_event_loop(loop)
+            loop.run_forever()
+
+        threading.Thread(target=run, daemon=True).start()
+
+        async def start():
+            runner = web.AppRunner(make_ws_app(ctx), access_log=None)
+            await runner.setup()
+            await web.TCPSite(runner, "127.0.0.1", 0).start()
+            holder["runner"] = runner
+            return runner.addresses[0][1]
+
+        port = asyncio.run_coroutine_threadsafe(start(), loop).result(10)
+        return port, loop, holder
+    return _mk
+
+
+
+def test_discover_no_token_leak(discover_server):
+    """免 token 模式：回端点路径+require_token=false，但响应体任何位置
+    不得出现 token（无凭据发现面泄 token=安全设计归零）。"""
+    port, loop, holder = discover_server(require=False)
+    try:
+        st, body = asyncio.run_coroutine_threadsafe(_get(port), loop).result(10)
+        assert st == 200
+        assert body["require_token"] is False
+        assert set(body["endpoints"]) == {"stt", "tts", "llm"}
+        assert all(u.endswith(f"/xiaozhi/v1/{k}") for k, u in body["endpoints"].items())
+        assert body["audio"] == {"format": "opus", "sample_rate": 16000, "frame_ms": 60}
+        assert "sekret-token-abc" not in json.dumps(body), "token 泄漏"
+    finally:
+        asyncio.run_coroutine_threadsafe(holder["runner"].cleanup(), loop).result(10)
+        loop.call_soon_threadsafe(loop.stop)
+
+
+def test_discover_require_token_mode(discover_server):
+    """强制校验模式：require_token=true 如实上报（设备端据此决定带 token），
+    同样零 token 泄漏。"""
+    port, loop, holder = discover_server(require=True)
+    try:
+        st, body = asyncio.run_coroutine_threadsafe(_get(port), loop).result(10)
+        assert st == 200 and body["require_token"] is True
+        assert "sekret-token-abc" not in json.dumps(body)
+    finally:
+        asyncio.run_coroutine_threadsafe(holder["runner"].cleanup(), loop).result(10)
+        loop.call_soon_threadsafe(loop.stop)
