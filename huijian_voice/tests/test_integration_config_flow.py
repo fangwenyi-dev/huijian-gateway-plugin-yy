@@ -42,3 +42,20 @@ def test_qr_params_carry_lan_internal():
     # 二维码必须携带 ha_internal：设备 POST setup data 的局域网直连目标
     # （external 正文在开了远程访问的 HA 上是公网地址，固件常不可达 → 超时）
     assert '"ha_internal": internal' in _src()
+
+
+def test_internal_bound_before_params_use():
+    """UnboundLocalError 回归钉桩（v1.0.2 实发 500 的根因）。
+
+    v1.0.2 首发把 "ha_internal": internal 塞进 params 字面量时，internal
+    的赋值行还在字典之后 → async_step_qrcode 一进入即 500，向导打不开。
+    文本级存在性检查拦不住求值顺序，这里钉：函数体内 internal 的赋值
+    必须先于其任何字典值引用。
+    """
+    src = _src()
+    body = src[src.index("async def async_step_qrcode") : src.index("async def async_step_qrcode_done")]
+    # 去注释行（注释里会引用代码字面量，first-index 会撞注释——v1.0.2 500 钉桩首版即被自己骗了）
+    code = "\n".join(ln.split("#")[0] for ln in body.splitlines())
+    assign = code.index("internal = get_url")
+    use = code.index('"ha_internal": internal')
+    assert assign < use, "internal 必须在 params 字面量引用 ha_internal 之前赋值"

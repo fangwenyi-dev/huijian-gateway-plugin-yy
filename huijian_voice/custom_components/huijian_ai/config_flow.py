@@ -160,14 +160,18 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
             return self.async_show_progress_done(next_step_id="qrcode_done")
         if not self.setup_uuid:
             self.setup_uuid = ulid.ulid_hex()
+        # 判定书 v1.0.2（用户实机 setup-data 超时根治）：二维码正文是 external
+        # （配置了远程访问即公网/反代地址），而设备 CMD20 后 POST 目标直接取该
+        # 正文——固件 HTTP 客户端到公网 TLS/中转常不可达，setup_data 永不到达。
+        # 追加局域网直连字段 ha_internal，小程序给设备的地址以它为准。
+        # 关键顺序：internal/external 必须先于 params 字面量求值（v1.0.2 首发
+        # 曾因 "ha_internal": internal 引用未绑定的 internal 崩 UnboundLocalError→500）。
+        internal = get_url(self.hass, prefer_external=False)
+        external = get_url(self.hass, prefer_external=True) or internal
         params = {
             "haid": await get_haid(self.hass),
             "uuid": self.setup_uuid,
             "home_name": self.hass.config.location_name,
-            # 判定书 v1.0.2（用户实机 setup-data 超时根治）：二维码正文是 external
-            # （配置了远程访问即公网/反代地址），而设备 CMD20 后 POST 目标直接取该
-            # 正文——固件 HTTP 客户端到公网 TLS/中转常不可达，setup_data 永不到达。
-            # 追加局域网直连字段，小程序给设备的地址以它为准。
             "ha_internal": internal,
         }
         reconfig_entry = self._get_reconfig_entry()
@@ -178,8 +182,6 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
                     "speak_id": reconfig_entry.data.get("speak_id"),
                 }
             )
-        internal = get_url(self.hass, prefer_external=False)
-        external = get_url(self.hass, prefer_external=True) or internal
         haip = internal.split("//")[1].split(":")[0]
         image = generate_qr_code(
             f"{external}/api/huijian-ai/setup/qrcode?{urlencode(params)}"

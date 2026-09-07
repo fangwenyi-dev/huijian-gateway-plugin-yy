@@ -3,7 +3,16 @@
 所有版本变更记录在此文件中。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
-## [1.0.2] - 2026-09-07
+## [1.0.3] - 2026-09-08
+
+### 修复（紧急）
+- **集成配置向导 500（v1.0.2 回归）**：`async_step_qrcode` 中
+  `"ha_internal": internal` 引用了求值顺序在其后的 `internal` 变量 →
+  `UnboundLocalError`，"无法加载配置向导"。修正求值顺序并新增行为级
+  钉桩 `test_internal_bound_before_params_use`（去注释求值序断言——
+  纯文本存在性检查拦不住顺序 bug）。
+
+## [1.0.2] - 2026-09-08
 
 - **修复（内嵌集成 config_flow）**：设备配对数据等待窗 60s→**300s**——实机日志
 `Timeout waiting for setup data` 根因：扫码→贴令牌→BLE CMD20→设备 POST 的人肉链路
