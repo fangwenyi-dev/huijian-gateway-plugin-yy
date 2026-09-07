@@ -43,6 +43,20 @@ class HAClient:
         self.last_error = ""
         self._reachable = False   # 真连通判据（区别于 ok=已配置；UI/状态面用这个）
 
+    # ── URL 拼接唯一真源 ────────────────────────────────────────
+    def _url(self, path: str) -> str:
+        """base + path 恒一个 /api（网关 gateway_discovery_proxy.ha_api 同款定式）。
+
+        2026-09-11 真机实锤：默认 base=http://supervisor/core/api 本身就是 API 根，
+        此前 7 处调用点又各拼 `/api/...` → 每个请求都变 /api/api/... → HA 404
+        → 话术层把 "Not Found" 翻成「抱歉，没找到这个设备」，状态页/区域列表同灭，
+        且 status<500 判据还把 404 点亮成"已连通"。此处把 base 尾部 /api 剥掉、
+        由 path 统一带上：supervisor 形态（…/core/api）与直连形态（http://h:8123，
+        HUIJIAN_HA_API 旧配置不设防）都恰好落一个 /api。
+        """
+        base = self.base[:-4] if self.base.endswith("/api") else self.base
+        return f"{base}{path}"
+
     # ── 基础设施 ────────────────────────────────────────────────
     async def start(self) -> None:
         if self._session is None:
@@ -77,7 +91,7 @@ class HAClient:
         body = {"name": name, "data": data}
         try:
             async with self._session.post(
-                    f"{self.base}/api/intent/handle", json=body,
+                    self._url("/api/intent/handle"), json=body,
                     timeout=aiohttp.ClientTimeout(total=timeout)) as r:
                 if r.status == 404:
                     return await self._handle_intent_legacy(name, data, timeout)
@@ -97,7 +111,7 @@ class HAClient:
         """回落形态：POST /api/intent/<name>，body=slots 平铺（HA REST 传统式）。"""
         try:
             async with self._session.post(
-                    f"{self.base}/api/intent/{name}", json=data,
+                    self._url(f"/api/intent/{name}"), json=data,
                     timeout=aiohttp.ClientTimeout(total=timeout)) as r:
                 payload = await r.text()
                 return self._normalize_result(r.status, payload, name)
@@ -143,8 +157,11 @@ class HAClient:
             if self._session is None:
                 return
             try:
-                async with self._session.get(f"{self.base}/api/states") as r:
-                    self._reachable = r.status < 500
+                async with self._session.get(self._url("/api/states")) as r:
+                    # 404=路径/部署错误（states 端点恒存在），不得点亮连通；
+                    # 401/403=URL 对而鉴权失败，算可达。此前 <500 把双重
+                    # /api 的 404 也点亮成已连通，状态灯失明整整一个版本。
+                    self._reachable = r.status in (200, 401, 403)
                     if r.status == 200:
                         states = await r.json()
                         self._states = {e["entity_id"]: e for e in states}
@@ -160,10 +177,10 @@ class HAClient:
 
     async def _load_registries(self) -> None:
         try:
-            async with self._session.get(f"{self.base}/api/config/area_registry/list") as r:
+            async with self._session.get(self._url("/api/config/area_registry/list")) as r:
                 if r.status == 200:
                     self._areas = {a["area_id"]: a.get("name", a["area_id"]) for a in await r.json()}
-            async with self._session.get(f"{self.base}/api/config/entity_registry/list") as r:
+            async with self._session.get(self._url("/api/config/entity_registry/list")) as r:
                 if r.status == 200:
                     ent_map = {}
                     for e in await r.json():
@@ -216,7 +233,7 @@ class HAClient:
         if not self.ok or self._session is None:
             return {}
         try:
-            async with self._session.get(f"{self.base}/api/config") as r:
+            async with self._session.get(self._url("/api/config")) as r:
                 if r.status == 200:
                     return await r.json()
         except Exception as e:
@@ -228,7 +245,7 @@ class HAClient:
         if not self.ok or self._session is None:
             return
         try:
-            async with self._session.post(f"{self.base}/api/events/{event_type}",
+            async with self._session.post(self._url(f"/api/events/{event_type}"),
                                           json={"event_data": data}) as r:
                 await r.read()
         except Exception as e:
