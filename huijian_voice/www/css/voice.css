@@ -1,0 +1,122 @@
+/*
+ * 慧尖HA语音插件 · 页面专属补充层（css/voice.css）
+ *
+ * 依托 huijian.css 的「星辰大海」令牌（v1.6.27 体系）：本页结构（页签/表单/
+ * 表格/调试台/配对表）是语音插件特有，网关母本没有对应件，故独立成层、
+ * 全部消费同一组令牌——配色/圆角/辉光/玻璃质感与 LoRa 网关加载项同源。
+ * 规矩不变：内容层背景 transparent 或令牌玻璃；紫只准出现在 star-bg 氛围层；
+ * 发光宁淡勿浓。选择器一律带 #hj- 命名空间前缀类（.hj-*），避免与母本互咬。
+ */
+
+/* ── 页签导航：悬浮玻璃胶囊行 ── */
+.hj-nav { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 16px; }
+.hj-nav button {
+    border: 1px solid var(--card-border); background: var(--bg-card);
+    color: var(--text-secondary); padding: 7px 18px; border-radius: 20px;
+    cursor: pointer; font-size: 13px; font-weight: 600; line-height: 1.4;
+    transition: transform .15s, background .2s, color .2s, border-color .2s;
+    -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+}
+.hj-nav button:hover { color: var(--text-primary); border-color: rgba(56, 189, 248, .45); }
+.hj-nav button:active { transform: scale(.96); }
+.hj-nav button.on {
+    background: rgba(14, 165, 233, .18); color: var(--primary-light);
+    border-color: rgba(56, 189, 248, .55); box-shadow: 0 0 14px rgba(14, 165, 233, .25);
+}
+
+/* ── 表单控件（母本只有 range，文本类补齐同质感） ── */
+.hj-field { display: block; margin: 10px 0 4px; color: var(--text-secondary);
+    font-size: 12px; font-weight: 600; letter-spacing: .02em; }
+input[type="text"], input[type="password"], input[type="number"], input:not([type]),
+select, textarea {
+    width: 100%; padding: 8px 11px; font: inherit; font-size: 13px;
+    color: var(--text-primary); background: rgba(255, 255, 255, .06);
+    border: 1px solid var(--card-border); border-radius: var(--radius-sm);
+    outline: none; transition: border-color .2s, box-shadow .2s, background .2s;
+}
+input:focus, select:focus, textarea:focus {
+    border-color: rgba(56, 189, 248, .6); box-shadow: 0 0 0 3px rgba(14, 165, 233, .15);
+    background: rgba(255, 255, 255, .09);
+}
+input::placeholder, textarea::placeholder { color: rgba(148, 163, 184, .55); }
+select { appearance: none; -webkit-appearance: none;
+    background-image: linear-gradient(45deg, transparent 50%, var(--text-secondary) 50%),
+                      linear-gradient(135deg, var(--text-secondary) 50%, transparent 50%);
+    background-position: calc(100% - 16px) 55%, calc(100% - 11px) 55%;
+    background-size: 5px 5px; background-repeat: no-repeat; padding-right: 30px; }
+select option { background: var(--surface); color: var(--text-primary); }
+textarea { min-height: 64px; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+input[type="checkbox"] { width: auto; accent-color: var(--primary); transform: scale(1.15); }
+input[type="checkbox"] + span, label:has(input[type="checkbox"]) { color: var(--text-primary); font-weight: 500; }
+
+/* ── 状态胶囊（页面 JS 以 .pill.ok/.bad/.warn 生成，语义色同母本 badge） ── */
+.pill { display: inline-block; padding: 2px 10px; border-radius: 20px; font-size: 12px;
+    font-weight: 600; border: 1px solid transparent; }
+.pill.ok  { background: var(--green-bg);  color: var(--green);  border-color: rgba(52, 211, 153, .3); }
+.pill.bad { background: var(--red-bg);    color: var(--red);    border-color: rgba(248, 113, 113, .3); }
+.pill.warn{ background: var(--yellow-bg); color: var(--yellow); border-color: rgba(251, 191, 36, .3); }
+
+/* ── 表格（模型表 / 端点表） ── */
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid rgba(255, 255, 255, .08);
+    vertical-align: top; }
+th { color: var(--text-secondary); font-weight: 600; font-size: 12px; letter-spacing: .03em; }
+tr:last-child td { border-bottom: none; }
+td code, .mono { font: 12px/1.6 ui-monospace, Consolas, monospace; word-break: break-all;
+    color: var(--primary-light); }
+code { color: var(--primary-light); }
+
+/* ── 行布局与杂项 ── */
+.hj-row { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; }
+.hj-row > div { flex: 1 1 200px; min-width: 0; }
+.mut { color: var(--text-secondary); }
+.hint { font-size: 12px; color: var(--text-secondary); margin-top: 6px; line-height: 1.7; }
+.hint b { color: var(--primary-light); }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+.card h3 { font-size: 13px; font-weight: 700; color: var(--glow); margin-bottom: 10px;
+    letter-spacing: .02em; }
+audio { width: 100%; }
+.copy { cursor: pointer; color: var(--primary-light); font-size: 12px; user-select: none; }
+.copy:hover { text-decoration: underline; }
+
+/* ── 调试台输出：深空终端感玻璃 ── */
+.hj-term {
+    white-space: pre-wrap; margin-top: 10px; padding: 12px 14px; border-radius: var(--radius-sm);
+    background: rgba(3, 7, 18, .65); border: 1px solid var(--card-border);
+    color: #cbd5e1; font: 12px/1.7 ui-monospace, Consolas, monospace;
+    word-break: break-all; max-height: 50vh; overflow: auto;
+}
+
+/* ── Toast：底部悬浮玻璃条 ── */
+#toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: rgba(10, 15, 30, .9); color: var(--text-primary);
+    border: 1px solid rgba(56, 189, 248, .4); box-shadow: var(--shadow-lg);
+    padding: 10px 20px; border-radius: 12px; opacity: 0; transition: opacity .25s;
+    pointer-events: none; max-width: 80vw; font-size: 13px; z-index: 9;
+    -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+}
+#toast.show { opacity: .96; }
+
+/* ── 按钮补充：页面 JS 用 button.act（母本用 .btn） ── */
+button.act {
+    display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
+    background: var(--primary); color: #fff; border: 1px solid transparent;
+    padding: 8px 18px; border-radius: var(--radius-sm); cursor: pointer;
+    font-size: 13px; font-weight: 600; box-shadow: 0 2px 12px rgba(14, 165, 233, .3);
+    transition: filter .15s, transform .1s; min-height: 36px;
+}
+button.act:hover { filter: brightness(1.08); }
+button.act:active { transform: scale(.96); }
+button.act.gray { background: rgba(255, 255, 255, .08); color: var(--text-secondary);
+    border-color: var(--card-border); box-shadow: none; }
+button.act.red { background: linear-gradient(180deg, #f87171, #dc2626);
+    box-shadow: 0 2px 10px rgba(248, 113, 113, .28); }
+
+/* 星空之下，页内一切容器保持透明底（玻璃由 .card 提供） */
+main { position: relative; z-index: 1; }
+
+/* 页签显隐（JS 契约：section + .on） */
+main > section { display: none; }
+main > section.on { display: block; animation: hj-fade .25s ease; }
+@keyframes hj-fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; } }

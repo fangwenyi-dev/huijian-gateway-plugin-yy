@@ -230,7 +230,9 @@ async def _match_with_constraints(
 def _build_candidate_entities(
     hass: HomeAssistant,
     found_states: list[StateWithAreaConstraint],
-    entity_registry: er.Registry,
+    # er.Registry 在 HA 2026.x 已移除（仅剩 EntityRegistry）——注解是运行期求值的，
+    # 挂错名字 = import 即炸、全集成瘫（2026-09 E2E 实证）。真栈 E2E 兼做冒烟。
+    entity_registry: er.EntityRegistry,
 ) -> list[EntityInfo]:
     """Build candidate EntityInfo list from matched states."""
     candidate_entities: list[EntityInfo] = []
@@ -411,6 +413,37 @@ async def match_intent_entities(
                 )
                 _LOGGER.info("Device registry fallback entity: %s", entity_info)
                 candidate_entities.append(entity_info)
+
+    # ── 实体显示名子串兜底（第6级，2026-09 真栈 E2E 实锤）──
+    # MQTT/z2m 实体的注册表 name 常为 None，用户起的中文名只活在 friendly_name
+    # 组合串里（如设备 "TSL2011" + 实体 "射灯" → state.name "TSL2011 射灯"）。
+    # HA 核心层是 strip+casefold 等值匹配（2026.x 无子串档），第5级又只看设备名，
+    # 两头漏空 → "射灯" 报 No available devices found。此级按 friendly_name 子串
+    # 兜底；带区域请求时必须同区域（防跨房间过匹配），无区域时即全屋该域内命中。
+    if len(candidate_entities) == 0 and requested_name:
+        name_lower6 = requested_name.lower().strip()
+        area_req = next((t.get("area") for t in targets if t.get("area")), None)
+        for state in hass.states.async_all(list(all_expanded_domains) or None):
+            if state.state == "unavailable":
+                continue
+            if name_lower6 not in (state.name or "").lower():
+                continue
+            entity_entry = entity_registry.async_get(state.entity_id)
+            if entity_entry is None or entity_entry.hidden_by or entity_entry.disabled_by:
+                continue
+            entity_area = get_entity_area(hass, entity_entry)
+            if area_req and (entity_area is None or entity_area.name != area_req):
+                continue
+            candidate_entities.append(
+                EntityInfo(
+                    name=get_entity_name(entity_entry, state),
+                    area=entity_area,
+                    state=state,
+                    entity=entity_entry,
+                    on_off="off" if state.state == "off" else "on",
+                )
+            )
+            _LOGGER.info("Friendly-name fallback entity: %s", state.entity_id)
 
     if len(candidate_entities) == 0:
         return {"success": False, "error": "No available devices found"}, None

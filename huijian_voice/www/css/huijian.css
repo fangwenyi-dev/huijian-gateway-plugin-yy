@@ -1,0 +1,695 @@
+/*
+ * 慧尖 Web UI 样式 —— 「星辰大海」设计标准移植版（v1.6.27）
+ *
+ * 权威标准：小程序记忆体条目 0d2200c5（配套工程口径 d0c93032）。原标准面向
+ * 微信小程序（WXSS，真机禁 filter/mix-blend/closest-side、token 必须挂 page{}）；
+ * 本文件是 **Web 移植**——运行在 Chromium（HA ingress webview / 桌面浏览器），
+ * 上面那些 WXSS 专属禁令均不适用，可正常使用 backdrop-filter。但配色令牌、
+ * 分层架构、克制光哲学逐字对齐母本：
+ *
+ *  设计语言：深空 #030712 上星光/星云/行星/流星构成活的宇宙，内容以透明玻璃
+ *  悬浮其上。哲学＝克制的光——发光宁淡勿浓（标准里"白光/过糊/过大"多次被否），
+ *  运动宁慢勿快但必须有独立节奏层次。
+ *
+ *  令牌（青蓝主系，逐值照抄标准）：--primary #0ea5e9 / --primary-dark #0284c7 /
+ *  --primary-light #38bdf8 / --accent #06b6d4 / --secondary #f59e0b。
+ *  紫(#8b5cf6/#6366f1) 仅允许出现在氛围底色层（左上蓝角云一带），星点板/中心
+ *  辉光/图标/按钮一律不加紫——旧版整套 #4f46e5 紫蓝主色已随本次设计作废。
+ *
+ *  分层：.star-bg（fixed z0）→ .page（relative z1）。硬性规矩①内容根背景必须
+ *  transparent，否则整块盖住星空（标准里曾 9 页踩此坑）。
+ */
+:root {
+    /* ===== 星辰大海令牌（青蓝主系） ===== */
+    --primary: #0ea5e9;
+    --primary-dark: #0284c7;
+    --primary-light: #38bdf8;
+    --primary-deep: #075985;
+    --accent: #06b6d4;
+    --glow: #7dd3fc;            /* 深空提亮专用（logo 光环/高亮文字），非紫 */
+    --secondary: #f59e0b;       /* 琥珀——仅告警/进度点缀 */
+    --bg-main: #030712;
+    --surface: #0a0f1e;
+    --bg-card: rgba(255, 255, 255, .07);
+    --bg-elevated: rgba(255, 255, 255, .10);
+    --card-border: rgba(255, 255, 255, .14);
+    --text-primary: #f8fafc;
+    --text-secondary: #94a3b8;
+    --border: #1e293b;
+    /* 语义色（暗底适配，饱和度压低守"宁淡"） */
+    --green: #34d399;
+    --green-deep: #10b981;
+    --green-bg: rgba(52, 211, 153, .10);
+    --red: #f87171;
+    --red-bg: rgba(248, 113, 113, .10);
+    --yellow: #fbbf24;
+    --yellow-bg: rgba(251, 191, 36, .10);
+    --blue: #38bdf8;
+    --blue-bg: rgba(56, 189, 248, .10);
+    --violet: #6366f1;          /* 仅渐变尾端点缀，不作前景主色 */
+    --radius: 16px;
+    --radius-sm: 11px;
+    /* 深空投影：黑底上阴影几乎无意义，主要靠描边+辉光分层 */
+    --shadow: 0 1px 0 rgba(255, 255, 255, .04) inset, 0 8px 24px rgba(0, 0, 0, .45);
+    --shadow-md: 0 1px 0 rgba(255, 255, 255, .05) inset, 0 12px 32px rgba(0, 0, 0, .55);
+    --shadow-lg: 0 1px 0 rgba(255, 255, 255, .06) inset, 0 20px 48px rgba(0, 0, 0, .65);
+    --glass-blur: saturate(140%) blur(12px);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: var(--text-primary);
+    min-height: 100vh;
+    /* 深空基底：标准 .sky 纯色 #030712，此处作为最底层铺满（star-bg 的星云/星点浮于其上） */
+    background: var(--bg-main);
+    -webkit-font-smoothing: antialiased;
+    /* Web 移植：内容层横向留白与最大宽从此处移到 .page（body 需全宽铺星空） */
+    padding: 0;
+}
+::selection { background: rgba(14, 165, 233, .35); color: #fff; }
+
+/* =====================================================================
+ * z0 星空层：.star-bg
+ * 氛围底 → 星云（一朵）→ 星点（双层视差）→ 行星群（16 颗）→ 流星（7 颗）
+ * 星点/行星由 starsky.js 用固定种子生成注入对应容器；本层 pointer-events:none
+ * ===================================================================== */
+.star-bg {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    overflow: hidden;
+    pointer-events: none;
+    /* 三档氛围底 + 纯色（用户定案保留紫）：左上蓝角云 α.18 收 .06、
+       右上角弱青叠靛紫、底部靛云——全部大柔边 radial，禁内核白雾。
+       v1.6.30 用户令"背景加一点紫色"：底靛 .12→.16 且中心回收可见区，
+       右上新增 #8b5cf6 靛紫云 .09（小程序标准：紫仅限氛围底色层，
+       宁淡勿浓；星点/星云/按钮一律不加紫） */
+    background:
+        radial-gradient(60% 48% at 12% 4%, rgba(14, 165, 233, .18), rgba(14, 165, 233, .06) 42%, transparent 72%),
+        radial-gradient(50% 42% at 88% 12%, rgba(6, 182, 212, .10), transparent 66%),
+        radial-gradient(52% 40% at 84% 22%, rgba(139, 92, 246, .09), transparent 68%),
+        radial-gradient(76% 58% at 50% 104%, rgba(99, 102, 241, .16), transparent 72%),
+        var(--bg-main);
+}
+/* 星云团：逐字移植官网母本 v0.0.1（www/index.html L104-117）的
+   .bg-aurora::before（左上蓝）+ ::after（右下青）+ .bg-aurora-3.v-gold
+   （中上金，α.07），45s/50s/60s 三组 aurora-move 各自漂移。
+   2026-09-07 用户校准：web 星云口径以官网为准（此前单团 α.16 小程序
+   适配版作废）；三团皆 radial 柔边、无 blur、无内核白雾——官网原文。 */
+.nebula { position: absolute; top: 0; left: 0; right: 0; bottom: 0; overflow: hidden; pointer-events: none; }
+.nebula::before {
+    content: ''; position: absolute; top: -30%; left: -10%; width: 60%; height: 80%;
+    background: radial-gradient(ellipse at center, rgba(14, 165, 233, .10) 0%, transparent 60%);
+    animation: aurora-move1 45s ease-in-out infinite;
+}
+.nebula::after {
+    content: ''; position: absolute; bottom: -20%; right: -10%; width: 50%; height: 70%;
+    background: radial-gradient(ellipse at center, rgba(6, 182, 212, .08) 0%, transparent 60%);
+    animation: aurora-move2 50s ease-in-out infinite;
+}
+.nebula3 {
+    position: absolute; top: 5%; left: 50%; width: 40%; height: 50%;
+    background: radial-gradient(ellipse at center, rgba(245, 158, 11, .07) 0%, transparent 55%);
+    animation: aurora-move3 60s ease-in-out infinite; pointer-events: none;
+}
+@keyframes aurora-move1 { 0%, 100% { transform: translate(0, 0) scale(1); } 33% { transform: translate(50px, 25px) scale(1.08); } 66% { transform: translate(-30px, 40px) scale(0.95); } 50% { transform: translate(60px, 30px) scale(1.1); } }
+@keyframes aurora-move2 { 0%, 100% { transform: translate(0, 0) scale(1); } 33% { transform: translate(-40px, -15px) scale(1.06); } 66% { transform: translate(25px, -30px) scale(0.94); } 50% { transform: translate(-50px, -25px) scale(1.08); } }
+@keyframes aurora-move3 { 0%, 100% { transform: translate(0, 0) scale(1) rotate(0deg); } 50% { transform: translate(-60px, 40px) scale(1.15) rotate(10deg); } }
+/* 星点层（JS 注入 <i> 子元素，位置/明灭周期由内联 CSS 变量给） */
+.stars-far, .stars-near { position: absolute; inset: 0; }
+.stars-far i, .stars-near i {
+    position: absolute;
+    border-radius: 50%;
+    background: #dbeafe;
+    animation: star-twinkle var(--dur, 4s) ease-in-out var(--delay, 0s) infinite;
+    will-change: opacity;
+}
+/* 明灭：官网母本口径——正弦 .1↔.9 永不触零（0/100% 下限、50% 峰），
+   v1.7.3 用户令对照官网（旧"单峰触零"是行星群口径，星点不适用） */
+@keyframes star-twinkle {
+    0%, 100% { opacity: var(--floor, .1); }
+    50%      { opacity: var(--peak, .7); }
+}
+/* 官网色变体：60% 白 + 20% 蓝 + 20% 琥珀；大星带 4px 白晕（s-lg） */
+.stars-far i.s-blue, .stars-near i.s-blue { background: #38bdf8; }
+.stars-far i.s-amber, .stars-near i.s-amber { background: #fbbf24; }
+.stars-near i.s-glow { box-shadow: 0 0 4px rgba(255, 255, 255, .6); }
+/* 星团层（v1.7.4 用户令「多颗星星聚一团、明暗变化」）——官网 canvas Star
+   大星口径：4 团、每团 6~8 颗聚簇，1~2 颗核心大星带 8px 晕（glow 晕
+   size×4 的 CSS 对应物），正弦明暗共用 star-twinkle，三色配比同星点 */
+.stars-cluster { position: absolute; inset: 0; }
+.stars-cluster i {
+    position: absolute;
+    border-radius: 50%;
+    background: #fff;
+    animation: star-twinkle var(--dur, 4s) ease-in-out var(--delay, 0s) infinite;
+    will-change: opacity;
+}
+.stars-cluster i.s-blue { background: #38bdf8; }
+.stars-cluster i.s-amber { background: #fbbf24; }
+.stars-cluster i.s-glow { box-shadow: 0 0 8px 2px rgba(224, 242, 254, .55); }
+/* 行星群：双层独立时钟——外层 .orbit-wrap 漂移（55~75s，≈1.5px/s），
+   内层 .planet 明灭（3.5~7s），二者解耦（标准里耦合同一动画被否）。
+   辉光宁淡：rgba .35 晕，半径随尺寸 4~7px。 */
+.planets { position: absolute; inset: 0; }
+.orbit-wrap {
+    position: absolute;
+    animation: planet-drift var(--drift, 60s) linear var(--delay, 0s) infinite alternate;
+    will-change: transform;
+}
+@keyframes planet-drift {
+    from { transform: translate3d(0, 0, 0); }
+    to   { transform: translate3d(var(--dx, 20px), var(--dy, 14px), 0); }
+}
+.planet {
+    width: var(--sz, 4px);
+    height: var(--sz, 4px);
+    border-radius: 50%;
+    background: var(--pc, #7dd3fc);
+    box-shadow: 0 0 var(--blur, 5px) var(--halo, 2px) rgba(125, 211, 252, .35);
+    animation: planet-pulse var(--twk, 5s) ease-in-out var(--delay, 0s) infinite;
+    will-change: opacity;
+}
+@keyframes planet-pulse {
+    0%, 100% { opacity: 0; }
+    50%      { opacity: var(--peak, .9); }
+}
+/* 流星：7 颗，10~16s 全周期线性坠落，行程 1100px（标准：压缩部分周期＝5 倍速被否；
+   官网 700px 手机竖屏截断故加长），只准向下。尾焰用细渐变线，头部亮点。 */
+.meteor {
+    position: absolute;
+    top: -12%;
+    left: var(--mx, 50%);
+    width: 2px;
+    height: 120px;
+    background: linear-gradient(180deg, rgba(255, 255, 255, .0), rgba(224, 242, 254, .85) 70%, #fff);
+    border-radius: 999px;
+    opacity: 0;
+    transform: rotate(18deg);
+    animation: meteor-fall var(--mdur, 12s) linear var(--mdelay, 0s) infinite;
+    will-change: transform, opacity;
+}
+/* 负延迟＝进场即有流星在途（正延迟会让打开页面前 1~11s 一颗流星都
+   看不到——用户实测反馈"没看到流星"的根因；10~16s 全周期节奏不变） */
+.meteor-1 { --mx: 8%;  --mdur: 11s; --mdelay: -9s; }
+.meteor-2 { --mx: 26%; --mdur: 14s; --mdelay: -3s; }
+.meteor-3 { --mx: 44%; --mdur: 10s; --mdelay: -6s; }
+.meteor-4 { --mx: 61%; --mdur: 16s; --mdelay: -12s; }
+.meteor-5 { --mx: 77%; --mdur: 12s; --mdelay: -1s; }
+.meteor-6 { --mx: 90%; --mdur: 13s; --mdelay: -8s; }
+.meteor-7 { --mx: 35%; --mdur: 15s; --mdelay: -4s; }
+/* v1.7.4 用户令流星三色——官网 createMeteor 配比 60% 白/25% 蓝/15% 琥珀
+   （7 道分配：蓝 2/琥珀 1），尾迹渐变头色 + 同色辉光（官网 box-shadow 口径） */
+.meteor.m-blue {
+    background: linear-gradient(180deg, rgba(56, 189, 248, 0), rgba(56, 189, 248, .5) 70%, #38bdf8);
+    filter: drop-shadow(0 0 6px rgba(56, 189, 248, .7));
+}
+.meteor.m-amber {
+    background: linear-gradient(180deg, rgba(251, 191, 36, 0), rgba(251, 191, 36, .5) 70%, #fbbf24);
+    filter: drop-shadow(0 0 6px rgba(251, 191, 36, .6));
+}
+@keyframes meteor-fall {
+    0%   { transform: translateY(0) rotate(18deg); opacity: 0; }
+    6%   { opacity: 1; }
+    70%  { opacity: 1; }
+    100% { transform: translateY(1100px) rotate(18deg); opacity: 0; }
+}
+/* reduce 慢速变体（官网 meteor-fall-slow 同款几何节奏）：亮度峰值 .9 尾段
+   .5、行程收短到 850px，比全速温和但仍斜穿天幕 */
+@keyframes meteor-fall-slow {
+    0%   { transform: translateY(0) rotate(18deg); opacity: 0; }
+    5%   { opacity: .9; }
+    90%  { opacity: .5; }
+    100% { transform: translateY(850px) rotate(18deg); opacity: 0; }
+}
+
+/* =====================================================================
+ * z1 内容层：.page —— 根背景 transparent（规矩①），悬浮于星空上
+ * ===================================================================== */
+.page {
+    position: relative;
+    z-index: 1;
+    max-width: 1140px; /* v1.7.9 用户令「web 端改回去」：v1.7.8 的 1400 加宽作废 */
+    margin: 0 auto;
+    padding: 14px;
+}
+
+/* ===== Header ===== */
+.header {
+    /* v1.7.2 用户令：取消页头玻璃——留空原则扩到头栏。只留布局
+       （logo/标题/按钮自身与间距），容器底纯透明透星空 */
+    background: transparent;
+    border: none;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    color: var(--text-primary);
+    padding: 18px 4px; border-radius: 0; margin-bottom: 10px;
+    display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;
+    box-shadow: none;
+    position: relative; overflow: visible;
+}
+.header::after {
+    content: none; /* v1.7.2 取消页头玻璃：右上装饰高光随容器底一并移除 */
+}
+.brand { display: flex; align-items: center; gap: 13px; position: relative; z-index: 1; }
+/* logo＝最大一颗星：玻璃盘提亮（深空必须，标准里过暗被否）+ 呼吸 + 悬浮双动画 */
+.brand-logo {
+    /* v1.7.1 用户令：外框正圆（小程序母本同款圆盘，原 14px 圆角方形作废） */
+    width: 46px; height: 46px; flex-shrink: 0; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center; font-size: 23px;
+    background: rgba(255, 255, 255, .32);
+    border: 1px solid rgba(255, 255, 255, .38);
+    /* 小程序标准③「logo＝最大一颗星」双环光晕：近环提形 + 远环铺氛围，
+       随 hero-breathe 整体呼吸（reduce 下静止但仍发光，深空必须提亮） */
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, .45),
+                0 0 22px 3px rgba(125, 211, 252, .55),
+                0 0 56px 14px rgba(125, 211, 252, .22);
+    backdrop-filter: blur(4px);
+    animation: hero-float 8s ease-in-out infinite, hero-breathe 8s ease-in-out infinite;
+}
+/* 慧尖真 logo（v1.6.29 用户指定替换 📡 emoji）：圆盘满铺圆形裁切；
+   v1.6.30 本体沿形发光，v1.7.1 内层径向发光提亮盘面中心（最大一颗星） */
+.brand-logo { position: relative; }
+.brand-logo img { position: relative; z-index: 1; width: 100%; height: 100%; object-fit: cover; border-radius: 50%;
+    filter: drop-shadow(0 0 6px rgba(125, 211, 252, .6)); }
+.brand-logo::before {
+    content: ''; position: absolute; inset: 3px; border-radius: 50%; z-index: 0;
+    background: radial-gradient(circle at 50% 42%, rgba(125, 211, 252, .5), rgba(125, 211, 252, .12) 55%, transparent 75%);
+}
+@keyframes hero-float   { 0%, 100% { translate: 0 0; } 50% { translate: 0 -4px; } }
+@keyframes hero-breathe { 0%, 100% { opacity: .7; } 50% { opacity: 1; } }
+.brand-text { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.header h1 { font-size: 18px; font-weight: 700; letter-spacing: -0.02em; color: var(--text-primary); }
+.header .ver {
+    display: inline-flex; align-items: center; gap: 5px; width: fit-content;
+    font-size: 10.5px; font-weight: 600; color: var(--glow); padding: 2px 9px;
+    border-radius: 99px; background: rgba(14, 165, 233, .14); border: 1px solid rgba(56, 189, 248, .28);
+    font-family: "SF Mono", Consolas, monospace; letter-spacing: .02em;
+}
+.header .actions { display: flex; gap: 8px; position: relative; z-index: 1; flex-wrap: wrap; }
+
+/* ===== Buttons ===== */
+.btn {
+    padding: 8px 16px; border-radius: 10px; border: 1px solid transparent; font-size: 13px;
+    cursor: pointer; font-weight: 600; transition: transform .12s, box-shadow .15s, filter .15s, background .15s, border-color .15s;
+    display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; user-select: none;
+}
+.btn:hover { filter: brightness(1.08); }
+.btn:active { transform: scale(0.96); }
+.btn:focus-visible { outline: 2px solid var(--primary-light); outline-offset: 2px; }
+.btn-primary { background: rgba(255, 255, 255, .9); color: var(--primary-dark); box-shadow: 0 2px 12px rgba(14, 165, 233, .3); }
+.btn-primary:hover { background: #fff; box-shadow: 0 4px 18px rgba(14, 165, 233, .45); }
+.btn-success { background: linear-gradient(180deg, #34d399, var(--green-deep)); color: #04150f; box-shadow: 0 2px 10px rgba(52, 211, 153, .28); }
+.btn-success:hover { box-shadow: 0 4px 14px rgba(52, 211, 153, .4); }
+.btn-danger { background: linear-gradient(180deg, #f87171, #dc2626); color: #fff; box-shadow: 0 2px 10px rgba(248, 113, 113, .28); }
+.btn-danger:hover { box-shadow: 0 4px 14px rgba(248, 113, 113, .4); }
+.btn-warn { background: linear-gradient(180deg, #fbbf24, #d97706); color: #241703; box-shadow: 0 2px 10px rgba(245, 158, 11, .28); }
+.btn-warn:hover { box-shadow: 0 4px 14px rgba(245, 158, 11, .4); }
+.btn-slate { background: rgba(255, 255, 255, .08); color: var(--text-secondary); border-color: var(--card-border); }
+/* 内倒/平开：青蓝主系（禁紫作前景） */
+.btn-tilt { background: linear-gradient(180deg, var(--accent), var(--primary-dark)); color: #fff; box-shadow: 0 2px 10px rgba(6, 182, 212, .3); }
+.btn-mode-a { background: linear-gradient(180deg, #475569, #334155); color: #fff; }
+.btn-mode-b { background: linear-gradient(180deg, #334155, #1e293b); color: #cbd5e1; }
+.btn-sm { padding: 8px 14px; font-size: 12px; min-height: 36px; border-radius: 9px; }
+.btn:disabled { opacity: .4; cursor: not-allowed; box-shadow: none; }
+
+/* ===== Card（透明玻璃悬浮） ===== */
+.card {
+    background: var(--bg-card); border-radius: var(--radius); padding: 16px 18px;
+    box-shadow: var(--shadow); margin-bottom: 12px;
+    border: 1px solid var(--card-border);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+}
+/* v1.6.27 留空原则（用户校准，与小程序标准⑤"首页三卡纯透明"同源）：
+   容器不铺底、未添加处透出星空；玻璃只落在真实存在的悬浮件上
+   （网关头 .gateway-header / 设备瓷砖 .device-item 各自自持玻璃）。
+   整块大底板会把没放设备的空地也磨成一片雾，正是要消除的效果。 */
+.card-flush {
+    background: transparent; border: none; box-shadow: none;
+    backdrop-filter: none; -webkit-backdrop-filter: none; padding: 4px 2px 0;
+}
+.card-title {
+    font-size: 11.5px; font-weight: 700; color: var(--text-secondary); margin-bottom: 13px;
+    text-transform: uppercase; letter-spacing: .08em;
+    display: flex; align-items: center; gap: 8px;
+}
+.card-dense { padding: 12px 16px; }
+.card-dense .card-title { margin-bottom: 9px; }
+.card-title::before {
+    content: ''; width: 4px; height: 14px; border-radius: 4px; flex-shrink: 0;
+    background: linear-gradient(180deg, var(--glow), var(--primary));
+    box-shadow: 0 0 8px rgba(125, 211, 252, .5);
+}
+
+/* ===== Status Grid ===== */
+.status-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.status-item {
+    display: flex; flex-direction: row; align-items: center; gap: 8px;
+    padding: 10px 14px; border-radius: var(--radius-sm); background: rgba(255, 255, 255, .04);
+    border: 1px solid var(--card-border); transition: all .2s; position: relative; min-width: 0;
+}
+.status-item:hover { transform: translateY(-1px); background: var(--bg-elevated); box-shadow: var(--shadow-md); }
+.status-item:has(.dot-ok)  { border-color: rgba(52, 211, 153, .45); background: linear-gradient(90deg, var(--green-bg) 0%, transparent 55%); }
+.status-item:has(.dot-err) { border-color: rgba(248, 113, 113, .45); background: linear-gradient(90deg, var(--red-bg) 0%, transparent 55%); }
+.status-item:has(.dot-warn){ border-color: rgba(251, 191, 36, .45); background: linear-gradient(90deg, var(--yellow-bg) 0%, transparent 55%); }
+.status-item .dot { width: 10px; height: 10px; border-radius: 50%; position: relative; flex-shrink: 0; }
+.dot-ok { background: var(--green); box-shadow: 0 0 10px rgba(52, 211, 153, .6); }
+.dot-err { background: var(--red); box-shadow: 0 0 10px rgba(248, 113, 113, .6); }
+.dot-warn { background: var(--yellow); box-shadow: 0 0 10px rgba(251, 191, 36, .6); }
+@keyframes ripple { 0% { box-shadow: 0 0 0 0 rgba(52, 211, 153, .45); } 100% { box-shadow: 0 0 0 9px rgba(52, 211, 153, 0); } }
+.dot-ok::after, .dot-online::after {
+    content: ''; position: absolute; inset: 0; border-radius: 50%; animation: ripple 2.4s ease-out infinite;
+}
+.status-item .label { font-size: 12px; color: var(--text-secondary); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.status-item .value { font-size: 12.5px; font-weight: 700; font-variant-numeric: tabular-nums; margin-left: auto; white-space: nowrap; padding-left: 6px; color: var(--text-primary); }
+
+/* ===== Gateway ===== */
+.gateway-item {
+    padding: 0; margin-bottom: 20px; position: relative;
+}
+.gateway-item:last-child { margin-bottom: 0; }
+/* 网关头部自持一块玻璃（身份块），空位网格不再被大底板盖住 */
+.gateway-header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 10px; gap: 8px; flex-wrap: wrap;
+    position: relative; overflow: hidden;
+    padding: 12px 16px 12px 19px; border-radius: var(--radius-sm);
+    background: var(--bg-card); border: 1px solid var(--card-border);
+    backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
+    transition: border-color .2s, box-shadow .2s;
+}
+.gateway-header::before {
+    content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+    background: linear-gradient(180deg, var(--glow), var(--primary));
+    box-shadow: 0 0 10px rgba(125, 211, 252, .5);
+}
+.gateway-item:hover .gateway-header { border-color: rgba(56, 189, 248, .5); box-shadow: var(--shadow-md); }
+.gw-id { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.gw-avatar {
+    width: 38px; height: 38px; flex-shrink: 0; border-radius: 11px; font-size: 19px;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(14, 165, 233, .16); border: 1px solid rgba(56, 189, 248, .3);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, .2);
+}
+.gw-meta { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.gateway-name { font-size: 15.5px; font-weight: 700; letter-spacing: -.01em; }
+.gateway-sn {
+    font-size: 10.5px; color: var(--text-secondary); width: fit-content;
+    font-family: "SF Mono", Consolas, monospace; background: rgba(255, 255, 255, .05);
+    padding: 1px 8px; border-radius: 6px; border: 1px solid var(--card-border);
+}
+
+/* ===== Devices ===== */
+/* 轨道封顶 340px（单设备行右侧留空透星空）。高度口径 v1.6.29 用户改令：
+   由"各自 hug"改为**全按 5005 统一高度**——行内 stretch 拉齐 +
+   min-height:262px（5005 满控件实测高）保证无 5005 的行同样齐高 */
+/* v1.7.9 用户令「web 端改回去」：v1.7.8 auto-fit 等分撑满作废，
+   恢复 v1.6.29 口径 auto-fill + 340 封顶（单设备行右侧留空不拉伸） */
+.device-list { margin-top: 12px; display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 340px)); gap: 10px; }
+@keyframes fadeUp { from { opacity: 0; transform: translateY(8px) scale(.99); } to { opacity: 1; transform: none; } }
+.device-item {
+    display: flex; flex-direction: column;
+    padding: 13px 15px; border-radius: var(--radius-sm); background: var(--bg-card);
+    gap: 10px; transition: box-shadow .18s, border-color .18s, transform .18s;
+    border: 1px solid var(--card-border); animation: fadeUp .35s ease both;
+    backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
+    min-height: 262px; /* 5005 满控件实测高——所有子设备统一（用户改令 v1.6.29） */
+}
+.device-item:hover { border-color: rgba(56, 189, 248, .5); box-shadow: var(--shadow-md); transform: translateY(-1px); }
+.device-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.device-info { flex: 1; min-width: 0; }
+.device-name { font-size: 14px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.device-sn { font-size: 10.5px; color: var(--text-secondary); font-family: "SF Mono", Consolas, monospace; margin-top: 2px; }
+.device-status {
+    font-size: 11px; margin-top: 6px; color: var(--text-secondary);
+    background: rgba(255, 255, 255, .04); border: 1px solid var(--card-border); border-radius: 7px;
+    padding: 4px 8px; font-variant-numeric: tabular-nums; line-height: 1.5;
+}
+.device-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.device-actions .btn-sm { padding: 5px 10px; font-size: 11px; min-height: 28px; }
+.control-section { display: flex; flex-direction: column; gap: 8px; }
+.control-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.control-row .btn-sm { flex: 1; min-width: 58px; text-align: center; justify-content: center; }
+/* v1.6.30 用户令：开/关/停/内倒四键换透明——实心渐变色块改 ghost 描线
+   （色彩语义由边框+文字色承载，玻璃层级只留瓷砖本体；hover 轻提亮可点感）。
+   作用域限 .control-row，网关区配对/状态等按键不受影响 */
+.control-row .btn-success, .control-row .btn-danger,
+.control-row .btn-warn, .control-row .btn-tilt {
+    background: transparent; border: 1px solid currentColor; box-shadow: none;
+}
+.control-row .btn-success { color: #34d399; }
+.control-row .btn-danger  { color: #f87171; }
+.control-row .btn-warn    { color: #fbbf24; }
+.control-row .btn-tilt    { color: #22d3ee; }
+.control-row .btn-success:hover, .control-row .btn-danger:hover,
+.control-row .btn-warn:hover, .control-row .btn-tilt:hover {
+    background: rgba(255, 255, 255, .06); filter: none;
+}
+.section-label { font-size: 10px; color: var(--text-secondary); font-weight: 600; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 2px; }
+
+/* ===== Sliders ===== */
+.slider-group { display: flex; flex-direction: column; gap: 7px; }
+.slider-row { display: flex; align-items: center; gap: 9px; }
+.slider-row .slider-label { width: 32px; flex-shrink: 0; }
+.slider-row input[type="range"] { flex: 1; }
+.slider-row .slider-value { min-width: 44px; text-align: right; flex-shrink: 0; }
+.slider-label { font-size: 10.5px; color: var(--text-secondary); font-weight: 600; }
+.slider-value {
+    font-size: 10.5px; min-width: 30px; text-align: right; color: var(--text-primary);
+    font-weight: 700; background: transparent; border: none;
+    padding: 2px 0; border-radius: 6px; font-variant-numeric: tabular-nums;
+}
+input[type="range"] {
+    -webkit-appearance: none; appearance: none;
+    width: 100%; height: 6px; border-radius: 99px; cursor: pointer;
+    background: rgba(255, 255, 255, .12); color: var(--primary); outline-offset: 4px;
+}
+.speed-slider { color: var(--primary-light); }
+.strength-slider { color: var(--accent); }
+input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 19px; height: 19px; border-radius: 50%;
+    background: #fff; border: 2.5px solid currentColor;
+    box-shadow: 0 0 8px rgba(125, 211, 252, .5), 0 1px 5px rgba(0, 0, 0, .4); transition: transform .12s, box-shadow .12s;
+}
+input[type="range"]::-moz-range-thumb {
+    width: 15px; height: 15px; border-radius: 50%;
+    background: #fff; border: 2.5px solid currentColor;
+    box-shadow: 0 0 8px rgba(125, 211, 252, .5), 0 1px 5px rgba(0, 0, 0, .4);
+}
+input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.12); }
+input[type="range"]:active::-webkit-slider-thumb { transform: scale(1.22); box-shadow: 0 0 14px rgba(125, 211, 252, .7); }
+input[type="range"]:focus-visible { outline: 2px solid var(--primary-light); }
+
+/* ===== Device online dot ===== */
+.dev-name { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.dev-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex-shrink: 0; position: relative; }
+.dot-online { background: var(--green); box-shadow: 0 0 8px rgba(52, 211, 153, .7); }
+.dot-offline { background: var(--red); box-shadow: 0 0 8px rgba(248, 113, 113, .6); }
+
+/* ===== Badge ===== */
+.badge {
+    display: inline-flex; align-items: center; gap: 5px; padding: 3.5px 11px; border-radius: 20px;
+    font-size: 11px; font-weight: 700; letter-spacing: .02em; white-space: nowrap;
+    border: 1px solid transparent;
+}
+.badge::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.badge-ok { background: var(--green-bg); color: var(--green); border-color: rgba(52, 211, 153, .3); }
+.badge-warn { background: var(--yellow-bg); color: var(--yellow); border-color: rgba(251, 191, 36, .3); }
+.badge-err { background: var(--red-bg); color: var(--red); border-color: rgba(248, 113, 113, .3); }
+.badge-info { background: var(--blue-bg); color: var(--primary-light); border-color: rgba(56, 189, 248, .3); }
+.badge-gray { background: rgba(255, 255, 255, .05); color: var(--text-secondary); border-color: var(--card-border); }
+
+/* ===== Update ===== */
+.update-box {
+    background: linear-gradient(135deg, rgba(14, 165, 233, .12), rgba(56, 189, 248, .05));
+    border-radius: var(--radius-sm); padding: 16px 18px; margin-top: 4px;
+    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;
+    border: 1px solid rgba(56, 189, 248, .28);
+}
+.update-box.update-ok { background: linear-gradient(135deg, var(--green-bg), rgba(255, 255, 255, .03)); border-color: rgba(52, 211, 153, .35); }
+.update-box.update-err { background: linear-gradient(135deg, var(--red-bg), rgba(255, 255, 255, .03)); border-color: rgba(248, 113, 113, .35); }
+.update-info { flex: 1; min-width: 200px; }
+.update-title { font-size: 15px; font-weight: 700; color: var(--glow); }
+.update-ok .update-title { color: var(--green); }
+.update-err .update-title { color: var(--red); }
+.update-desc { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
+
+/* ===== Misc ===== */
+.loading { text-align: center; padding: 26px; color: var(--text-secondary); font-size: 12.5px; }
+.spinner {
+    display: inline-block; width: 26px; height: 26px; margin-bottom: 8px;
+    border: 3px solid rgba(255, 255, 255, .12); border-top: 3px solid var(--primary);
+    border-right: 3px solid var(--glow);
+    border-radius: 50%; animation: spin .7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.toast {
+    position: fixed; bottom: 22px; right: 22px; padding: 12px 18px;
+    border-radius: var(--radius-sm); color: #fff; font-size: 13px; z-index: 9999;
+    animation: slideUp .28s cubic-bezier(.2,.9,.3,1.2); max-width: min(400px, calc(100vw - 40px));
+    box-shadow: var(--shadow-lg); font-weight: 600;
+    background-color: rgba(10, 15, 30, .9); border: 1px solid var(--card-border);
+    backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
+    display: flex; align-items: center; gap: 8px;
+}
+.toast::before { font-size: 14px; }
+@keyframes slideUp { from { transform: translateY(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+.toast-ok { background: rgba(6, 78, 59, .92); border-color: rgba(52, 211, 153, .4); }
+.toast-ok::before { content: '✅'; }
+.toast-err { background: rgba(127, 29, 29, .92); border-color: rgba(248, 113, 113, .4); }
+.toast-err::before { content: '⚠️'; }
+.toast-warn { background: rgba(120, 53, 15, .92); border-color: rgba(251, 191, 36, .4); }
+.toast-warn::before { content: '⏳'; }
+.info-box {
+    background: rgba(14, 165, 233, .08); border-left: 4px solid var(--primary);
+    padding: 14px 16px; border-radius: 0 var(--radius-sm) var(--radius-sm) 0; margin-top: 12px;
+    border-top: 1px solid var(--card-border); border-right: 1px solid var(--card-border); border-bottom: 1px solid var(--card-border);
+}
+.info-box h3 { font-size: 12px; color: var(--glow); margin-bottom: 6px; font-weight: 700; }
+.info-box p { font-size: 12px; color: var(--text-secondary); line-height: 1.8; }
+.info-box code {
+    background: rgba(255, 255, 255, .07); padding: 2px 7px; border-radius: 6px;
+    font-family: "SF Mono", Consolas, monospace; font-size: 11px; color: var(--text-primary);
+    border: 1px solid var(--card-border);
+}
+
+/* ===== Connection info grid ===== */
+.conn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 4px; }
+.conn-item {
+    background: rgba(255, 255, 255, .04); border-radius: var(--radius-sm); padding: 12px 14px;
+    border: 1px solid var(--card-border); transition: border-color .18s;
+}
+.conn-item:hover { border-color: rgba(56, 189, 248, .5); }
+.conn-label { font-size: 10.5px; color: var(--text-secondary); margin-bottom: 4px; font-weight: 600; letter-spacing: .03em; }
+.conn-value { font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--text-primary); }
+.conn-value.dim { font-size: 12px; font-weight: 500; color: var(--text-secondary); }
+.footer { text-align: center; padding: 22px 10px 10px; color: var(--text-secondary); font-size: 11px; }
+.empty-state { text-align: center; padding: 40px 20px; color: var(--text-secondary); }
+.empty-state .icon {
+    font-size: 38px; margin-bottom: 12px;
+    width: 74px; height: 74px; line-height: 74px; margin-left: auto; margin-right: auto;
+    border-radius: 50%; background: rgba(14, 165, 233, .12); border: 1px solid rgba(56, 189, 248, .28);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, .18);
+}
+.empty-state .hint { font-size: 12px; margin-top: 8px; color: var(--text-secondary); }
+.empty-hint { font-size: 12px; color: var(--text-secondary); padding: 10px 8px; text-align: center; }
+/* device-list 是 grid：空态提示若挤进首轨会左偏，须横跨全部轨道整行居中
+   （v1.6.27 留空改造引入的布局副作用，实测逮获自修） */
+.device-list .empty-hint { grid-column: 1 / -1; }
+.err-text { font-size: 12px; color: var(--red); }
+
+/* ===== 响应式 ===== */
+@media (max-width: 640px) {
+    .page { padding: 8px; }
+    .header { padding: 14px 16px; }
+    .header h1 { font-size: 16px; }
+    .header .actions { gap: 6px; }
+    .header .btn { padding: 6px 12px; font-size: 12px; }
+    .brand-logo { width: 40px; height: 40px; font-size: 20px; }
+    .status-grid { grid-template-columns: 1fr; gap: 6px; }
+    .status-item { padding: 9px 12px; }
+    .status-item .dot { width: 9px; height: 9px; }
+    .status-item .label { font-size: 11.5px; }
+    .status-item .value { font-size: 12px; }
+    .conn-grid { grid-template-columns: 1fr; }
+    .device-list { grid-template-columns: 1fr; }
+    /* v1.7.8 用户令「手机端这里没有对齐」：设备卡（360 居中）与连接信息
+       卡（全宽）左缘错位 → 改为全部 .card 统一 360px 居中；卡内元素
+       （网关卡/连接瓦片/说明框）回归自然撑满内容区，v1.7.5~1.7.7 的
+       gateway-item/conn-item/info-box 单独封顶与 calc 抵消全部作废 */
+    .card { max-width: 360px; margin-left: auto; margin-right: auto; padding: 16px 2px; }
+    .device-item { padding: 11px 12px; }
+    .control-row { gap: 4px; }
+    .control-row .btn-sm { flex: 1; min-width: 54px; padding: 7px 8px; font-size: 12px; min-height: 32px; }
+    .device-actions .btn-sm { padding: 5px 8px; font-size: 11px; }
+    .slider-row { gap: 6px; }
+    .slider-row .slider-label { width: 28px; }
+    .gateway-header { flex-wrap: wrap; gap: 8px; }
+    .gateway-name { font-size: 15px; }
+    .toast { left: 12px; right: 12px; bottom: 12px; max-width: none; justify-content: center; }
+}
+@media (prefers-reduced-motion: reduce) {
+    /* 标准哲学"运动宁慢勿快"，无障碍场景停掉星空动画与视差 */
+    *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+    /* 流星例外＝官网同款行为（2026-09-07 用户同浏览器实证：系统减弱动画
+       下官网流星照动——官网尾注 JS 注入的 .meteor duration !important
+       级联后插队，穿透其 L70 reduce 守卫）。母本行为即标准：reduce 下
+       流星不停、走更温和的 slow 关键帧；星点/行星/星云等仍静止合规 */
+    .meteor {
+        animation-name: meteor-fall-slow !important;
+        animation-duration: var(--mdur, 12s) !important;
+        animation-iteration-count: infinite !important;
+    }
+    /* 星点/行星群例外＝官网 canvas 粒子同款行为：官网星星由 rAF 驱动
+       （L802 requestAnimationFrame），reduce 媒体查询拦不住 canvas，故官网
+       星星在减弱动画下照样漂移闪烁。小程序标准（0d2200c5）双层独立时钟
+       同口径还原：明灭 var(--twk)/var(--dur)、漂移 var(--drift) 按各自
+       JS 随机周期复流——仅星空装饰层豁免，内容层转场仍静止合规 */
+    .stars-far i, .stars-near i, .stars-cluster i {
+        animation-duration: var(--dur, 4s) !important;
+        animation-iteration-count: infinite !important;
+    }
+    .orbit-wrap {
+        animation-duration: var(--drift, 60s) !important;
+        animation-iteration-count: infinite !important;
+    }
+    .planet {
+        animation-duration: var(--twk, 5s) !important;
+        animation-iteration-count: infinite !important;
+    }
+    /* v1.7.1 用户令「没有星云」：三团 α.07~.10 静止态在深底上几乎不可辨，
+       运动才可见——漂移一并豁免（45/50/60s 超慢速大团，比星点更温和，
+       符合"宁慢勿快"；此为母本官网行为的用户授权增强） */
+    .nebula::before { animation-duration: 45s !important; animation-iteration-count: infinite !important; }
+    .nebula::after  { animation-duration: 50s !important; animation-iteration-count: infinite !important; }
+    .nebula3        { animation-duration: 60s !important; animation-iteration-count: infinite !important; }
+}
+
+/* v1.7.14：插件配置项中文说明卡（index.html #configGuideCard）
+   ——卡片体系是 v1.6.7 美化时新建的，早于本卡，故 code/表格样式都缺。
+   此前 <code> 仅靠浏览器默认等宽字体撑过 M-2 之前的页面，实际无对比度
+   处理；本卡首次密集使用 code，补齐可读性（继承正文色，避免 UA 默认
+   浅色底在深色主题上刺眼）。 */
+.card code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--accent);
+    word-break: break-all;
+}
+.cfg-table {
+    line-height: 1.7;
+}
+.cfg-table tr {
+    border-bottom: 1px solid var(--border);
+}
+.cfg-table tr:last-child {
+    border-bottom: none;
+}
+.cfg-table td {
+    padding: 7px 6px;
+    vertical-align: top;
+}
+.cfg-table td:first-child {
+    white-space: nowrap;
+    width: 1%;
+}
+summary.card-title {
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+}
+summary.card-title::-webkit-details-marker {
+    display: none;
+}
+summary.card-title::before {
+    content: '▸';
+    display: inline-block;
+    margin-right: 6px;
+    transition: transform .15s ease;
+    color: var(--accent);
+}
+details[open] > summary.card-title::before {
+    transform: rotate(90deg);
+}

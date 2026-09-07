@@ -14,12 +14,16 @@ CN_MAP = {"零": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, 
 DEVICE_SUFFIX = ["室", "厅", "房", "间", "楼", "区", "馆", "灯", "扇", "机", "窗", "调", "备"]
 AREA_SUFFIX = ["室", "厅", "房", "间", "楼", "区", "馆"]
 
-KNOWN_DEVICES = sorted(
-    ["提升窗", "平开窗", "推拉窗", "平推窗", "天窗", "飘窗", "百叶窗", "筒灯", "灯泡", "空调", "风扇",
-     "窗户", "窗帘", "加湿器", "热水器", "净化器", "灯", "窗", "幕布", "门", "电视", "投影", "音箱"],
-    key=len, reverse=True)
+_KNOWN_DEVICES_TAIL = ["提升窗", "平开窗", "推拉窗", "平推窗", "天窗", "飘窗", "百叶窗", "筒灯", "灯泡",
+                       "空调", "风扇", "窗户", "窗帘", "加湿器", "热水器", "净化器", "灯", "窗", "幕布",
+                       "门", "电视", "投影", "音箱"]
 KNOWN_DEVICES_PREFIX = ["空调", "风扇", "加湿器", "净化器", "热水器", "电视", "投影", "音箱", "幕布",
                         "窗帘", "窗户", "筒灯", "射灯", "灯带", "吸顶灯", "台灯", "落地灯", "床头灯", "夜灯"]
+# 修A（2026-09）：射灯/灯带/吸顶灯/台灯/落地灯/床头灯/夜灯 原只在表二，而候选⑥设备词子串扫描
+# 与设备词加分只认表一——「办公室射灯」找不到 len≥2 设备词退单字「灯」(4+1=5)，
+# ⑤区域候选("办公室","射灯",3+1=4)反而落败，区域整个丢失。
+# 设备词全集并为一张表（③⑥⑦与加分共用）；表二保持原样（fast_path 前缀剥离/候选④依赖）。
+KNOWN_DEVICES = sorted(set(_KNOWN_DEVICES_TAIL) | set(KNOWN_DEVICES_PREFIX), key=len, reverse=True)
 EN_DEVICES = ["light", "lamp", "fan", "ac", "airconditioner", "switch", "outlet", "window",
               "curtain", "blind", "tv", "speaker", "heater", "humidifier", "downlight"]
 
@@ -89,6 +93,18 @@ def extract_prefix(text: str, start: int = 2, end: int = 10) -> tuple:
         if suffix and any(prefix.endswith(w) for w in _SUF):
             return prefix, suffix
     return None, text
+
+
+def _area_of_prefix(pre: str) -> str | None:
+    """目标词前缀→区域名（修A）：尾字区域词命中（"办公室"）→ 剥属格「的/里/得」重试
+    （"办公室的"）→ 二次前缀扫描回捞（未知复合词 "办公室吊灯" 的单字残段→"办公室"）。
+    只回区域不拼设备名，避免拿未知残字重构出臆造名词。"""
+    pre = re.sub(r"[的里得]+$", "", (pre or "").strip())
+    if not pre:
+        return None
+    if any(pre.endswith(w) for w in AREA_SUFFIX):
+        return pre
+    return extract_prefix(pre)[0]
 
 
 def strip_modal(raw: str) -> str:
@@ -175,22 +191,19 @@ def parse_target(raw: str, action_match=None) -> tuple[str | None, str | None, i
     # ⑥ 设备词子串优先（"暂停窗户动作"→窗户；移植期新增，堵原表中段词漏提）。
     #    先做 len≥2；无果退单字通用词（灯/窗/门），再往后才轮到拼音档，
     #    防 "灯打开" 被近音 "灯泡"(dist=2) 截胡（tie 先到优先）。
+    #    修A：区域提取统一走 _area_of_prefix（剥「的」+二次回捞），不再因残字丢区域。
     _hit_dev = False
     for d in sorted((x for x in KNOWN_DEVICES if len(x) >= 2), key=len, reverse=True):
         idx = stripped.find(d)
         if idx >= 0:
-            pre = stripped[:idx].strip()
-            area_pre = pre if any(pre.endswith(w) for w in AREA_SUFFIX) else None
-            candidates.append((area_pre, d, 5))
+            candidates.append((_area_of_prefix(stripped[:idx]), d, 5))
             _hit_dev = True
             break
     if not _hit_dev:
         for d in ("灯", "窗", "门"):
-            if d in stripped:
-                idx = stripped.find(d)
-                pre = stripped[:idx].strip()
-                area_pre = pre if any(pre.endswith(w) for w in AREA_SUFFIX) else None
-                candidates.append((area_pre, d, 4))
+            idx = stripped.find(d)
+            if idx >= 0:
+                candidates.append((_area_of_prefix(stripped[:idx]), d, 4))
                 _hit_dev = True
                 break
     # ⑦ 拼音模糊（v1.5 两缺陷修正：a) 首个 ≤5 即 break 会让「空调 kongtiao」被

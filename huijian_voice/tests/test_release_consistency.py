@@ -243,6 +243,26 @@ def test_www_ingress_relative_and_static_root_clean():
         "endpoints.json（含 WS token）禁止写入 nginx 静态根"
 
 
+def test_www_starsky_assets_and_cachebust():
+    """星辰大海移植钉桩（与 LoRa 网关加载项同一设计体系）：
+    ① 星野 css/js 外链且带 ?v=<当前版本> cache-bust——网关 v1.7.1 教训：
+       静态资源不挂版本参数，升级后客户硬刷前拿的还是旧天；
+    ② star-bg 骨架在场（starsky.js 的 DOM 契约：starsFar/starsNear/planets）；
+    ③ 与网关母本同文件=同一片天（固定种子共星图，禁本地 fork 漂移）——
+       母本仓仅同机并列检出时比对的本地守卫，CI 无此路径自动跳过。"""
+    ver = _config()["version"]
+    www = (ROOT / "www" / "index.html").read_text(encoding="utf-8")
+    for asset in (f'href="css/huijian.css?v={ver}"', f'href="css/voice.css?v={ver}"',
+                  f'src="js/starsky.js?v={ver}"', 'src="img/logo.png"',
+                  'class="star-bg"', 'id="starsFar"', 'id="starsNear"', 'id="planets"'):
+        assert asset in www, f"www 缺静态资源链或星野骨架：{asset}"
+    donor = ROOT.parent.parent / "huijian-gateway-plugin" / "huijian_mqtt_broker" / "www"
+    if donor.exists():
+        for rel in ("css/huijian.css", "js/starsky.js"):
+            assert (ROOT / "www" / rel).read_bytes() == (donor / rel).read_bytes(), \
+                f"{rel} 与网关母本分叉——修设计请改母本后同步复制，禁单边演化"
+
+
 def test_repository_manifest_current_spec():
     repo = ROOT.parent
     assert (repo / "repository.yaml").exists(), "商店清单须为 repository.yaml（新规范）"

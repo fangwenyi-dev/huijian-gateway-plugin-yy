@@ -56,6 +56,79 @@ def test_internal_bound_before_params_use():
     body = src[src.index("async def async_step_qrcode") : src.index("async def async_step_qrcode_done")]
     # 去注释行（注释里会引用代码字面量，first-index 会撞注释——v1.0.2 500 钉桩首版即被自己骗了）
     code = "\n".join(ln.split("#")[0] for ln in body.splitlines())
-    assign = code.index("internal = get_url")
+    # 锚定裸赋值 "internal = "，不锁右侧表达式：v1.0.4 起 get_url 结果先过
+    # _ensure_lan_port 归一（局域网裸 IP 补真实端口），钉的是求值顺序不是实现写法
+    assign = code.index("internal = ")
     use = code.index('"ha_internal": internal')
     assert assign < use, "internal 必须在 params 字面量引用 ha_internal 之前赋值"
+
+
+# ── v1.0.4 行为级钉桩：_ensure_lan_port（二维码 ha_internal 源头端口归一）──
+# 用 AST 抠出真实函数体 exec——不是文本存在性检查（v1.0.2 求值序教训：
+# 文本检查会被注释骗过，这里执行的是将随加载项出厂的同一份代码）。
+
+def _ensure_lan_port_fn():
+    import ast
+    tree = ast.parse(_src())
+    fn = next(n for n in tree.body
+              if isinstance(n, ast.FunctionDef) and n.name == "_ensure_lan_port")
+    ns = {}
+    exec(compile(ast.get_source_segment(_src(), fn), "<ensure_lan_port>", "exec"), ns)
+    return ns["_ensure_lan_port"]
+
+
+def _clean_mcp_endpoint_fn():
+    """同 AST 范式：执行的是将随加载项出厂的同一份 _clean_mcp_endpoint。"""
+    import ast
+    src = _src()
+    tree = ast.parse(src)
+    fn = next(n for n in tree.body
+              if isinstance(n, ast.FunctionDef) and n.name == "_clean_mcp_endpoint")
+    ns = {"Any": object, "annotations": None,
+          "_LOGGER": __import__("logging").getLogger("pin")}
+    exec(compile(ast.get_source_segment(src, fn), "<clean_mcp_endpoint>", "exec"), ns)
+    return ns["_clean_mcp_endpoint"]
+
+
+def test_clean_mcp_endpoint_behavior():
+    """存量固件垃圾值防线（v2.1.4 前设备 mcp 双空 POST "?token="）——
+    D1 门禁只判空串，垃圾值必须归 None，合法 URL 必须原样穿透。"""
+    f = _clean_mcp_endpoint_fn()
+    assert f("?token=") is None
+    assert f("?token=abc") is None
+    assert f("") is None
+    assert f("   ") is None
+    assert f(None) is None
+    assert f("https://mcp.hi-chip.com/mcp/?token=***") == "https://mcp.hi-chip.com/mcp/?token=***"
+    assert f("ws://192.168.1.9:8000/xiaozhi/v1/llm") == "ws://192.168.1.9:8000/xiaozhi/v1/llm"
+    assert f("  HTTPS://x.test/mcp ") == "HTTPS://x.test/mcp"
+    # 入驻两条分支必须都走消毒（device 与 assist 共用 mcp_endpoint 变量）
+    src = _src()
+    assert "mcp_endpoint = _clean_mcp_endpoint(" in src, "入驻入口消毒被回退"
+
+
+class _Hass:
+    def __init__(self, port=8124, have_http=True):
+        import types
+        self.http = types.SimpleNamespace(server_port=port) if have_http else None
+
+
+def test_ensure_lan_port_behavior():
+    f = _ensure_lan_port_fn()
+    # 事故形态：局域网裸 IP 补真实监听端口（实况优先，不猜 8123）
+    assert f(_Hass(), "http://192.168.1.91") == "http://192.168.1.91:8124"
+    # 裸根路径归一：防下游 "//"+"api" 双斜杠
+    assert f(_Hass(), "http://192.168.1.91/") == "http://192.168.1.91:8124"
+    # 各放行面
+    assert f(_Hass(), "http://192.168.1.91:9999") == "http://192.168.1.91:9999"
+    assert f(_Hass(), "https://192.168.1.91") == "https://192.168.1.91"
+    assert f(_Hass(), "http://ha.example.com") == "http://ha.example.com"
+    assert f(_Hass(), "http://8.8.8.8") == "http://8.8.8.8"
+    assert f(_Hass(), "") == ""
+    # http 未就绪时序 → 官方默认 8123 兜底
+    assert f(_Hass(have_http=False), "http://10.1.2.3") == "http://10.1.2.3:8123"
+    # IPv6 字面量不碰（文档承诺域=IPv4；重拼 netloc 必产缺括号畸形 URL——
+    # 2026-09-10 发布前审查实锤的越界，守卫钉死）
+    assert f(_Hass(), "http://[fd12:3456::1]/") == "http://[fd12:3456::1]/"
+    # 带路径的私有 IP 保留路径
+    assert f(_Hass(), "http://192.168.4.30/ha") == "http://192.168.4.30:8124/ha"

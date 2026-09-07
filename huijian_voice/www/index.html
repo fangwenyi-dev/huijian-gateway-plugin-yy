@@ -1,66 +1,46 @@
 <!DOCTYPE html>
 <!--
-  慧尖HA语音插件 · 加载项管理页（单文件零外链，离线 LAN 可用）
+  慧尖HA语音插件 · 加载项管理页（「星辰大海」设计体系——与 LoRa 网关加载项同源：
+  css/huijian.css 令牌与星野层 + js/starsky.js 固定种子星空 + css/voice.css 页面补充层）。
+  离线 LAN 可用：全部本地相对路径资源，零 CDN。
   访问路径：HA 侧边栏 Ingress（Supervisor 代理，源 IP 在白名单内）或宿主 :8001。
   数据面全部走同域 /api/（nginx→127.0.0.1:8002 admin），前端零凭据。
-  CURRENT_VERSION 与 config.yaml/CHANGELOG 一致性由 tests/test_release_consistency.py 钉桩。
+  CURRENT_VERSION 与 config.yaml/CHANGELOG 一致性由 tests/test_release_consistency.py 钉桩；
+  ?v= cache-bust 与该版本同步 bump（网关 v1.7.1 同款教训：不硬刷拿不到新 UI）。
 -->
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#030712">
 <title>慧尖HA语音插件</title>
-<style>
-  :root { --bg:#f5f6f8; --card:#fff; --line:#e3e6ea; --tx:#1f2329; --mut:#8a919c;
-          --ok:#1a9e5c; --bad:#d43a3a; --warn:#c07f00; --pri:#2f6fed; }
-  * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--tx);
-         font:14px/1.6 "PingFang SC","Microsoft YaHei",system-ui,sans-serif; }
-  header { background:#17223b; color:#fff; padding:14px 20px; display:flex; gap:12px; align-items:baseline; flex-wrap:wrap; }
-  header h1 { font-size:17px; margin:0; }
-  header .ver { color:#9fb0d0; font-size:12px; }
-  nav { display:flex; gap:6px; padding:10px 16px 0; flex-wrap:wrap; }
-  nav button { border:1px solid var(--line); background:var(--card); padding:7px 16px;
-               border-radius:8px 8px 0 0; cursor:pointer; font-size:14px; }
-  nav button.on { background:var(--pri); color:#fff; border-color:var(--pri); }
-  main { padding:14px 16px 60px; max-width:980px; }
-  section { display:none; }
-  section.on { display:block; }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:10px;
-          padding:14px 16px; margin-bottom:12px; }
-  .card h3 { margin:0 0 10px; font-size:15px; }
-  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:10px; }
-  .pill { display:inline-block; padding:2px 10px; border-radius:20px; font-size:12px; }
-  .pill.ok { background:#e3f6ec; color:var(--ok); } .pill.bad { background:#fdeaea; color:var(--bad); }
-  .pill.warn { background:#fdf3e0; color:var(--warn); }
-  label { display:block; margin:8px 0 3px; color:var(--mut); font-size:12px; }
-  input, select, textarea { width:100%; padding:7px 9px; border:1px solid var(--line);
-        border-radius:7px; font:inherit; background:#fff; }
-  textarea { min-height:64px; }
-  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:end; }
-  .row > div { flex:1 1 200px; }
-  button.act { background:var(--pri); color:#fff; border:0; padding:8px 18px;
-        border-radius:8px; cursor:pointer; font-size:14px; }
-  button.act.gray { background:#6b7280; } button.act.red { background:var(--bad); }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
-  th { color:var(--mut); font-weight:500; }
-  code, .mono { font:12px/1.5 ui-monospace,Consolas,monospace; word-break:break-all; }
-  .mut { color:var(--mut); } .hint { font-size:12px; color:var(--mut); margin-top:4px; }
-  audio { width:100%; }
-  .copy { cursor:pointer; color:var(--pri); font-size:12px; user-select:none; }
-  #toast { position:fixed; bottom:18px; left:50%; transform:translateX(-50%);
-    background:#20242c; color:#fff; padding:9px 18px; border-radius:8px;
-    opacity:0; transition:.25s; pointer-events:none; max-width:80vw; }
-  #toast.show { opacity:.95; }
-</style>
+<link rel="stylesheet" href="css/huijian.css?v=1.0.4">
+<link rel="stylesheet" href="css/voice.css?v=1.0.4">
 </head>
 <body>
-<header>
-  <h1>🎙️ 慧尖HA语音插件</h1>
-  <span class="ver">v<span id="ver">–</span> · <span id="haver">检测中</span></span>
+<!-- 「星辰大海」背景层（与网关加载项同一设计标准/同一固定种子＝同一片天）：
+     z0 固定星空（氛围底/三团星云/星点/行星群由 css + starsky.js 生成，流星 7 颗），
+     内容层 .page z1 悬浮玻璃。aria-hidden：纯装饰，不进辅助技术。 -->
+<div class="star-bg" aria-hidden="true">
+  <div class="nebula"></div>
+  <div class="nebula3"></div>
+  <div class="stars-far" id="starsFar"></div>
+  <div class="stars-near" id="starsNear"></div>
+  <div class="stars-cluster" id="clusters"></div>
+  <div class="planets" id="planets"></div>
+  <span class="meteor meteor-1"></span><span class="meteor meteor-2 m-blue"></span><span class="meteor meteor-3"></span><span class="meteor meteor-4 m-amber"></span><span class="meteor meteor-5 m-blue"></span><span class="meteor meteor-6"></span><span class="meteor meteor-7"></span>
+</div>
+<div class="page">
+<header class="header">
+  <div class="brand">
+    <span class="brand-logo"><img src="img/logo.png" alt="慧尖 logo"></span>
+    <div class="brand-text">
+      <h1>慧尖HA语音插件</h1>
+      <span class="ver">v<span id="ver">–</span> · <span id="haver">检测中</span></span>
+    </div>
+  </div>
 </header>
-<nav>
+<nav class="hj-nav">
   <button data-tab="status" class="on">状态</button>
   <button data-tab="settings">设置</button>
   <button data-tab="models">模型</button>
@@ -88,70 +68,70 @@
 <!-- ══ 设置 ══ -->
 <section id="tab-settings">
   <div class="card"><h3>语音识别（STT）</h3>
-    <div class="row">
-      <div><label>引擎</label>
+    <div class="hj-row">
+      <div><label class="hj-field">引擎</label>
         <select id="stt_provider">
           <option value="local_paraformer">本地 · Paraformer 中英双语流式（默认，离线可用）</option>
           <option value="cloud">云端 · OpenAI 兼容 /audio/transcriptions</option>
         </select></div>
     </div>
     <div id="sttCloudBox" style="display:none">
-      <div class="row">
-        <div><label>Base URL</label><input id="stt_cloud_base" placeholder="https://api.example.com/v1"></div>
-        <div><label>模型名</label><input id="stt_cloud_model" placeholder="whisper-1"></div>
+      <div class="hj-row">
+        <div><label class="hj-field">Base URL</label><input id="stt_cloud_base" placeholder="https://api.example.com/v1"></div>
+        <div><label class="hj-field">模型名</label><input id="stt_cloud_model" placeholder="whisper-1"></div>
       </div>
-      <label>API Key（显示为 **** 即未变更；输入新值才覆盖）</label><input id="stt_cloud_key" type="password">
+      <label class="hj-field">API Key（显示为 **** 即未变更；输入新值才覆盖）</label><input id="stt_cloud_key" type="password">
     </div>
     <div class="hint">默认引擎本地优先；云端失败自动回落本地（日志可见）。</div>
   </div>
 
   <div class="card"><h3>语音合成（TTS）</h3>
-    <div class="row">
-      <div><label>引擎</label>
+    <div class="hj-row">
+      <div><label class="hj-field">引擎</label>
         <select id="tts_provider">
           <option value="local_kokoro">本地 · Kokoro 多语（默认，离线可用）</option>
           <option value="cloud">云端 · OpenAI 兼容 /audio/speech</option>
         </select></div>
-      <div><label>音色（本地）</label><select id="tts_sid"></select></div>
-      <div style="flex:0 1 140px"><label>语速 0.6–2.0</label><input id="tts_speed" type="number" step="0.05" min="0.6" max="2"></div>
+      <div><label class="hj-field">音色（本地）</label><select id="tts_sid"></select></div>
+      <div style="flex:0 1 140px"><label class="hj-field">语速 0.6–2.0</label><input id="tts_speed" type="number" step="0.05" min="0.6" max="2"></div>
     </div>
     <div id="ttsCloudBox" style="display:none">
-      <div class="row">
-        <div><label>Base URL</label><input id="tts_cloud_base"></div>
-        <div><label>音色名</label><input id="tts_cloud_voice" placeholder="alloy"></div>
+      <div class="hj-row">
+        <div><label class="hj-field">Base URL</label><input id="tts_cloud_base"></div>
+        <div><label class="hj-field">音色名</label><input id="tts_cloud_voice" placeholder="alloy"></div>
       </div>
-      <label>API Key</label><input id="tts_cloud_key" type="password">
+      <label class="hj-field">API Key</label><input id="tts_cloud_key" type="password">
     </div>
   </div>
 
   <div class="card"><h3>理解与执行（NLU）</h3>
-    <div class="row">
+    <div class="hj-row">
       <div><label><input id="nlu_enabled" type="checkbox" style="width:auto"> 启用快速通道（正则+分类器，推荐）</label></div>
       <div><label><input id="nlu_textcnn" type="checkbox" style="width:auto"> 启用 TextCNN 意图分类（T1）</label></div>
       <div><label><input id="nlu_query" type="checkbox" style="width:auto"> 启用本地查询（时间/温度/状态）</label></div>
     </div>
-    <label>自定义纠错词条（JSON，一行一组；在内置 58 条之上叠加）</label>
+    <label class="hj-field">自定义纠错词条（JSON，一行一组；在内置 58 条之上叠加）</label>
     <textarea id="nlu_corr" placeholder='{"西顶灯": "吸顶灯"}'></textarea>
   </div>
 
   <div class="card"><h3>大模型兜底（LLM，默认关闭）</h3>
-    <div class="row">
+    <div class="hj-row">
       <div><label><input id="llm_enabled" type="checkbox" style="width:auto"> 启用（快速通道未命中时交给大模型；需填端点）</label></div>
     </div>
-    <div class="row">
-      <div><label>Base URL（OpenAI 兼容）</label><input id="llm_base" placeholder="https://…/v1"></div>
-      <div><label>模型</label><input id="llm_model" placeholder="qwen-plus / gpt-4o-mini …"></div>
-      <div><label>API Key</label><input id="llm_key" type="password"></div>
+    <div class="hj-row">
+      <div><label class="hj-field">Base URL（OpenAI 兼容）</label><input id="llm_base" placeholder="https://…/v1"></div>
+      <div><label class="hj-field">模型</label><input id="llm_model" placeholder="qwen-plus / gpt-4o-mini …"></div>
+      <div><label class="hj-field">API Key</label><input id="llm_key" type="password"></div>
     </div>
     <div class="hint">启用后可通过受控工具面下发设备指令（场景/自动化写默认禁）。</div>
   </div>
 
   <div class="card"><h3>安全与省电</h3>
-    <div class="row">
+    <div class="hj-row">
       <div><label><input id="req_token" type="checkbox" style="width:auto"> 设备连接强制校验 token（默认关=局域网免配直连）</label></div>
-      <div style="flex:0 1 180px"><label>空闲 N 分钟卸载模型（0=常驻）</label><input id="unload" type="number" min="0"></div>
+      <div style="flex:0 1 180px"><label class="hj-field">空闲 N 分钟卸载模型（0=常驻）</label><input id="unload" type="number" min="0"></div>
     </div>
-    <label>兜底话术（未理解时播报）</label><input id="fallback">
+    <label class="hj-field">兜底话术（未理解时播报）</label><input id="fallback">
     <div class="hint" style="margin-top:10px">
       <button class="act" id="saveBtn">保存设置</button>
       <span id="saveMsg" class="mut"></span>
@@ -175,15 +155,15 @@
 <!-- ══ 调试 ══ -->
 <section id="tab-debug">
   <div class="card"><h3>一句话理解（干跑不执行；勾选后可真执行）</h3>
-    <div class="row">
-      <div style="flex:3"><label>输入语句</label><input id="dbgText" placeholder="打开客厅的灯"></div>
+    <div class="hj-row">
+      <div style="flex:3"><label class="hj-field">输入语句</label><input id="dbgText" placeholder="打开客厅的灯"></div>
       <div style="flex:0 1 150px"><label><input id="dbgExec" type="checkbox" style="width:auto"> 真执行</label></div>
       <div style="flex:0 1 120px"><button class="act" id="dbgBtn">测试</button></div>
     </div>
-    <pre id="dbgOut" class="mono mut" style="white-space:pre-wrap;margin-top:8px">—</pre>
+    <pre id="dbgOut" class="hj-term">—</pre>
   </div>
   <div class="card"><h3>TTS 试听</h3>
-    <div class="row">
+    <div class="hj-row">
       <div style="flex:3"><input id="ttsText" value="好的，客厅的灯打开了。" placeholder="要合成的句子"></div>
       <div style="flex:0 1 120px"><button class="act" id="ttsBtn">合成</button></div>
     </div>
@@ -201,7 +181,7 @@
     <table><tbody id="epTable"></tbody></table>
     <div class="hint">token 仅在本页与 /api/endpoints 出现（管理面白名单来源限定）。若开启了强制校验，
       设备上的地址必须是<b>整串带 token</b> 复制。</div>
-    <p>
+    <p style="margin-top:10px">
       <button class="act red" id="regenBtn">重置 token</button>
       <span class="mut"> 重置后所有设备需重新配对。</span>
     </p>
@@ -213,11 +193,13 @@
 </section>
 
 </main>
+<footer class="footer"><p>慧尖HA语音插件 <span id="footerVer"></span></p></footer>
+</div><!-- /.page -->
 <div id="toast"></div>
 
 <script>
 "use strict";
-const CURRENT_VERSION = "1.0.3";           // 与 config.yaml 一致（钉桩测试）
+const CURRENT_VERSION = "1.0.4";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
 // 音色表 = kokoro-multi-lang-v1_0 官方 sid 映射（docs/source/onnx/tts/pretrained_models/kokoro.rst 实证）
 const VOICES = [
   [45,"zf_xiaobei · 小北（默认）"],[46,"zf_xiaoni · 小尼"],[47,"zf_xiaoxiao · 晓晓"],[48,"zf_xiaoyi · 小艺"],
@@ -258,6 +240,7 @@ async function refreshStatus(){
   try {
     const st = await api("/status.json", {});
     $("#ver").textContent = st.version || CURRENT_VERSION;
+    $("#footerVer").textContent = "v" + (st.version || CURRENT_VERSION);
     $("#haver").textContent = (st.version===CURRENT_VERSION) ? "核心正常" : "前端/核心版本不一致";
     const up = st.uptime_s>=0 ? (st.uptime_s>86400 ? (st.uptime_s/86400).toFixed(1)+" 天" : Math.floor(st.uptime_s/3600)+" 时 "+ (st.uptime_s%3600/60|0)+" 分") : "–";
     $("#statusGrid").innerHTML = [
@@ -293,7 +276,7 @@ async function loadSettings(){
   $("#tts_provider").value = S.tts.provider==="cloud" ? "cloud" : "local_kokoro";
   $("#stt_cloud_base").value = S.stt.cloud?.base_url||""; $("#stt_cloud_model").value = S.stt.cloud?.model||"";
   $("#tts_cloud_base").value = S.tts.cloud?.base_url||""; $("#tts_cloud_voice").value = S.tts.cloud?.voice||"";
-  $("#stt_cloud_key").value = ""; $("#tts_cloud_key").placeholder = S.stt.cloud?.api_key||"";
+  $("#stt_cloud_key").value = ""; $("#stt_cloud_key").placeholder = S.stt.cloud?.api_key||"";
   $("#tts_cloud_key").value = ""; $("#tts_cloud_key").placeholder = S.tts.cloud?.api_key||"";
   $("#nlu_enabled").checked = S.nlu.enabled !== false;
   $("#nlu_textcnn").checked = S.nlu.textcnn_enabled !== false;
@@ -406,5 +389,6 @@ $("#regenBtn").onclick = async ()=>{
   try { await post("/api/token/regenerate",{}); toast("已重置"); loadEndpoints(); } catch(e){ toast(e.message); }
 };
 </script>
+<script src="js/starsky.js?v=1.0.4"></script>
 </body>
 </html>

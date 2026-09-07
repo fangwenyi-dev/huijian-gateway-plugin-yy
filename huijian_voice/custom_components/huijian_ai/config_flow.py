@@ -60,6 +60,60 @@ ZERO_NOISE_PSK = "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="
 DEFAULT_NAME = "huijian"
 
 
+def _ensure_lan_port(hass, url: str) -> str:
+    """局域网裸 IP 的 http 地址补上 HA 真实监听端口。
+
+    2026-09 实机定案：HA 的 internal_url 常被配成不带端口的 http://192.168.1.91，
+    该值经二维码 ha_internal 直达设备，固件 HttpClient 默认打 :80 → TCP 拒绝 →
+    CMD20 恒回 -1（小程序侧只能乐观兜底猜 8123，双端各猜一次不如源头给对）。
+    仅处理「http + IPv4 私有地址 + 无显式端口」形态；域名/https（反代场景端口
+    语义归用户配置）与公网地址一律原样放行。端口取 hass.http.server_port 实况，
+    属性缺失（http 未就绪等罕见时序）回落官方默认 8123。
+    """
+    try:
+        import ipaddress
+        from urllib.parse import urlparse, urlunparse
+
+        p = urlparse(url)
+        if p.scheme != "http" or p.port or not p.hostname:
+            return url
+        try:
+            ip = ipaddress.ip_address(p.hostname)
+        except ValueError:
+            return url  # 域名形态交给反代语义，不猜端口
+        if ip.version != 4:
+            return url  # IPv6 字面量：hostname 无括号形态，重拼 netloc 必产畸形 URL（承诺域=IPv4）
+        if not ip.is_private:
+            return url
+        port = getattr(getattr(hass, "http", None), "server_port", None) or 8123
+        # 裸根路径归一（"http://ip/" → "http://ip:port"），防下游拼接出 "//api" 双斜杠
+        path = p.path if p.path not in ("", "/") else ""
+        return urlunparse(p._replace(netloc=f"{p.hostname}:{port}", path=path))
+    except Exception:  # noqa: BLE001 —— 装饰性归一，绝不阻断配二维码流程
+        return url
+
+
+def _clean_mcp_endpoint(value: Any) -> str | None:
+    """设备上报的 MCP 端点必须带 scheme，否则按空处理（对齐 D1 门禁语义）。
+
+    存量固件瑕疵（0513gujian ble_manager.cc，v2.1.5 立项）：纯 LAN 部署下
+    小程序的 mcpEndpoint/token_str 两字段皆空，固件仍无条件拼
+    `mcpEndpoint + "?token=" + token_str` → POST body 携带垃圾值 "?token="。
+    集成侧 D1 门禁（mcp_transport.py）判的是「空字符串」，垃圾值穿透后会拿
+    无 scheme 的 URL 挂 MCP transport，entry setup 走弯路。此处在入驻入口
+    归一为 None——v2.1.4 及更早存量设备零刷机即被本修复覆盖。
+    """
+    if value is None:
+        return None
+    v = str(value).strip()
+    if not v:
+        return None
+    if v.lower().startswith(("ws://", "wss://", "http://", "https://")):
+        return v
+    _LOGGER.warning("入驻数据 mcp_endpoint 非 URL 形态，按空处理: %r", value)
+    return None
+
+
 class BaseFlow(ConfigEntryBaseFlow):
     def init(self):
         self._extra = Dict()
@@ -166,7 +220,7 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
         # 追加局域网直连字段 ha_internal，小程序给设备的地址以它为准。
         # 关键顺序：internal/external 必须先于 params 字面量求值（v1.0.2 首发
         # 曾因 "ha_internal": internal 引用未绑定的 internal 崩 UnboundLocalError→500）。
-        internal = get_url(self.hass, prefer_external=False)
+        internal = _ensure_lan_port(self.hass, get_url(self.hass, prefer_external=False))
         external = get_url(self.hass, prefer_external=True) or internal
         params = {
             "haid": await get_haid(self.hass),
@@ -223,7 +277,8 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
                 },
             )
         config_type = self.setup_data.get("config_type", "device")
-        mcp_endpoint = self.setup_data.get("mcp_endpoint") if self.setup_data else None
+        mcp_endpoint = _clean_mcp_endpoint(
+            self.setup_data.get("mcp_endpoint") if self.setup_data else None)
         _LOGGER.info("mcp_endpoint: %s", mcp_endpoint)
 
         if config_type == "device":

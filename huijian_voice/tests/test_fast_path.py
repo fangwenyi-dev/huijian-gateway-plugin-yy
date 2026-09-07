@@ -105,3 +105,11 @@ def test_complex_query_guard_semantics():
 def test_scene_uncached_miss(fp):
     fp.scenes = FakeScenes(triggers=())
     assert asyncio.run(fp.match("观影模式")) is None
+
+
+def test_office_spotlight_target(fp):
+    # 修A 端到端锁定（用户实机轨迹：曾产出 {name:灯} 无区域 → HA 等值匹配全空 "没找到这个设备"）
+    plan = asyncio.run(fp.match("打开 办公室射灯"))
+    assert plan is not None and plan.intent == "TurnDeviceOn"
+    assert plan.args["target"] == [{"area": "办公室",
+                                    "devices": [{"name": "射灯", "domains": ["light"]}]}], plan.trace
