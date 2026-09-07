@@ -132,3 +132,59 @@ def test_ensure_lan_port_behavior():
     assert f(_Hass(), "http://[fd12:3456::1]/") == "http://[fd12:3456::1]/"
     # 带路径的私有 IP 保留路径
     assert f(_Hass(), "http://192.168.4.30/ha") == "http://192.168.4.30:8124/ha"
+
+
+# ── assist 语音引擎自动装配（2026-09 三端配合 P0-1 修复钉桩）──
+# 背景：config_type="assist" 条目承载 conversation/stt/tts 三引擎实体，端点为
+# 语音加载项 :8000 三通道；此前 assist 型条目无任何可达创建路径（固件 CMD20 恒
+# device、小程序 setupData 恒 device、云函数 action 已删）→ 装了语音卫星也选不到
+# 本地引擎。修复 = device 入驻成功后由 __init__ 自动 async_init(SOURCE_IMPORT)
+# 补建 assist（默认端点 = HA internal host + :8000），并支持 reconfigure 改端点。
+# 以下钉桩防修复回退。
+
+def test_assist_auto_register_source_import_exists():
+    """config_flow 必须具备 SOURCE_IMPORT 自动建 assist 的入口。"""
+    src = _src()
+    assert "SOURCE_IMPORT" in src
+    assert "async def async_step_import" in src, "自动补建入口(SOURCE_IMPORT)被回退"
+
+
+def test_assist_default_endpoint_builder_behavior():
+    """默认端点构造：host 由 HA internal URL 解析，通道路径对齐加载项 ws_server。"""
+    import ast
+    src = _src()
+    tree = ast.parse(src)
+    fn = next(n for n in tree.body
+              if isinstance(n, ast.FunctionDef) and n.name == "_voice_endpoint_url")
+    ns = {"VOICE_WS_PORT": 8000, "annotations": None}
+    exec(compile(ast.get_source_segment(src, fn), "<voice_endpoint_url>", "exec"), ns)
+    f = ns["_voice_endpoint_url"]
+    assert f("192.168.1.91", "llm") == "ws://192.168.1.91:8000/xiaozhi/v1/llm"
+    assert f("ha.lan", "stt") == "ws://ha.lan:8000/xiaozhi/v1/stt"
+    assert f("192.168.1.91", "tts") == "ws://192.168.1.91:8000/xiaozhi/v1/tts"
+
+
+def test_assist_reconfigure_branches_away_from_qrcode():
+    """assist 条目 reconfigure 必须走端点编辑，不能像 device 一样进 qrcode 等设备 POST。"""
+    src = _src()
+    assert "if data.get(CONF_CONFIG_TYPE) == \"assist\":" in src
+    assert "async def async_step_assist_reconfigure" in src, "assist 端点编辑步被回退"
+
+
+def test_qrcode_done_assist_branch_reuses_helper():
+    """qrcode_done assist 分支抽成 _async_create_or_update_assist（防两套建/更逻辑漂移）。"""
+    src = _src()
+    assert "async def _async_create_or_update_assist" in src
+    # assist 条目 data 必须以 haid 为唯一 id（每 HA 一条引擎服务）
+    assert "async_entry_for_domain_unique_id(\n            DOMAIN, haid" in src or \
+        "async_entry_for_domain_unique_id(DOMAIN, haid" in src
+
+
+def test_init_auto_ensure_assist_hook():
+    """__init__ 必须在 device 型 entry 装配后挂自动补建（fire-and-forget，不 await 阻塞）。"""
+    import pathlib
+    init = pathlib.Path(CONFIG_FLOW).parent / "__init__.py"
+    s = init.read_text(encoding="utf-8")
+    assert "async def _async_auto_ensure_assist" in s, "自动补建 helper 被回退"
+    assert "_async_auto_ensure_assist(hass, entry)" in s, "device 装配后未触发自动补建"
+    assert "SOURCE_IMPORT" in s

@@ -3,6 +3,34 @@
 所有版本变更记录在此文件中。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [1.0.7] - 2026-09-11
+
+### 新增
+- **assist 语音引擎条目自动注册（三端配合 P0-1 修复）**：语音卫星设备
+  （config_type=device）入驻成功后，集成自动经 SOURCE_IMPORT 补建一条
+  config_type=assist 的语音引擎服务条目——stt.huijian_asr /
+  tts.huijian_speech / conversation.huijian_agent 三实体随慧尖设备安装自动
+  注册，端点默认指向本机加载项 `ws://<HA 局域网地址>:8000/xiaozhi/v1/…`
+  （与加载项 host_network 同宿主）。此前 assist 型条目无任何可达创建路径
+  （固件 CMD20 恒 device、小程序 setupData 恒 device），装了语音卫星也选不到
+  本地引擎。自动补建 fail-open：缺 host/已存在 assist/失败均不影响设备装配，
+  删除 assist 条目后不静默补回（置位标记防重）。
+- **assist 端点后期可改**：assist 条目「重新配置」现走专用端点编辑步
+  （原分流到 device 扫码流对 assist 不适用），llm/stt/tts/mcp 四条端点可改。
+
+### 修复
+- **H6 语义澄清**：`/api/huijian-ai/device-info` 注释明确 requires_auth=True
+  服务对象是"已持 HA 长期令牌的小程序/客户端"（扫码入驻走 uuid 通道不经此
+  View，token 为空属正常态）；assist 类无 host 条目被跳过属预期。
+- **H2 签名约定文档化**：`calculate_sign` 补跨端约定注释——uri 必须纯路径
+  （固件 hashAuthorization 同款），params 字典序、mac 小写，防未来误卷
+  host/query 导致签名失配。
+
+### 测试
+- `test_integration_config_flow.py` +5 钉桩：SOURCE_IMPORT 自动注册入口存在、
+  默认端点构造行为（8000/xiaozhi/v1 三通道）、assist reconfigure 分流、
+  qrcode_done 复用 helper、`__init__` 自动补建 hook。162 全绿。
+
 ## [1.0.6] - 2026-09-11
 
 ### 修复

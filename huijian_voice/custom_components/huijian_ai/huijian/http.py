@@ -136,8 +136,11 @@ class HuijianDeviceInfoView(HuijianHttpView):
     host，不炸但功能缺）。
     数据真源=config entry data（_async_make_config_data 写入的
     CONF_HOST/CONF_PORT + speak_id/mac/mcp_endpoint/device_name）。
-    安全：requires_auth=True——返回内网拓扑，必须 HA token；mac 匹配
-    不区分大小写（entry 存小写，设备上报可能大写）。
+    安全：requires_auth=True——返回内网拓扑，必须 HA 长期令牌。调用对象
+    是「已持有 HA token 的小程序/客户端」（扫码入驻本身靠 /setup/qrcode 的
+    uuid 通道、不经此 View，token 为空是正常态）；mac 匹配不区分大小写
+    （entry 存小写，设备上报可能大写）。assist 类（语音引擎服务）entry 无
+    host 被跳过——本 View 只回答卫星设备，引擎端点走 assist 条目自身配置。
     """
 
     requires_auth = True
@@ -239,6 +242,15 @@ def calculate_sign(uri, params, mac, salt):
     1. n = sha256(uri)
     2. 拼接参数字符串并计算 m = sha256(参数字符串)
     3. response = sha256(m + n + mac + salt)
+
+    跨端约定（勿破坏）：
+    · uri 必须是**纯路径**（request.path / 固件侧固定路径字面量），**不得含
+      host/scheme/query**——固件 hashAuthorization（0513gujian ble_manager.cc）
+      以纯路径参与哈希，任何一侧把 host 或 query 卷进来都会签名失配 400。
+    · params 按 key ASCII 字典序拼 k=v&；固件 std::map 天然同序，Python 侧
+      sorted() 同序。POST 用 body JSON 作为 params 集合（request.json()），
+      固件 r_postDeviceName 用同名字段 map——两侧字段名/值必须逐字一致。
+    · mac 参与前统一小写（固件侧也转小写）；salt 由请求方生成经 Salt 头携带。
     """
     # 步骤1: 计算 n = sha256(uri)
     n = hashlib.sha256(uri.encode("utf-8")).hexdigest()

@@ -15,6 +15,21 @@ CONF_DEBOUNCE_MINUTES = "debounce_minutes"
 CONF_TTS_ENTITY_ID = "tts_entity_id"
 CONF_STT_ENTITY_ID = "stt_entity_id"
 
+# ── assist 语音引擎条目（config_type="assist"）端点键 ──
+# 统一字符串常量：config_flow 建/更条目、__init__ 装配三平台、huijian/*_transport
+# 读端点、huijian/http.py device-info 返回，多处共用；改动键名必须同步本文件。
+CONF_LLM_ENDPOINT = "llm_endpoint"
+CONF_STT_ENDPOINT = "stt_endpoint"
+CONF_TTS_ENDPOINT = "tts_endpoint"
+CONF_MCP_ENDPOINT = "mcp_endpoint"
+CONF_CONFIG_TYPE = "config_type"
+
+# 语音引擎默认端点模板：assist 条目自动装配时指向本机加载项 WS 端口。
+# 集成与 huijian_voice 加载项同宿主（host_network），默认取 HA internal URL
+# 的 host 拼 :8000；用户可在条目「重新配置」中改成局域网内其它加载项地址。
+VOICE_WS_PORT = 8000
+VOICE_CHANNELS = ("llm", "stt", "tts")
+
 DEFAULT_ALLOW_SERVICE_CALLS = True
 DEFAULT_NEW_CONFIG_ALLOW_ALLOW_SERVICE_CALLS = False
 DEFAULT_DEBOUNCE_MINUTES = 5

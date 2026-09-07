@@ -18,10 +18,11 @@ from aioesphomeapi import (APIClient, APIConnectionError, DeviceInfo,
                            wifi_mac_to_bluetooth_mac)
 from homeassistant.components import zeroconf
 from homeassistant.config_entries import (SOURCE_ESPHOME, SOURCE_IGNORE,
-                                          SOURCE_REAUTH, SOURCE_RECONFIGURE,
-                                          ConfigEntry, ConfigEntryBaseFlow,
-                                          ConfigFlow, ConfigFlowResult,
-                                          FlowType, OptionsFlowWithReload)
+                                          SOURCE_IMPORT, SOURCE_REAUTH,
+                                          SOURCE_RECONFIGURE, ConfigEntry,
+                                          ConfigEntryBaseFlow, ConfigFlow,
+                                          ConfigFlowResult, FlowType,
+                                          OptionsFlowWithReload)
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import AbortFlow, FlowResultType
@@ -37,12 +38,15 @@ from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 from homeassistant.util import ulid
 from homeassistant.util.json import json_loads_object
 
-from .const import (CONF_ALLOW_SERVICE_CALLS, CONF_DEBOUNCE_MINUTES,
-                    CONF_DEVICE_NAME, CONF_NOISE_PSK, CONF_STT_ENTITY_ID,
-                    CONF_SUBSCRIBE_LOGS, CONF_TTS_ENTITY_ID,
-                    DEFAULT_ALLOW_SERVICE_CALLS, DEFAULT_DEBOUNCE_MINUTES,
-                    DEFAULT_NEW_CONFIG_ALLOW_ALLOW_SERVICE_CALLS, DEFAULT_PORT,
-                    DOMAIN)
+from .const import (CONF_ALLOW_SERVICE_CALLS, CONF_CONFIG_TYPE,
+                    CONF_DEBOUNCE_MINUTES, CONF_DEVICE_NAME,
+                    CONF_LLM_ENDPOINT, CONF_MCP_ENDPOINT, CONF_NOISE_PSK,
+                    CONF_STT_ENDPOINT, CONF_STT_ENTITY_ID,
+                    CONF_SUBSCRIBE_LOGS, CONF_TTS_ENDPOINT,
+                    CONF_TTS_ENTITY_ID, DEFAULT_ALLOW_SERVICE_CALLS,
+                    DEFAULT_DEBOUNCE_MINUTES,
+                    DEFAULT_NEW_CONFIG_ALLOW_ALLOW_SERVICE_CALLS,
+                    DEFAULT_PORT, DOMAIN, VOICE_CHANNELS, VOICE_WS_PORT)
 from .dashboard import (async_get_or_create_dashboard_manager,
                         async_set_dashboard_info)
 from .encryption_key_storage import async_get_encryption_key_storage
@@ -112,6 +116,42 @@ def _clean_mcp_endpoint(value: Any) -> str | None:
         return v
     _LOGGER.warning("入驻数据 mcp_endpoint 非 URL 形态，按空处理: %r", value)
     return None
+
+
+def _voice_endpoint_url(host: str, channel: str) -> str:
+    """构造语音引擎单通道端点 URL（assist 自动装配用）。
+
+    host 应为不带 scheme/路径的局域网主机（IPv4 或主机名）；通道 ∈ VOICE_CHANNELS
+    （llm/stt/tts），路径与加载项 core/ws_server.py 的 /xiaozhi/v1/{channel} 对齐。
+    """
+    return f"ws://{host}:{VOICE_WS_PORT}/xiaozhi/v1/{channel}"
+
+
+def _default_voice_host(hass, url: str) -> str:
+    """从 HA 访问 URL 提取语音引擎默认 host（加载项与集成同宿主 host_network）。
+
+    与 _ensure_lan_port 同一语义：internal 裸 IP/域名均可；返回 hostname（无端口）。
+    解析失败返回空串，由调用方决定是否自动装配（不可达则跳过自动建条）。
+    """
+    try:
+        from urllib.parse import urlparse
+
+        p = urlparse(_ensure_lan_port(hass, url))
+        return p.hostname or ""
+    except Exception:  # noqa: BLE001 —— 装饰性提取，绝不阻断
+        return ""
+
+
+def _assist_endpoints_from_url(hass, url: str) -> dict[str, str]:
+    """assist 自动装配：由 HA internal URL 生成三条默认语音端点。
+
+    仅当 host 可解析才返回完整 dict（llm/stt/tts）；解析不出返回 {}（调用方跳过）。
+    """
+    host = _default_voice_host(hass, url)
+    if not host:
+        return {}
+    return {f"{channel}_endpoint": _voice_endpoint_url(host, channel)
+            for channel in VOICE_CHANNELS}
 
 
 class BaseFlow(ConfigEntryBaseFlow):
@@ -324,34 +364,8 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
                 return await self._async_authenticate_or_add()
 
         if config_type == "assist":
-            config_data = {
-                "config_type": config_type,
-                "uuid": self.setup_uuid,
-                "speak_id": self.setup_data.get("speak_id"),
-                CONF_DEVICE_NAME: self.setup_data.get("speak_name", ""),
-                "mcp_endpoint": mcp_endpoint,
-                "llm_endpoint": self.setup_data.get("llm_endpoint"),
-                "stt_endpoint": self.setup_data.get("stt_endpoint"),
-                "tts_endpoint": self.setup_data.get("tts_endpoint"),
-            }
-            reconfig_entry = self._get_reconfig_entry()
-            if entry := self.hass.config_entries.async_entry_for_domain_unique_id(
-                DOMAIN, haid
-            ):
-                reconfig_entry = entry
-                _LOGGER.info("Found existing entry for %s", entry.title)
-            if reconfig_entry:
-                _LOGGER.debug("Update existing entry: %s", config_data)
-                return self.async_update_reload_and_abort(
-                    reconfig_entry, data=config_data
-                )
-
-            await self.async_set_unique_id(haid)
-            self._abort_if_unique_id_configured()
-            return self.async_create_entry(
-                title="huijian AI",
-                data=config_data,
-            )
+            config_data = self._assist_config_data_from_setup()
+            return await self._async_create_or_update_assist(config_data)
 
         if schema:
             return self.async_show_form(
@@ -370,6 +384,76 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
                 "tip": "配置类型未知，请重新尝试",
             },
         )
+
+    def _assist_config_data_from_setup(self) -> dict[str, Any]:
+        """assist 型条目数据（setup_data 语义，供 qrcode_done 分支使用）。"""
+        mcp_endpoint = _clean_mcp_endpoint(self.setup_data.get("mcp_endpoint"))
+        return {
+            CONF_CONFIG_TYPE: "assist",
+            "uuid": self.setup_uuid,
+            "speak_id": self.setup_data.get("speak_id"),
+            CONF_DEVICE_NAME: self.setup_data.get("speak_name", ""),
+            CONF_MCP_ENDPOINT: mcp_endpoint,
+            CONF_LLM_ENDPOINT: self.setup_data.get(CONF_LLM_ENDPOINT),
+            CONF_STT_ENDPOINT: self.setup_data.get(CONF_STT_ENDPOINT),
+            CONF_TTS_ENDPOINT: self.setup_data.get(CONF_TTS_ENDPOINT),
+        }
+
+    async def _async_create_or_update_assist(
+        self, config_data: dict[str, Any]
+    ) -> ConfigFlowResult:
+        """创建或更新 assist 语音服务条目（全局唯一：unique_id=haid）。
+
+        assist 条目 = 语音引擎三实体（conversation/stt/tts）的装载载体，
+        端点指向 huijian_voice 加载项 :8000 三条 WS 通道。同一 HA 只允许
+        一条 assist 条目（haid 唯一）：已存在则整体更新 data（含端点），
+        不存在则创建。多来源共用：qrcode_done(小程序/设备 POST assist)、
+        SOURCE_IMPORT(device 自动注册)、SOURCE_RECONFIGURE(用户改端点)。
+        """
+        haid = await get_haid(self.hass)
+        if entry := self.hass.config_entries.async_entry_for_domain_unique_id(
+            DOMAIN, haid
+        ):
+            _LOGGER.debug("Update existing assist entry: %s", config_data)
+            return self.async_update_reload_and_abort(entry, data=config_data)
+
+        await self.async_set_unique_id(haid)
+        self._abort_if_unique_id_configured()
+        return self.async_create_entry(
+            title="huijian AI",
+            data=config_data,
+        )
+
+    async def async_step_import(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """SOURCE_IMPORT：语音引擎服务随慧尖语音设备自动注册的免 UI 入口。
+
+        触发方：__init__.py device 型 entry 装配成功后检测到 HA 尚无 assist
+        条目时 async_init(source=SOURCE_IMPORT, data=<端点>)。data 里
+        config_type 必须为 assist，端点由调用方按 HA internal host + :8000
+        推导（加载项 host_network 与集成同宿主）；本步不做网络探测，
+        端点不可达时集成侧 transport 自会断连/提示，用户可在条目「重新配置」
+        中改成实际地址。重复 import 幂等（haid 唯一 → 更新）。
+        """
+        data = dict(user_input or {})
+        config_type = data.get(CONF_CONFIG_TYPE, "device")
+        if config_type != "assist":
+            # 未知 config_type 走默认二维码流程（老行为兜底）
+            return await self.async_step_user(user_input=data)
+        # 与 setup_data 分支共用同一数据组装（字段名一致）
+        self.setup_uuid = str(data.get("uuid") or ulid.ulid_hex())
+        self.this_data[self.setup_uuid] = {
+            CONF_CONFIG_TYPE: "assist",
+            "speak_id": data.get("speak_id"),
+            "speak_name": data.get("speak_name", ""),
+            CONF_MCP_ENDPOINT: data.get(CONF_MCP_ENDPOINT),
+            CONF_LLM_ENDPOINT: data.get(CONF_LLM_ENDPOINT),
+            CONF_STT_ENDPOINT: data.get(CONF_STT_ENDPOINT),
+            CONF_TTS_ENDPOINT: data.get(CONF_TTS_ENDPOINT),
+        }
+        config_data = self._assist_config_data_from_setup()
+        return await self._async_create_or_update_assist(config_data)
 
     # 判定书 v1.0.2 补丁：设备配对数据（CMD20→设备 POST）的人肉链路远超 60s——
     # 扫码→贴令牌→BLE 连接→发送→设备同步 POST，实测窗口常 >2min，原 60s
@@ -456,11 +540,57 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
         """Handle a flow initialized by a reconfig request."""
         self._reconfig_entry = self._get_reconfigure_entry()
         data = self._reconfig_entry.data
+        # assist 语音服务条目没有 host/6053——「重新配置」编辑的是语音引擎端点
+        if data.get(CONF_CONFIG_TYPE) == "assist":
+            return await self.async_step_assist_reconfigure(user_input=user_input)
         self._host = data.get(CONF_HOST)
         self._port = data.get(CONF_PORT, DEFAULT_PORT)
         self._noise_psk = data.get(CONF_NOISE_PSK)
         self._device_name = data.get(CONF_DEVICE_NAME)
         return await self.async_step_qrcode()
+
+    async def async_step_assist_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """assist 条目重新配置：编辑 llm/stt/tts/mcp 四条端点（用户后期可改）。"""
+        data = dict(self._reconfig_entry.data)
+        if user_input is not None:
+            config_data = {
+                **data,
+                CONF_CONFIG_TYPE: "assist",
+                CONF_LLM_ENDPOINT: (user_input.get(CONF_LLM_ENDPOINT) or "").strip()
+                or None,
+                CONF_STT_ENDPOINT: (user_input.get(CONF_STT_ENDPOINT) or "").strip()
+                or None,
+                CONF_TTS_ENDPOINT: (user_input.get(CONF_TTS_ENDPOINT) or "").strip()
+                or None,
+                CONF_MCP_ENDPOINT: _clean_mcp_endpoint(
+                    user_input.get(CONF_MCP_ENDPOINT)
+                ),
+            }
+            return self.async_update_reload_and_abort(
+                self._reconfig_entry, data=config_data
+            )
+        defaults = {
+            CONF_LLM_ENDPOINT: data.get(CONF_LLM_ENDPOINT) or "",
+            CONF_STT_ENDPOINT: data.get(CONF_STT_ENDPOINT) or "",
+            CONF_TTS_ENDPOINT: data.get(CONF_TTS_ENDPOINT) or "",
+            CONF_MCP_ENDPOINT: data.get(CONF_MCP_ENDPOINT) or "",
+        }
+        return self.async_show_form(
+            step_id="assist_reconfigure",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(CONF_LLM_ENDPOINT, default=defaults[CONF_LLM_ENDPOINT]): str,
+                    vol.Optional(CONF_STT_ENDPOINT, default=defaults[CONF_STT_ENDPOINT]): str,
+                    vol.Optional(CONF_TTS_ENDPOINT, default=defaults[CONF_TTS_ENDPOINT]): str,
+                    vol.Optional(CONF_MCP_ENDPOINT, default=defaults[CONF_MCP_ENDPOINT]): str,
+                }
+            ),
+            description_placeholders={
+                "name": self._reconfig_entry.title,
+            },
+        )
 
     @property
     def _name(self) -> str:
