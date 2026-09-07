@@ -24,6 +24,8 @@ MODE_CN = {"heat": "制热", "cool": "制冷", "dry": "除湿", "fan_only": "送
 _EN_ERR_MAP = [
     ("could not extract window name", "没找到要控制的窗户，试试说「客厅的窗户内倒」"),
     ("window control failed", "窗户控制没成功，可能窗户没在 HA 里配好"),
+    ("no available", "没找到符合条件的设备，试试带上房间名或换个叫法"),
+    ("ha 内部错误", "HA 内部出了点错——多半是集成刚升级还没重启生效，请在 Supervisor 重启 HA Core 再试"),
     ("no.*match", "没找到符合条件的设备"),
     ("not found", "没找到这个设备"),
     ("entity", "设备清单里没匹配到，请换个叫法试试"),

@@ -125,7 +125,10 @@ class TurnDeviceIntentBase(intent.IntentHandler):
                     result["partial_error"] = f"Window: {', '.join(window_errors)}"
                 return result
             return error_msg
-        assert candidate_entities
+        if not candidate_entities:
+            # 永不抛——未捕获异常=HTTP 500，加载项侧 message 被洗空、话术只剩
+            # 空括号（2026-09-11 真机实锤：客户 HA 内存里的老集成 assert 炸 500）。
+            return {"success": False, "error": "No available devices found"}
 
         candidate_entities = self._filter_button_entities(candidate_entities, service)
 

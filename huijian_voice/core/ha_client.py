@@ -130,6 +130,11 @@ class HAClient:
             obj = json.loads(payload) if payload else {}
         except json.JSONDecodeError:
             obj = {"message": payload[:200]}
+        if status >= 500:
+            # 5xx body 多为 aiohttp 纯文本网页（无信息量）——统一给结构化中文
+            # 错误；2026-09-11 事故：500 洗成空 message 让话术只剩空括号。
+            # （staticmethod 不碰 self.last_error——由调用方语义承载）
+            return {"success": False, "message": f"HA 内部错误({status})", "raw": obj}
         if status in (400, 401, 403, 404):
             msg = obj.get("message") if isinstance(obj, dict) else str(obj)
             return {"success": False, "message": msg or f"HA 拒绝({status})", "raw": obj}

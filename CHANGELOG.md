@@ -3,6 +3,34 @@
 所有版本变更记录在此文件中。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [1.0.6] - 2026-09-11
+
+### 修复
+- **「抱歉，这一步没有执行成功（）」空括号话术（真机实锤，v1.0.5 之后浮出）**:
+  v1.0.5 修通 URL 后，意图请求首次真正抵达 HA 侧 handler；若客户 HA 内存中
+  仍在运行升级前加载的旧版集成代码（加载项升级只重启加载项容器，HA Core 不
+  自动热重载 custom_components），旧 handler 对匹配失败分支走 `assert` 抛未
+  捕获异常 → HTTP 500 纯文本 → 加载项侧被折叠成空 message → 播报只剩空括号。
+  真栈逐字复现后才定位。三层加固：
+  - **集成侧永不抛**：`intent_turn` / `intent_adjust_attribute` /
+    `intent_set_mode` 三处 `assert candidate_entities` 改为结构化
+    `{"success": false, "error": "No available devices found"}` 返回——
+    匹配失败永远走响应体，不再制造 500。
+  - **加载项侧 5xx 结构化**：HA REST 客户端对 5xx 统一给
+    `HA 内部错误(<状态码>)`，任何上游内部错误都不再洗出空话术。
+  - **话术映射补齐**：`No available devices found` 播报「没找到符合条件的
+    设备，试试带上房间名或换个叫法」；`HA 内部错误` 播报附可操作指引
+    （「多半是集成刚升级还没重启生效，请在 Supervisor 重启 HA Core 再试」）。
+- 升级配套提醒：加载项自动落盘新集成后，**需重启一次 HA Core 生效**
+  （Supervisor → 系统 → 主机 → 重新启动）——这是本次空括号现象的客户侧根因。
+
+### 测试
+- 新增 `test_error_phrasing.py` 6 例：5xx 永不空 message、no_match/内部错误
+  专属话术、意图 handler 裸 assert 防回潮钉桩。真栈验收矩阵三段全过
+  （旧集成 500 → 指引话术；新集成 no_match → 中文话术；「打开办公室射灯」
+  原输入 → 成功播报）。157 全绿。
+
+
 ## [1.0.5] - 2026-09-11
 
 ### 修复

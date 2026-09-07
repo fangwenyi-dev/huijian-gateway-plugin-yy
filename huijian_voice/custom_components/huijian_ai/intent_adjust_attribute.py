@@ -648,7 +648,9 @@ class AdjustDeviceAttributeIntent(intent.IntentHandler):
         error_msg, candidate_entities = await match_intent_entities(intent_obj, targets)
         if error_msg:
             return error_msg
-        assert candidate_entities
+        if not candidate_entities:
+            # 永不抛（同 intent_turn：assert 炸 500 会让话术层只剩空括号）
+            return {"success": False, "error": "No available devices found"}
 
         response = ExtIntentResponse(intent_obj.language, intent=intent_obj)
         for item in candidate_entities:
