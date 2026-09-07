@@ -3,7 +3,7 @@
 所有版本变更记录在此文件中。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
-## [1.0.2] - 2026-09-XX
+## [1.0.2] - 2026-09-07
 
 - **修复（内嵌集成 config_flow）**：设备配对数据等待窗 60s→**300s**——实机日志
 `Timeout waiting for setup data` 根因：扫码→贴令牌→BLE CMD20→设备 POST 的人肉链路
