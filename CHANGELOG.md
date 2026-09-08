@@ -3,6 +3,13 @@
 所有版本变更记录在此文件中。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [1.0.16] - 2026-09-08
+
+### 修复
+
+- **huijian_agent 对话代理全瘫**（2026-09-08 台架实发 `Unexpected error during intent recognition`：`TypeError: 'contextlib._GeneratorContextManager' object does not support the asynchronous context manager protocol`）：`conversation.py` 把 `anyio.fail_after` 写成 `async with`——anyio 超时守卫是**同步**上下文管理器（本仓 `llm/stt/tts/ws_transport` 四处同款代码均正确使用 `with`，唯对话链路写反）。管道修通 STT 后首次真实会话即在此必炸，agent 意图识别 100% 失败。改回 `with` 并钉桩。
+- **文本转语音阻塞事件循环**（同次实发 `Detected blocking call to load_verify_locations … text.py line 100: import edge_tts`）：`_play_tts` 在事件循环内惰性 `import edge_tts`，其顶层级联加载 certifi 并执行 SSL 上下文构建（阻塞磁盘 IO，HA 2026.8 起检测告警）。改走 `hass.async_add_import_executor_job` 官方通道。
+- **删除引擎条目后永不自愈**（v1.0.15 台架两轮实发：删 assist 条目→卫星按键只回 `validation-error: the pipeline does not support speech-to-text`，重启 HA 亦无效）：`_async_auto_ensure_assist` 的一次性闩锁 `entry.data["_AUTO_ASSIST_DONE"]` 语义是"终身只试一次"，把"防 reload 刷屏"误写成"禁自愈"。改为每次设备 setup 幂等检查——域内有 assist 条目绝不碰（尊重用户自建/改配），确无则补建（含被误删后重启自愈）；闩锁字段整体移除，存量条目残留键无影响。配套卫星侧 validation-error 日志指引（v1.0.15 已上）。
 ## [1.0.15] - 2026-09-08
 
 ### 修复

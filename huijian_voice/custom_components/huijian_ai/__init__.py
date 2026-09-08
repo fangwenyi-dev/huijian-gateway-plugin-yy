@@ -40,11 +40,13 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 CLIENT_INFO = f"Home Assistant {ha_version}"
 
-# 自动补建去重标志（entry.data 键）：device 入驻成功后若 HA 尚无 assist 语音
-# 服务条目，则由 __init__ 自动 async_init(SOURCE_IMPORT) 建一条（端点默认
-# 指向本机加载项 :8000）。置位后不再重复尝试——用户删除 assist 条目后不会
-# 被静默补回（除非重装 device 条目）。
-_AUTO_ASSIST_DONE = "auto_assist_done"
+# 自动补建判定（v1.0.16 语义修正）：仅当域内确无 config_type=assist 条目时才
+# 经 SOURCE_IMPORT 补建一条（端点默认本机加载项 :8000）；有则不碰——用户自建/
+# 改配的条目一律尊重。旧实现曾在 entry.data 写入一次性持久标志位（"置位后
+# 永不再试"），副作用实发（2026-09-08 台架两轮）：用户手删引擎条目后设备
+# setup 永不自愈，卫星静默挂到 validation-error。现每次 setup 都幂等检查——
+# 幂等安全（有 assist 条目即早退；补建失败也只记日志 fail-open），该持久标志
+# 字段不再读写，存量条目残留无影响（防回退钉桩见 tests）。
 
 
 def _assist_default_data(hass: HomeAssistant) -> dict | None:
@@ -80,21 +82,18 @@ def _assist_default_data(hass: HomeAssistant) -> dict | None:
 async def _async_auto_ensure_assist(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> None:
     """device 型语音卫星装配后，确保存在 assist 引擎条目（fail-open）。
 
-    触发条件：config_type=device（语音卫星入驻）且 HA 尚无 config_type=assist
-    的条目，且 entry.data 未置 _AUTO_ASSIST_DONE。通过 config flow 的
-    SOURCE_IMPORT 分支自动建/更 assist 条目（其端点默认本机加载项 :8000，
-    用户可在条目「重新配置」修改）。任何失败只记日志——不能因补建问题
-    拖垮设备装配或 HA 启动。
+    触发条件：config_type=device（语音卫星入驻）且 HA 域内尚无 config_type=assist
+    的条目。通过 config flow 的 SOURCE_IMPORT 分支自动建/更 assist 条目（其端点
+    默认本机加载项 :8000，用户可在条目「重新配置」修改）。任何失败只记日志
+    ——不能因补建问题拖垮设备装配或 HA 启动。
     """
     if entry.data.get(CONF_CONFIG_TYPE) == "assist":
-        return
-    if entry.data.get(_AUTO_ASSIST_DONE):
         return
     for other in hass.config_entries.async_entries(DOMAIN):
         if other.entry_id != entry.entry_id and other.data.get(
             CONF_CONFIG_TYPE
         ) == "assist":
-            return  # 已有 assist 引擎条目（用户手建或此前自动建）
+            return  # 已有 assist 引擎条目（用户手建/改配或此前自动建）——不碰
     try:
         # 包 try 而非只包 async_init：端点推导纯函数同样必须 fail-open，
         # 任何异常（B0 这类 NameError、get_url 行为变化等）都不得逃出
@@ -112,11 +111,6 @@ async def _async_auto_ensure_assist(hass: HomeAssistant, entry: ESPHomeConfigEnt
         )
     except Exception:  # noqa: BLE001 —— fail-open：补建失败不影响设备
         LOGGER.exception("assist 语音引擎自动补建失败（设备装配不受影响）")
-        return
-    # 记录已尝试，避免每次 reload 重复 async_init
-    hass.config_entries.async_update_entry(
-        entry, data={**entry.data, _AUTO_ASSIST_DONE: True}
-    )
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:

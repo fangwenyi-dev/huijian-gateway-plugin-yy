@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import importlib
 import time
 from functools import partial
 from pathlib import Path
@@ -97,7 +98,14 @@ class EsphomeText(EsphomeEntity[TextInfo, TextState], TextEntity):
     async def _play_tts(self, text: str) -> None:
         """使用 edge-tts 生成 MP3 音频，通过 media_player 播放。"""
         try:
-            import edge_tts
+            # 惰性 import 但必须离环：edge_tts 顶层级联加载 certifi 并执行
+            # ssl.load_verify_locations——在事件循环内是阻塞调用，HA 2026.8
+            # 实发钉出（"Detected blocking call to load_verify_locations …
+            # text.py, line 100: import edge_tts"）。import-executor-job 是
+            # HA 官方给定的循环内导入通道。
+            edge_tts = await self.hass.async_add_import_executor_job(
+                importlib.import_module, "edge_tts"
+            )
         except ImportError:
             _LOGGER.warning("edge-tts 未安装，无法播放 TTS")
             return

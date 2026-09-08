@@ -72,7 +72,12 @@ class HuijianConversationEntity(BaseEntity):
 
     async def _await_message_with_timeout(self, transport, timeout=60):
         try:
-            async with anyio.fail_after(timeout):
+            # anyio.fail_after 是同步上下文管理器（与 llm/stt/tts_transport 同款
+            # 用法）——写成 `async with` 在首次对话即抛 TypeError: object does not
+            # support the asynchronous context manager protocol，huijian_agent
+            # 全链路 intents 识别必炸（2026-09-08 台架实发：管道通了 STT 后
+            # "Unexpected error during intent recognition"）。
+            with anyio.fail_after(timeout):
                 async for msg in transport.await_message():
                     yield msg
         except TimeoutError:

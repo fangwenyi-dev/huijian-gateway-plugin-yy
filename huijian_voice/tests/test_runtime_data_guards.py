@@ -136,3 +136,34 @@ def test_source_pin_satellite_validation_error_hint():
     （定案：不静默补建被用户删除的条目，但两端都要看得见原因）。"""
     sat = _src("assist_satellite.py")
     assert '"validation-error"' in sat and "语音助手" in sat
+
+
+def test_source_pin_auto_ensure_no_latch():
+    """v1.0.16 语义修正：自动补建改幂等检查（有则不碰、缺则补建），
+    _AUTO_ASSIST_DONE 一次性闩锁删除——它曾令"用户手删引擎后永不自愈"
+    （2026-09-08 台架两轮实发 validation-error 失聪）。"""
+    init = _src("__init__.py")
+    assert "_AUTO_ASSIST_DONE" not in init, "闩锁字段必须整体移除（不再读也不再写）"
+    assert "auto_assist_done" not in init, "entry.data 键字面量同删"
+    assert 'CONF_CONFIG_TYPE\n        ) == "assist"' in init or (
+        '== "assist"' in init and "async_entries(DOMAIN)" in init
+    ), "幂等检查（存在 assist 条目即早退）必须保留"
+
+
+def test_source_pin_conversation_timeout_sync_cm():
+    """conversation.py 超时守卫必须 `with anyio.fail_after`——anyio 的
+    fail_after 是同步上下文管理器，写成 async with 时 huijian_agent 每次
+    意图识别必抛 TypeError（2026-09-08 台架实发，agent 全瘫）。"""
+    conv = _src("conversation.py")
+    assert "async with anyio.fail_after" not in conv
+    assert "with anyio.fail_after(timeout)" in conv
+
+
+def test_source_pin_text_tts_nonblocking_import():
+    """text.py 的 edge_tts 惰性导入必须走 import-executor——模块顶层在循环内
+    import edge_tts 会级联 certifi load_verify_locations 阻塞调用
+    （2026-09-08 台架 2026.8 实发 Detected blocking call 警告）。"""
+    txt = _src("text.py")
+    assert "import edge_tts" not in txt.split("_play_tts", 1)[1].split("def ", 1)[0] \
+        or "async_add_import_executor_job" in txt
+    assert "async_add_import_executor_job" in txt

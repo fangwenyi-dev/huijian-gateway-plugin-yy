@@ -371,9 +371,10 @@ class EsphomeAssistSatellite(
                 for e in self.hass.config_entries.async_entries(DOMAIN)
             ):
                 # 台架实发（2026-09-08）：assist 引擎条目被用户删除后按键，pipeline
-                # validate 抛 validation-error。定案不静默补回被删条目（见
-                # _AUTO_ASSIST_DONE 注释）——但 HA 日志必须给出修复指引，
-                # 否则两端各剩一条无上下文的告警，排障无从下手。
+                # validate 抛 validation-error。v1.0.16 起设备条目每次 setup 幂等
+                # 补建（缺则重建、有则不碰）——重启 HA 即自愈；本指引覆盖"尚未
+                # 重启"的窗口期，让两端日志都直接说出病因与药方，不再各剩一条
+                # 无上下文告警。
                 _LOGGER.warning(
                     "慧尖语音会话 pipeline 校验失败：域内无 assist 引擎条目。"
                     "修复：重启 HA 由设备条目自动补建，或在 设置→语音助手 手动添加"
