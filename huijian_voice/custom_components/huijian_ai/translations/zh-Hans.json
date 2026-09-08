@@ -10,6 +10,7 @@
             "mqtt_missing_ip": "MQTT 属性中缺少 IP 地址。",
             "mqtt_missing_mac": "MQTT 属性中缺少 MAC 地址。",
             "mqtt_missing_payload": "缺少 MQTT 有效负载。",
+            "no_setup_data": "未等到设备配对数据，配置流程已退出。",
             "name_conflict_migrated": "“{name}”的配置已从 “{existing_mac}” 迁移到 MAC 地址为 “{mac}” 的新设备。",
             "reauth_successful": "重新认证成功",
             "reauth_unique_id_changed": "**“{name}”的重新认证已中止**，因为地址 “{host}” 指向不同的设备：“{unexpected_device_name}” (MAC： ”{unexpected_mac}“)，而不是预期的设备 (MAC： ”{expected_mac}“) 。",
@@ -24,7 +25,8 @@
             "invalid_auth": "身份验证无效",
             "invalid_psk": "加密密钥无效",
             "requires_encryption_key": "设备需要加密密钥",
-            "resolve_error": "无法解析设备的地址。如果此问题仍然存在，请考虑设置静态 IP 地址。"
+            "resolve_error": "无法解析设备的地址。如果此问题仍然存在，请考虑设置静态 IP 地址。",
+            "unknown_config_type": "未收到有效的设备配置数据（常见于等待超时：设备未在时限内完成配对上报）。请按页面提示选择「再等一轮」或重新发起配对，无需查看日志。"
         },
         "flow_title": "{name}",
         "step": {

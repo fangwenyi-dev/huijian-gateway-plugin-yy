@@ -134,6 +134,100 @@ def test_ensure_lan_port_behavior():
     assert f(_Hass(), "http://192.168.4.30/ha") == "http://192.168.4.30:8124/ha"
 
 
+# ── 配对后 6053 重启窗口自动重试（2026-09-08 11:02 实机 Errno 111 配套）──
+
+
+def _load_reboot_fn():
+    import asyncio as _a
+    import logging as _lg
+    import textwrap
+    src = _src()
+    m = re.search(r"(    async def _fetch_device_info_through_reboot.*?)\n    async def fetch_device_info",
+                  src, re.S)
+    assert m, "_fetch_device_info_through_reboot 方法被回退"
+    ns = {"asyncio": _a, "_LOGGER": _lg.getLogger("t")}
+    exec(textwrap.dedent(m.group(1)), ns)
+    return ns["_fetch_device_info_through_reboot"]
+
+
+class _FlowStub:
+    _REBOOT_RETRY_DELAY = 0.01   # 测试免等
+    _REBOOT_RETRY_ATTEMPTS = 2
+
+    def __init__(self, results):
+        self.results = list(results)
+        self.calls = 0
+
+    async def fetch_device_info(self):
+        self.calls += 1
+        return self.results.pop(0) if self.results else None
+
+
+def test_reboot_retry_recovers_connection_error():
+    import asyncio
+    fn = _load_reboot_fn()
+    s = _FlowStub(["connection_error", "connection_error", None])
+    assert asyncio.run(fn(s)) is None
+    assert s.calls == 3
+
+
+def test_reboot_retry_bounded_and_reports_last_error():
+    import asyncio
+    fn = _load_reboot_fn()
+    s = _FlowStub(["connection_error", "connection_error", "connection_error"])
+    assert asyncio.run(fn(s)) == "connection_error"
+    assert s.calls == 1 + s._REBOOT_RETRY_ATTEMPTS   # 1 首发 + 2 重试封顶
+
+
+def test_reboot_retry_no_retry_on_deterministic_errors():
+    import asyncio
+    fn = _load_reboot_fn()
+    for err in ("invalid_password", "invalid_encryption_key", "resolve_error"):
+        s = _FlowStub([err])
+        assert asyncio.run(fn(s)) == err
+        assert s.calls == 1, f"{err} 是确定性错误，重试只会拖慢配对面板"
+
+
+def test_reboot_retry_window_covers_firmware_10s():
+    src = _src()
+    delay = float(re.search(r"_REBOOT_RETRY_DELAY\s*=\s*([\d.]+)", src).group(1))
+    attempts = int(re.search(r"_REBOOT_RETRY_ATTEMPTS\s*=\s*(\d+)", src).group(1))
+    # 固件 CMD20 后延迟 10s 重启才真正 listen :6053（ble_manager.cc:745 注释链）
+    assert delay * attempts >= 10, f"重试窗 {delay * attempts:.0f}s 盖不住设备 10s 重启"
+    # device 分支必须走带重试的封装，防回退成裸 fetch
+    assert "error = await self._fetch_device_info_through_reboot()" in src
+
+
+# ── 审查修复 B/F（2026-09-08 七项审查）：超时话术翻译 + rewait 续等 ──
+
+
+def test_unknown_config_type_translated_both_langs():
+    """B：超时/未知类型出口都挂 unknown_config_type 键，zh-Hans 与 en 必须
+    都有翻译——此前 5 键表缺它，用户 5 分钟超时看到「未知错误查日志」式红字。"""
+    import json
+    tr = CONFIG_FLOW.parent / "translations"
+    for name in ("zh-Hans.json", "en.json"):
+        d = json.loads((tr / name).read_text(encoding="utf-8"))
+        assert "unknown_config_type" in d["config"]["error"], name
+        assert "no_setup_data" in d["config"]["abort"], name
+
+
+def test_wait_timeout_flag_consumed_with_rewait():
+    """F：_setup_wait_timed_out 不再是僵尸标志——init 显式初始化，qrcode_done
+    超时分支消费它给出「再等一轮」（保持同一 setup_uuid 续等迟到 POST），
+    取消勾选则干净退出；旧「再提交只会重复同一条」死胡同封死。"""
+    src = _src()
+    i = src.index("def init(self):")
+    assert "self._setup_wait_timed_out = False" in src[i:i + 400], \
+        "init 未初始化标志（getattr 兜底会复发）"
+    assert 'user_input.get("rewait")' in src, "rewait 消费被回退"
+    j = src.index('user_input.get("rewait")')
+    win = src[j:j + 400]
+    assert "self._wait_task = None" in win and "async_step_qrcode()" in win, \
+        "再等一轮未重挂等待任务/未复用同一 uuid 通道"
+    assert 'async_abort(reason="no_setup_data")' in src, "退出分支丢失"
+
+
 # ── assist 语音引擎自动装配（2026-09 三端配合 P0-1 修复钉桩）──
 # 背景：config_type="assist" 条目承载 conversation/stt/tts 三引擎实体，端点为
 # 语音加载项 :8000 三通道；此前 assist 型条目无任何可达创建路径（固件 CMD20 恒

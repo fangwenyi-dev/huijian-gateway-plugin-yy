@@ -158,6 +158,9 @@ class BaseFlow(ConfigEntryBaseFlow):
     def init(self):
         self._extra = Dict()
         self._extra.setdefault("config_data", {})
+        # F（2026-09-08 审查）：v1.0.2 起只设 True 从不初始化/消费，
+        # getattr 满世界兜底。显式初始化并在 qrcode_done 超时分支消费。
+        self._setup_wait_timed_out = False
 
     @property
     def this_data(self):
@@ -304,17 +307,39 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
 
         _LOGGER.info("setup_data: %s", self.setup_data)
         if not self.setup_data:
+            if user_input is not None:
+                if user_input.get("rewait"):
+                    # F：uuid 未失效时设备 POST 可能迟到——保持同一
+                    # setup_uuid 重启等待任务续等一轮（旧表单再提交只会
+                    # 重复同一条错误，是死胡同）。
+                    self._setup_wait_timed_out = False
+                    self._wait_task = None
+                    return await self.async_step_qrcode()
+                return self.async_abort(reason="no_setup_data")
+            tip = (
+                "等待超时：未收到设备配对数据（约 5 分钟）。"
+                "请确认设备处于配网模式、小程序已完成“连接 Home Assistant”"
+                "配对（CMD20），然后重新扫码。"
+            )
+            if self._setup_wait_timed_out:
+                tip += (
+                    "\n\n若设备其实已配对成功（只是数据迟到），勾选"
+                    "「再等一轮」保持同一二维码继续等待；取消勾选则退出本流程。"
+                )
+                return self.async_show_form(
+                    step_id="qrcode_done",
+                    errors={"base": "unknown_config_type"},
+                    data_schema=vol.Schema({
+                        vol.Required("rewait", default=True):
+                            selector.BooleanSelector()
+                    }),
+                    description_placeholders={"tip": tip},
+                )
             return self.async_show_form(
                 step_id="qrcode_done",
                 errors={"base": "unknown_config_type"},
                 data_schema=vol.Schema({}),
-                description_placeholders={
-                    "tip": (
-                        "等待超时：未收到设备配对数据（约 5 分钟）。"
-                        "请确认设备处于配网模式、小程序已完成“连接 Home Assistant”"
-                        "配对（CMD20），然后重新扫码。"
-                    ),
-                },
+                description_placeholders={"tip": tip},
             )
         config_type = self.setup_data.get("config_type", "device")
         mcp_endpoint = _clean_mcp_endpoint(
@@ -331,7 +356,7 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
                 self._port = 6053
                 _LOGGER.exception("Invalid port value '%s', using default 6053", port)
             self._noise_psk = self.setup_data.get(CONF_NOISE_PSK)
-            error = await self.fetch_device_info()
+            error = await self._fetch_device_info_through_reboot()
             if error:
                 errors["base"] = error
                 schema = {
@@ -1198,6 +1223,32 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
         self._device_name = self._device_info.name
         self._name = self._device_info.friendly_name or self._device_info.name
         return None
+
+    # 固件 BLEManager::RestartAfter10s: CMD20 → 10s restart → ha_url 门控
+    # 开机读取，首次配对 :6053 在 POST 返回时尚未 listen。重试 2 次共 12s
+    # 覆盖该窗口；第 3 次仍 refused 视为非配对时序问题，照常报错。
+    _REBOOT_RETRY_DELAY = 6.0
+    _REBOOT_RETRY_ATTEMPTS = 2
+
+    async def _fetch_device_info_through_reboot(self) -> str | None:
+        """fetch_device_info，带设备 CMD20 后 10s 重启窗口的自动重试。
+
+        2026-09-08 11:02:32 实机（配对 200 OK 后）：集成 qrcode_done 立即
+        连 :6053 → Errno 111（refused）——固件把 ha_url/noise 门控放在开机
+        读取（ble_manager.cc:745），CMD20 后延迟 10s 重启才真正 listen 6053。
+        仅 connection_error 重试；鉴权/加密键错误是确定性的，重试只会拖慢
+        配对面板，维持一次即报。
+        """
+        error = await self.fetch_device_info()
+        for _ in range(self._REBOOT_RETRY_ATTEMPTS):
+            if error != "connection_error":
+                break
+            _LOGGER.info(
+                "配对后 6053 未就绪（设备正在应用 ha_url 门控重启），%ss 后重试",
+                self._REBOOT_RETRY_DELAY)
+            await asyncio.sleep(self._REBOOT_RETRY_DELAY)
+            error = await self.fetch_device_info()
+        return error
 
     async def fetch_device_info(self) -> str | None:
         """Fetch device info from API and return any errors."""

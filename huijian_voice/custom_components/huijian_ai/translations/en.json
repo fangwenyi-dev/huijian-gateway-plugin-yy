@@ -10,6 +10,7 @@
             "mqtt_missing_ip": "Missing IP address in MQTT properties.",
             "mqtt_missing_mac": "Missing MAC address in MQTT properties.",
             "mqtt_missing_payload": "Missing MQTT payload.",
+            "no_setup_data": "No device pairing data was received; the flow has been cancelled.",
             "name_conflict_migrated": "The configuration for `{name}` has been migrated to a new device with MAC address `{mac}` from `{existing_mac}`.",
             "reauth_successful": "Re-authentication was successful",
             "reauth_unique_id_changed": "**Re-authentication of `{name}` was aborted** because the address `{host}` points to a different device: `{unexpected_device_name}` (MAC: `{unexpected_mac}`) instead of the expected one (MAC: `{expected_mac}`).",
@@ -24,7 +25,8 @@
             "invalid_auth": "Invalid authentication",
             "invalid_psk": "The encryption key is invalid. Make sure it matches the value in the device’s YAML configuration under `api -> encryption -> key`.",
             "requires_encryption_key": "The device requires an encryption key. Enter the key defined in the device’s YAML configuration under `api -> encryption -> key`.",
-            "resolve_error": "Unable to resolve the address of the device. If this issue continues, consider setting a static IP address."
+            "resolve_error": "Unable to resolve the address of the device. If this issue continues, consider setting a static IP address.",
+            "unknown_config_type": "No valid device setup data received (usually the wait timed out before the device POSTed its pairing data). Choose to wait another round as prompted, or start pairing again - no need to check the logs."
         },
         "flow_title": "{name}",
         "step": {

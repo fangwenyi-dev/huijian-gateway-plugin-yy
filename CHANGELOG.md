@@ -3,6 +3,17 @@
 所有版本变更记录在此文件中。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [1.0.11] - 2026-09-08
+
+### 修复（配对时序与超时体验，2026-09-08 审查批）
+- 6053 重启窗重试：CMD20 成功后固件延迟 10s 重启，期间设备 :6053 未监听，集成 `fetch_device_info` 撞上即 `Connection refused`（Errno 111）误判配对失败。新增 `_fetch_device_info_through_reboot`：仅 connection_error 重试（6s×2 覆盖重启窗），鉴权/PSK 等确定性错误不重试。
+- 超时话术翻译补全：config flow 两处（等待超时/未知类型兜底）悬挂的 `unknown_config_type` 键已补 zh-Hans/en 双语——此前用户 5 分钟超时看到的是无翻译红字。
+- 等待超时「再等一轮」：超时表单新增 rewait 勾选，保持同一 setup_uuid 续等设备迟到 POST（旧表单再提交只会重复同一条错误的死胡同封死）；取消勾选干净退出（新增 abort 键 `no_setup_data`）。
+- 配套：小程序 v1.4.8——扫码解析补 mac/speak_id 多设备定址（多设备「重新配置」必判 ambiguous 的断链根治）、配对成功弹窗矛盾双窗收口、HA 账户地址双源统一、手输尾斜杠 //api 404 根治、配对表单「助手模式」死 UI 退役。
+
+### 测试
+- 重启窗重试 4 项 + 审查修复钉桩（B 翻译键/F rewait 消费）2 项。243 → **245 全绿**。
+
 ## [1.0.10] - 2026-09-08
 
 ### 修复与适配（HA 2026.8 端口时代）
