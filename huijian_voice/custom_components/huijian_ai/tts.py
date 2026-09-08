@@ -65,7 +65,12 @@ class HuijianTtsEntity(BaseEntity):
             _LOGGER.error("Failed to establish WebSocket connection for TTS")
             return None, None
 
-        format = options.get("audio_format") or "mp3"
+        # v1.0.19：消费 core 下发的首选格式（assist_satellite 对可推流设备传
+        # preferred_format="wav"/16k/mono/16bit，卫星流式通道 AS:_stream_tts_audio
+        # 只认 wav——此前只读 "audio_format" 键（core 从不传）恒回 mp3，播报在
+        # 卫星端必「Only WAV」早退，台架×固件协议审计实锤）。无 preferred 时
+        # 保持旧行为 mp3。
+        fmt = options.get("preferred_format") or options.get("audio_format") or "mp3"
         await transport.send_message(
             {
                 "type": "tts",
@@ -94,14 +99,18 @@ class HuijianTtsEntity(BaseEntity):
             self.hass,
             data_gen(),
             "s16le",
-            to_extension=format,
+            to_extension=fmt,
             input_params=[
                 "-ar",
                 str(self.opus_sample_rate),
                 "-ac",
                 str(self.opus_channels),
             ],
+            **({"to_sample_rate": int(options.get("preferred_sample_rate") or 16000),
+                "to_sample_channels": int(options.get("preferred_sample_channels") or 1),
+                "to_sample_bytes": int(options.get("preferred_sample_bytes") or 2)}
+               if fmt == "wav" else {}),
         )
         async for chunk in converting:
             audio += chunk
-        return format, audio
+        return fmt, audio

@@ -346,9 +346,15 @@ class EsphomeAssistSatellite(
                         self._entry_data.api_version
                     )
                 )
-                if feature_flags & VoiceAssistantFeature.SPEAKER and (
-                    stream := tts.async_get_stream(self.hass, tts_output["token"])
-                ):
+                # v1.0.19：SPEAKER 或 API_AUDIO 任一即接受 API 推流——卫星流式
+                # 通道只有这一条（本 fork 设备无 media_url 自取能力）。上游按
+                # SPEAKER 门控，而慧尖固件 v2.1.11 只宣告 API_AUDIO（有喇叭、
+                # on_audio 播 16k PCM，只是不报 SPEAKER）→旧门控下播报永静默
+                # （台架×固件协议审计实锤）。两 flag 同报时 port 仍 0（AS:501
+                # 条件含 not API_AUDIO），UDP 语义不变。
+                if feature_flags & (
+                    VoiceAssistantFeature.SPEAKER | VoiceAssistantFeature.API_AUDIO
+                ) and (stream := tts.async_get_stream(self.hass, tts_output["token"])):
                     self._tts_streaming_task = (
                         self.config_entry.async_create_background_task(
                             self.hass,
@@ -512,7 +518,12 @@ class EsphomeAssistSatellite(
 
         end_stage = PipelineStage.TTS
 
-        if feature_flags & VoiceAssistantFeature.SPEAKER:
+        if feature_flags & (
+            VoiceAssistantFeature.SPEAKER | VoiceAssistantFeature.API_AUDIO
+        ):
+            # v1.0.19：API_AUDIO 设备同样经 API 推 16k WAV（见 on_pipeline_event
+            # 流式门控注释）——须向 TTS 引擎声明 wav 首选，否则慧尖 tts 回 mp3
+            # 在 _stream_tts_audio「Only WAV」早退。
             # Stream WAV audio
             self._attr_tts_options = {
                 tts.ATTR_PREFERRED_FORMAT: "wav",
@@ -565,8 +576,14 @@ class EsphomeAssistSatellite(
 
         return port
 
-    async def handle_audio(self, data: bytes) -> None:
-        """Handle incoming audio chunk from API."""
+    async def handle_audio(self, data: bytes, data2: bytes | None = None) -> None:
+        """Handle incoming audio chunk from API.
+
+        v1.0.19：对齐 aioesphomeapi≥45 双参调用 handle_audio(data, data2)
+        （45.13.1 起实证；旧单参签名在 HA 2026.6+ 每帧 TypeError→上行全断，
+        台架×固件协议审计实锤）。data2=增强音频第二通道，本固件只发单声道
+        取偶通道后的流（data2 恒 None），收到即忽略；保留参数以兼容双通道设备。
+        """
         self._audio_queue.put_nowait(data)
 
     async def handle_pipeline_stop(self, abort: bool) -> None:

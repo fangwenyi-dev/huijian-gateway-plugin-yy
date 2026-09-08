@@ -3,6 +3,22 @@
 所有版本变更记录在此文件中。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [1.0.19] - 2026-09-11
+
+### 修复（固件×集成协议审计实锤，配套固件 v2.1.12）
+
+- **卫星播报永静默（阻断级）**：集成 TTS 流式通道双重门控只认 `SPEAKER` 特性，而慧尖固件宣告 `VOICE_ASSISTANT|API_AUDIO`（喇叭经 API on_audio 播，就是不报 SPEAKER）→ 设备只收到 `TTS_END{url}`（无 media_url 自取能力）静默拆会话。现集成侧流式/首选格式两处门控放宽为 `SPEAKER|API_AUDIO` 并集（两 flag 并存时 port 仍 0，UDP 语义不变，**已刷 v2.1.11 存量设备升级本集成即恢复播报**）；固件 v2.1.12 同步补报 SPEAKER（对齐上游语义，stock esphome 集成也认）。
+- **TTS 格式协商失效**：`tts.py` 只读 `"audio_format"` 键（core 实际下发 `preferred_format`/`preferred_sample_rate` 等）恒回 mp3，卫星流式通道「Only WAV」早退——即使过了特性门播报仍哑。现消费 preferred_* 选项经既有 ffmpeg 链转 16k/mono/16bit WAV；无 preferred 选项保持 mp3 旧行为（announce 等消费方零影响）。真台架实证：卫星同款选项 → `WAV_OK 16k/mono/16bit`，旧路径 `MP3_FALLBACK_OK`。
+- **上行音频每帧 TypeError（HA 2026.6+ / aioesphomeapi≥45）**：core 回调已改双参 `handle_audio(data, data2)`（data2=增强音频第二通道），本 fork 还是单参签名 → 真机语音上行全断（协议审计抓到；仿真此前直驱 stt 实体故未暴露）。现签名对齐双参（data2 兼容接收）。
+
+### 优化
+
+- **HA 面板状态卡垂直居中**：「服务运行 · 正常 2 时 24 分」等状态行由 `<br>` 拼行改 flex 行（`.stat-row` 标签左值右高度居中），pill 胶囊 `inline-flex` 消基线漂移，「模型就绪度」卡同治，表格单元格 `vertical-align:middle`。
+
+### 测试
+
+pytest 264（新增卫星播报对齐钉桩 `test_satellite_parity.py` 3 项：双门控含 API_AUDIO、handle_audio 双参、preferred_format 消费）；真台架 A/B 实证 TTS wav/mp3 双路径；固件 v2.1.12 增量编译通过（bin 内嵌版本校验）。
+
 ## [1.0.18] - 2026-09-08
 
 ### 修复
