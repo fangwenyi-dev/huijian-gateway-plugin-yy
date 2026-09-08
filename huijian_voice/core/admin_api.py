@@ -33,6 +33,7 @@ def make_admin_app(ctx) -> web.Application:
     app.router.add_post("/api/nlu/test", _nlu_test)
     app.router.add_post("/api/tts/test", _tts_test)
     app.router.add_get("/api/scenes", _scenes)
+    app.router.add_get("/api/automations", _automations)
     app.router.add_post("/api/system/reload_models", _reload_models)
     return app
 
@@ -138,10 +139,70 @@ async def _tts_test(request):
                         headers={"Content-Disposition": 'inline; filename="tts_test.wav"'})
 
 
+def _scene_row(sc: dict) -> dict:
+    """场景 dict → 页面行（动作压成人读摘要，缺字段不炸）。永不抛。"""
+    acts = sc.get("actions") or []
+    sums = []
+    for a in acts[:6]:
+        if not isinstance(a, dict):
+            continue
+        intent = str(a.get("intent") or a.get("name") or "")
+        pr = a.get("params") or a.get("args") or {}
+        if not isinstance(pr, dict):
+            pr = {}
+        tgt = pr.get("target")
+        area = tgt.get("area") if isinstance(tgt, dict) else ""
+        bits = [str(x) for x in (pr.get("entity_id"), area, pr.get("state"),
+                                 pr.get("brightness"), pr.get("temperature"))
+                if x not in (None, "")]
+        sums.append((f"{intent} {' '.join(bits[:3])}").strip())
+    return {"trigger": str(sc.get("trigger_phrase") or ""),
+            "name": str(sc.get("name") or sc.get("trigger_phrase") or ""),
+            "scene_id": sc.get("scene_id"),
+            "action_count": len(acts),
+            "actions": [s for s in sums if s],
+            "created_at": sc.get("created_at")}
+
+
 async def _scenes(request):
     ctx = request.app[CTX_KEY]
-    await ctx.scenes.refresh(force=True)
-    return web.json_response({"triggers": ctx.scenes.triggers})
+    error = ""
+    try:
+        await ctx.scenes.refresh(force=True)
+    except Exception as e:                       # 集成掉线/超时：页面如实说明
+        error = f"场景列表拉取失败：{str(e)[:120]}"
+    rows = [_scene_row(sc) for sc in
+            (ctx.scenes.all() if hasattr(ctx.scenes, "all") else [])
+            if isinstance(sc, dict)]
+    # triggers 键保留（旧前端/排障脚本兼容）
+    return web.json_response({"triggers": ctx.scenes.triggers,
+                              "scenes": rows, "error": error})
+
+
+async def _automations(request):
+    """自动化 = HA 核心 REST（零集成依赖，集成没装也有的看）；
+    开关态从 states 的 automation.<id> 联查。"""
+    ctx = request.app[CTX_KEY]
+    cfg = await ctx.ha.rest_get("/api/config/automations/config")
+    items = cfg.get("automations") if isinstance(cfg, dict) else None
+    if not isinstance(items, list):
+        return web.json_response({"automations": [],
+                                  "error": "读不到自动化配置（HA API 不可达或未鉴权）"})
+    states = await ctx.ha.states()
+    out = []
+    for a in items:
+        if not isinstance(a, dict):
+            continue
+        aid = str(a.get("id") or "")
+        st = states.get(f"automation.{aid}") or {}
+        attrs = st.get("attributes") or {}
+        out.append({"id": aid,
+                    "alias": str(a.get("alias") or attrs.get("friendly_name") or aid),
+                    "description": str(a.get("description") or ""),
+                    "last_triggered": str(a.get("last_triggered")
+                                          or attrs.get("last_triggered") or ""),
+                    "state": str(st.get("state") or "")})
+    return web.json_response({"automations": out, "error": ""})
 
 
 async def _reload_models(request):

@@ -62,6 +62,7 @@ class KlarClient:
         self._owns = session is None
         self._fails = 0
         self._cooldown_until = 0.0
+        self._probing = False          # P1-9 半开单飞：冷却到期后只放一条快速探针
         self.last_error = ""
         self.parsed_ok = 0     # 观测计数（状态页/排障用）
 
@@ -84,8 +85,17 @@ class KlarClient:
         enabled, url, lang, timeout, _min_conf, token = self._opt()
         if not enabled or not (text or "").strip():
             return None
-        if time.monotonic() < self._cooldown_until:
-            return None
+        probe = False
+        if self._fails >= _FAIL_THRESHOLD:
+            now = time.monotonic()
+            if now < self._cooldown_until:
+                return None
+            # P1-9 半开：冷却到期不再全量放行（引擎仍死时每句白付 2s 超时），
+            # 单飞探针 + 收紧超时；失败立即重回冷却，成功即全量恢复。
+            if self._probing:
+                return None
+            self._probing = probe = True
+            timeout = min(timeout, 1.0)
         body: dict[str, Any] = {"text": text[:_MAX_TEXT], "language": lang}
         headers = {"x-klar-token": token} if token else {}
         try:
@@ -108,6 +118,9 @@ class KlarClient:
         except Exception as e:  # noqa: BLE001 —— fail-open 是本层的定义
             self._note_fail(f"{type(e).__name__}: {str(e)[:100]}")
             return None
+        finally:
+            if probe:
+                self._probing = False
 
     def _note_fail(self, err: str) -> None:
         self.last_error = err

@@ -9,8 +9,10 @@ LLM 输出仅进 TTS/屏显文本，不再生成音频（协议 §1.4：LLM 通�
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import re
 from typing import AsyncIterator, Optional
 
 import aiohttp
@@ -18,6 +20,10 @@ import aiohttp
 from . import const
 
 logger = logging.getLogger("huijian.agent")
+
+# 流式句读（P2-15）：与 _sentences 同一终止符集，增量切句用
+_SENT_END = re.compile(r"[。！？；!?;\n]")
+_ROUND_END = object()          # 单轮句子队列的收束哨兵
 
 _TARGET_SCHEMA = {
     "type": "array",
@@ -84,6 +90,7 @@ class Agent:
         self.ha = ha
         self.executor = executor
         self._session: Optional[aiohttp.ClientSession] = None
+        self._no_stream = False        # 平台不认 SSE 一次即 latch（本实例不再试）
 
     @property
     def enabled(self) -> bool:
@@ -114,7 +121,7 @@ class Agent:
                 break
         return "\n".join(lines)
 
-    async def _chat(self, messages: list, tools: bool) -> dict:
+    def _req(self, messages: list, tools: bool, stream: bool) -> tuple[str, dict, dict]:
         base = str(self.settings.get("llm.base_url", "")).rstrip("/")
         body = {
             "model": self.settings.get("llm.model", ""),
@@ -124,32 +131,145 @@ class Agent:
         if tools:
             body["tools"] = TOOLS
             body["tool_choice"] = "auto"
-        sess = await self._sess()
+        if stream:
+            body["stream"] = True
         headers = {"Content-Type": "application/json"}
         if key := self.settings.get("llm.api_key"):
             headers["Authorization"] = f"Bearer {key}"
-        async with sess.post(f"{base}/chat/completions", json=body, headers=headers) as r:
+        return f"{base}/chat/completions", body, headers
+
+    async def _chat(self, messages: list, tools: bool) -> dict:
+        url, body, headers = self._req(messages, tools, stream=False)
+        sess = await self._sess()
+        async with sess.post(url, json=body, headers=headers) as r:
             if r.status != 200:
                 text = (await r.text())[:300]
                 raise RuntimeError(f"LLM {r.status}: {text}")
             return await r.json()
 
+    class StreamUnsupported(Exception):
+        """平台不认 stream=true（4xx 或返回非 SSE）——answer 内本回合回退整包。"""
+
+    async def _chat_stream(self, messages: list, tools: bool,
+                           emit) -> dict:
+        """SSE 增量：句读完整即 emit(sentence)（async 回调）；返回组装的 assistant 消息。
+        只兼容 OpenAI 式 `data:{choices:[{delta:{content|tool_calls}}]}` 事件流。"""
+        url, body, headers = self._req(messages, tools, stream=True)
+        sess = await self._sess()
+        content = ""
+        calls: dict[int, dict] = {}
+        buf = ""
+        flushed = 0                          # content 中已 emit 的字符数
+        done = False
+        async with sess.post(url, json=body, headers=headers) as r:
+            ctype = r.headers.get("Content-Type", "")
+            if r.status != 200:
+                raise Agent.StreamUnsupported(f"HTTP {r.status}")
+            if "event-stream" not in ctype and "ndjson" not in ctype and "json" in ctype:
+                raise Agent.StreamUnsupported(f"非 SSE 响应({ctype[:40]})")
+            while not done:
+                raw = await r.content.read(4096)
+                if not raw:
+                    break
+                buf += raw.decode("utf-8", "ignore")
+                while "\n" in buf:
+                    line, buf = buf.split("\n", 1)
+                    line = line.strip()
+                    if not line.startswith("data:"):
+                        continue
+                    payload = line[5:].strip()
+                    if payload == "[DONE]":
+                        done = True
+                        break
+                    try:
+                        ev = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+                    ch = (ev.get("choices") or [{}])[0]
+                    delta = ch.get("delta") or {}
+                    if delta.get("content"):
+                        content += delta["content"]
+                        # 增量句切：到达终止标点即 emit（半句留在 buffer 等下轮）
+                        while True:
+                            m = _SENT_END.search(content, flushed)
+                            if not m:
+                                break
+                            seg = content[flushed:m.end()].strip()
+                            flushed = m.end()
+                            if seg:
+                                await emit(seg)
+                    for tc in delta.get("tool_calls") or []:
+                        idx = int(tc.get("index") or 0)
+                        slot = calls.setdefault(idx, {"id": "", "type": "function",
+                                                      "function": {"name": "", "arguments": ""}})
+                        if tc.get("id"):
+                            slot["id"] = tc["id"]
+                        fn = tc.get("function") or {}
+                        if fn.get("name"):
+                            slot["function"]["name"] += fn["name"]
+                        if fn.get("arguments"):
+                            slot["function"]["arguments"] += fn["arguments"]
+        tail = content[flushed:].strip()
+        if tail:
+            await emit(tail)
+        return {"role": "assistant",
+                "content": content or None,
+                **({"tool_calls": [calls[k] for k in sorted(calls)]} if calls else {})}
+
+    async def _one_round(self, messages: list, tools: bool, q: "asyncio.Queue") -> tuple[dict, bool]:
+        """单轮对话（流式优先）。文本句随到随入 q；返回 (assistant 消息, 是否已流式送出)。
+        StreamUnsupported 只可能在首事件前抛（q 尚空），整轮安全改走非流式并永久 latch。"""
+        streamed = False
+        try:
+            if not self.settings.get("llm.stream", True) or self._no_stream:
+                resp = await self._chat(messages, tools=tools)
+                msg = (resp.get("choices") or [{}])[0].get("message", {})
+            else:
+                async def _emit(s: str) -> None:
+                    await q.put(s)
+                try:
+                    msg = await self._chat_stream(messages, tools, _emit)
+                    streamed = True
+                except Agent.StreamUnsupported as e:
+                    logger.warning("[LLM] 平台不支持流式(%s) → 本实例回退整包", str(e)[:80])
+                    self._no_stream = True
+                    resp = await self._chat(messages, tools=tools)
+                    msg = (resp.get("choices") or [{}])[0].get("message", {})
+            return msg, streamed
+        finally:
+            await q.put(_ROUND_END)
+
     async def answer(self, text: str, history: list[dict]) -> AsyncIterator[str]:
-        """流式产出最终口播文本（按句 yield）。失败抛异常由 pipeline 兜底。"""
+        """流式产出最终口播文本（按句 yield）。失败抛异常由 pipeline 兜底。
+        体验批 P2-15：SSE 真流式——最终答案句读一合成即 yield，长答案感知延迟大降。"""
         messages = [{"role": "system", "content": SYSTEM_PROMPT + "\n\n当前设备清单：\n" + await self._device_brief()}]
         messages += history[-int(self.settings.get("llm.history_rounds", 10)) * 2:]
         messages.append({"role": "user", "content": text})
         max_rounds = int(self.settings.get("llm.max_tool_rounds", 3))
         for _ in range(max_rounds + 1):
-            resp = await self._chat(messages, tools=max_rounds > 0)
-            choice = (resp.get("choices") or [{}])[0].get("message", {})
-            calls = choice.get("tool_calls") or []
+            q: asyncio.Queue = asyncio.Queue()
+            task = asyncio.create_task(self._one_round(messages, max_rounds > 0, q))
+            try:
+                while True:
+                    item = await q.get()
+                    if item is _ROUND_END:
+                        break
+                    yield item
+                msg, streamed = await task
+            except BaseException:
+                task.cancel()
+                raise
+            calls = msg.get("tool_calls") or []
             if not calls:
-                final = (choice.get("content") or "").strip() or const.FALLBACK_TEXT
-                for sent in _sentences(final):
-                    yield sent
+                final = (msg.get("content") or "").strip()
+                if streamed:
+                    if not final:
+                        yield const.FALLBACK_TEXT
+                else:
+                    for sent in _sentences(final or const.FALLBACK_TEXT):
+                        yield sent
                 return
-            messages.append(choice)
+            messages.append(msg)
             for call in calls:
                 fn = (call.get("function") or {})
                 name = fn.get("name", "")

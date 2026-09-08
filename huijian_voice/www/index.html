@@ -14,8 +14,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#030712">
 <title>慧尖HA语音插件</title>
-<link rel="stylesheet" href="css/huijian.css?v=1.0.19">
-<link rel="stylesheet" href="css/voice.css?v=1.0.19">
+<link rel="stylesheet" href="css/huijian.css?v=1.0.20">
+<link rel="stylesheet" href="css/voice.css?v=1.0.20">
 </head>
 <body>
 <!-- 「星辰大海」背景层（与网关加载项同一设计标准/同一固定种子＝同一片天）：
@@ -44,6 +44,7 @@
   <button data-tab="status" class="on">状态</button>
   <button data-tab="settings">设置</button>
   <button data-tab="models">模型</button>
+  <button data-tab="scenes">场景</button>
   <button data-tab="debug">调试</button>
   <button data-tab="pair">设备配对</button>
 </nav>
@@ -115,13 +116,21 @@
       <div><label><input id="nlu_textcnn" type="checkbox" style="width:auto"> 启用 TextCNN 意图分类（T1）</label></div>
       <div><label><input id="nlu_query" type="checkbox" style="width:auto"> 启用本地查询（时间/温度/状态）</label></div>
     </div>
+    <div class="hj-row">
+      <div><label><input id="dlg_context" type="checkbox" style="width:auto"> 上下文继承（"把它打开"跟随上一轮目标）</label></div>
+      <div><label><input id="dlg_chain" type="checkbox" style="width:auto"> 复合句链发（"开灯再关窗帘"分步执行）</label></div>
+      <div><label><input id="dlg_confirm" type="checkbox" style="width:auto"> 风险确认（解锁/删场景先问再办）</label></div>
+    </div>
     <label class="hj-field">自定义纠错词条（JSON，一行一组；在内置 58 条之上叠加）</label>
     <textarea id="nlu_corr" placeholder='{"西顶灯": "吸顶灯"}'></textarea>
+    <label class="hj-field">卫星→区域映射（JSON；"开灯"类无目标句落在说话卫星所在区域。例：{"192.168.1.31": "卧室"}）</label>
+    <textarea id="sat_areas" placeholder='{"192.168.1.31": "卧室"}'></textarea>
   </div>
 
   <div class="card"><h3>大模型兜底（LLM，默认关闭）</h3>
     <div class="hj-row">
       <div><label><input id="llm_enabled" type="checkbox" style="width:auto"> 启用（快速通道未命中时交给大模型；需填端点）</label></div>
+      <div><label><input id="llm_stream" type="checkbox" style="width:auto"> 流式回答（SSE 逐句播报；平台不支持自动整包回退）</label></div>
     </div>
     <div class="hj-row"><div style="flex:1 1 100%"><label class="hj-field">平台预设（选完只需粘贴 API Key）</label><select id="llm_preset"></select></div></div>
     <div id="llm_preset_hint" class="hint" style="display:none"></div>
@@ -159,6 +168,21 @@
   </div>
 </section>
 
+<!-- ══ 场景（语音场景与自动化·独立页）══ -->
+<section id="tab-scenes">
+  <div class="card"><h3>语音场景（来自慧尖 AI 集成）</h3>
+    <div id="sceneList" class="hint">–</div>
+    <button class="act gray" id="sceneBtn">刷新</button>
+    <div class="hint">说「把现在这样保存为观影模式」即可现场建场景；删除/编辑在 HA 集成配置页。</div>
+  </div>
+  <div class="card"><h3>自动化（HA 核心，不依赖集成）</h3>
+    <table><thead><tr><th>别名</th><th>状态</th><th>最近触发</th><th>说明</th></tr></thead><tbody id="autoBody"></tbody></table>
+    <div id="autoMsg" class="hint"></div>
+    <button class="act gray" id="autoBtn">刷新</button>
+    <div class="hint">状态取自 automation.&lt;id&gt; 实体（on=已启用）；「无实体」多为 YAML 定义未重载。</div>
+  </div>
+</section>
+
 <!-- ══ 调试 ══ -->
 <section id="tab-debug">
   <div class="card"><h3>一句话理解（干跑不执行；勾选后可真执行）</h3>
@@ -175,10 +199,6 @@
       <div style="flex:0 1 120px"><button class="act" id="ttsBtn">合成</button></div>
     </div>
     <div id="ttsPlayer" style="margin-top:8px"></div>
-  </div>
-  <div class="card"><h3>语音场景触发词（来自 HA 集成）</h3>
-    <div id="sceneList" class="hint">–</div>
-    <button class="act gray" id="sceneBtn">刷新</button>
   </div>
 </section>
 
@@ -206,7 +226,7 @@
 
 <script>
 "use strict";
-const CURRENT_VERSION = "1.0.19";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
+const CURRENT_VERSION = "1.0.20";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
 // 音色表 = kokoro-multi-lang-v1_0 官方 sid 映射（docs/source/onnx/tts/pretrained_models/kokoro.rst 实证）
 const VOICES = [
   [45,"zf_xiaobei · 小北（默认）"],[46,"zf_xiaoni · 小尼"],[47,"zf_xiaoxiao · 晓晓"],[48,"zf_xiaoyi · 小艺"],
@@ -240,7 +260,7 @@ document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{
   if(b.dataset.tab==="settings") loadSettings();
   if(b.dataset.tab==="models") loadModels();
   if(b.dataset.tab==="pair") loadEndpoints();
-  if(b.dataset.tab==="debug"){ loadScenes(); }
+  if(b.dataset.tab==="scenes"){ loadScenes(); loadAutomations(); }
 });
 
 /* ── 状态 ── */
@@ -337,7 +357,12 @@ async function loadSettings(){
   $("#nlu_textcnn").checked = S.nlu.textcnn_enabled !== false;
   $("#nlu_query").checked = S.nlu.query_local !== false;
   try { $("#nlu_corr").value = JSON.stringify(S.nlu.corrections_extra||{},null,0); } catch(e){}
+  $("#dlg_context").checked = S.dialog?.context_enabled !== false;
+  $("#dlg_chain").checked = S.dialog?.chain_enabled !== false;
+  $("#dlg_confirm").checked = S.dialog?.confirm_risky !== false;
+  try { $("#sat_areas").value = JSON.stringify(S.spatial?.satellite_areas||{},null,0); } catch(e){}
   $("#llm_enabled").checked = !!S.llm.enabled;
+  $("#llm_stream").checked = S.llm.stream !== false;
   $("#llm_base").value = S.llm.base_url||""; $("#llm_model").value = S.llm.model||"";
   $("#llm_key").value = ""; $("#llm_key").placeholder = S.llm.api_key||"";
   $("#req_token").checked = !!S.security.require_token;
@@ -357,12 +382,15 @@ $("#saveBtn").onclick = async ()=>{
     tts:{ provider:$("#tts_provider").value, sid:parseInt($("#tts_sid").value,10), speed:parseFloat($("#tts_speed").value)||1,
           cloud:{ base_url:$("#tts_cloud_base").value, model:$("#tts_cloud_model").value, voice:$("#tts_cloud_voice").value, ...(ttsFmt?{response_format:ttsFmt}:{}), ...(ttsRate?{sample_rate:ttsRate}:{}), ...( $("#tts_cloud_key").value?{api_key:$("#tts_cloud_key").value}:{}) } },
     nlu:{ enabled:$("#nlu_enabled").checked, textcnn_enabled:$("#nlu_textcnn").checked, query_local:$("#nlu_query").checked, corrections_extra: safeJson($("#nlu_corr").value, {}) },
-    llm:{ enabled:$("#llm_enabled").checked, base_url:$("#llm_base").value, model:$("#llm_model").value, ...( $("#llm_key").value?{api_key:$("#llm_key").value}:{}) },
+    llm:{ enabled:$("#llm_enabled").checked, base_url:$("#llm_base").value, model:$("#llm_model").value, stream:$("#llm_stream").checked, ...( $("#llm_key").value?{api_key:$("#llm_key").value}:{}) },
     security:{ require_token:$("#req_token").checked },
     power:{ unload_when_idle_min: parseInt($("#unload").value,10)||0 },
-    dialog:{ fallback_text: $("#fallback").value },
+    dialog:{ fallback_text: $("#fallback").value, context_enabled:$("#dlg_context").checked,
+             chain_enabled:$("#dlg_chain").checked, confirm_risky:$("#dlg_confirm").checked },
+    spatial:{ satellite_areas: safeJson($("#sat_areas").value, {}) },
   };
   if($("#nlu_corr").value.trim() && typeof body.nlu.corrections_extra!=="object"){ toast("纠错词条不是合法 JSON"); return; }
+  if($("#sat_areas").value.trim() && typeof body.spatial.satellite_areas!=="object"){ toast("卫星区域映射不是合法 JSON"); return; }
   try { await post("/api/settings", body); toast("已保存并即时生效"); $("#saveMsg").textContent="✓ "+new Date().toLocaleTimeString(); }
   catch(e){ toast("保存失败："+e.message); }
 };
@@ -418,10 +446,29 @@ $("#ttsBtn").onclick = async ()=>{
 };
 async function loadScenes(){
   try { const r = await api("/api/scenes");
-    $("#sceneList").innerHTML = (r.triggers&&r.triggers.length)? r.triggers.map(t=>`<span class="pill ok" style="margin:2px">${t}</span>`).join("") : "（HA 中暂无语音场景，或集成未就绪）";
+    const esc = s => String(s??"").replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+    const rows = (r.scenes||[]).map(s=>`<tr><td><b>${esc(s.trigger)}</b></td><td>${esc(s.name)}</td>`+
+      `<td>${esc((s.actions||[]).join("；") || (s.action_count+" 步"))}</td>`+
+      `<td class="mut">${esc(s.created_at||"–")}</td></tr>`).join("");
+    $("#sceneList").innerHTML =
+      (r.error? `<div class="pill warn" style="margin-bottom:6px">${esc(r.error)}</div>`:"") +
+      (rows? `<table><thead><tr><th>触发口令</th><th>名称</th><th>动作</th><th>创建</th></tr></thead><tbody>${rows}</tbody></table>`
+           : (r.error? "" : "（HA 中暂无语音场景，或集成未就绪）"));
   } catch(e){ $("#sceneList").textContent = "读取失败："+e.message; }
 }
 $("#sceneBtn").onclick = loadScenes;
+
+async function loadAutomations(){
+  const esc = s => String(s??"").replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+  try { const r = await api("/api/automations");
+    $("#autoBody").innerHTML = (r.automations||[]).map(a=>`<tr><td>${esc(a.alias)}</td><td>`+
+      (a.state==="on"? pill("已启用","ok") : a.state==="off"? pill("已禁用","warn") : pill("无实体","mut"))+
+      `</td><td class="mut">${esc(a.last_triggered||"–")}</td><td class="mut">${esc(a.description||"")}</td></tr>`).join("")
+      || `<tr><td colspan="4" class="mut">暂无自动化</td></tr>`;
+    $("#autoMsg").textContent = r.error||"";
+  } catch(e){ $("#autoMsg").textContent = "读取失败："+e.message; }
+}
+$("#autoBtn").onclick = loadAutomations;
 
 /* ── 配对 ── */
 async function loadEndpoints(){
@@ -445,6 +492,6 @@ $("#regenBtn").onclick = async ()=>{
   try { await post("/api/token/regenerate",{}); toast("已重置"); loadEndpoints(); } catch(e){ toast(e.message); }
 };
 </script>
-<script src="js/starsky.js?v=1.0.19"></script>
+<script src="js/starsky.js?v=1.0.20"></script>
 </body>
 </html>

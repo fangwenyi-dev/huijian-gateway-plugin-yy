@@ -273,6 +273,12 @@ class FakeScenes:
     async def refresh(self, force=False):
         pass
 
+    def needs_blocking(self):
+        return False
+
+    def refresh_soon(self):
+        pass
+
     def check(self, text):
         return None
 

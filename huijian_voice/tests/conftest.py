@@ -36,7 +36,7 @@ class FakeStore:
 
 
 class FakeHAClient:
-    def __init__(self, results=None, states=None, areas=None, entity_area=None):
+    def __init__(self, results=None, states=None, areas=None, entity_area=None, rest=None):
         self.calls = []
         self.results = results or {}
         self._states = states or {}
@@ -44,6 +44,10 @@ class FakeHAClient:
         self.reachable = True
         self._areas = areas or {}
         self._entity_area = entity_area or {}
+        self._rest = rest or {}
+
+    async def rest_get(self, path, timeout=6.0):
+        return self._rest.get(path)   # 无条目=None（真实语义：一切失败折叠 None）
 
     async def handle_intent(self, name, data, timeout=10.0):
         self.calls.append((name, data))

@@ -16,6 +16,7 @@ JSON 宽容解析（未知键忽略）；token 校验在 HTTP 握手层（401 �
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -158,8 +159,19 @@ class SttSession(BaseSession):
                 text = ""       # 静音：契约要求仍回一条 text:""
         except asyncio.TimeoutError:
             logger.warning("[STT] 识别超预算 %ss", const.STT_RESULT_BUDGET_S)
+        except asyncio.CancelledError:
+            # P1-8：被新一轮 stop 抢占/断连取消——契约 §1.4"每 stop 必回且仅回
+            # 一条"不容破例：本 stop 以空文本收束后继续上抛取消。shield 保证
+            # 二次取消（关站风暴）下收束帧仍会发出。
+            logger.info("[STT] 在飞识别被抢占，本 stop 以空文本收束")
+            with contextlib.suppress(Exception):
+                await asyncio.shield(self._reply_stt(""))
+            raise
         except Exception:
             logger.exception("[STT] 识别异常")
+        await self._reply_stt(text)
+
+    async def _reply_stt(self, text: str) -> None:
         await self.send_json({"type": "stt", "text": text or ""})
 
     async def on_close(self) -> None:
@@ -266,10 +278,23 @@ class LlmSession(BaseSession):
     async def _turn(self, text: str) -> None:
         await self.send_json({"type": "text", "state": "start"})
         reply_text = const.FALLBACK_TEXT
+        streamed = False
+
+        async def _on_sentence(sent: str) -> None:
+            # P2-15：LLM 流式逐句下传（start 已发；end 帧永远由本协程收束）
+            nonlocal streamed
+            # data 字段名是客户端硬约束（llm_transport 聚合读 data），勿改
+            if await self.send_json({"type": "text", "state": "sentence_end", "data": sent}):
+                streamed = True
+
         try:
             reply = await asyncio.wait_for(
-                self.ctx.pipeline.handle(text), timeout=const.LLM_TURN_BUDGET_S)
+                self.ctx.pipeline.handle(text, origin=self.device_hint,
+                                         on_sentence=_on_sentence),
+                timeout=const.LLM_TURN_BUDGET_S)
             reply_text = reply.text or const.FALLBACK_TEXT
+            if getattr(reply, "streamed", False):
+                streamed = True
         except asyncio.TimeoutError:
             logger.warning("[LLM] 回合超预算 %ss", const.LLM_TURN_BUDGET_S)
         except asyncio.CancelledError:
@@ -277,11 +302,11 @@ class LlmSession(BaseSession):
             raise
         except Exception:
             logger.exception("[LLM] 处理异常")
-        from .agent import _sentences
-        for sent in _sentences(reply_text):
-            # data 字段名是客户端硬约束（llm_transport 聚合读 data），勿改
-            if not await self.send_json({"type": "text", "state": "sentence_end", "data": sent}):
-                break
+        if not streamed:
+            from .agent import _sentences
+            for sent in _sentences(reply_text):
+                if not await self.send_json({"type": "text", "state": "sentence_end", "data": sent}):
+                    break
         await self.send_json({"type": "text", "state": "end"})
 
     async def on_close(self) -> None:

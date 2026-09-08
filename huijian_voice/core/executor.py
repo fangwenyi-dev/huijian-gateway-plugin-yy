@@ -55,12 +55,12 @@ class Executor:
         self.settings = settings
 
     async def run(self, plan: Plan) -> tuple[bool, str]:
-        """执行 Plan（klar 多分句逐步顺序执行）。返回 (success, 中文播报)。永不抛。"""
+        """执行 Plan（klar 多分句/复合链逐步顺序执行）。返回 (success, 中文播报)。永不抛。"""
         steps = [(plan.intent, plan.args)] + [
             (st.get("name"), st.get("args") or {})
             for st in (getattr(plan, "extra_steps", None) or [])]
         results = []
-        for name, args in steps:
+        for idx, (name, args) in enumerate(steps):
             direct = self._klar_direct(name, args) if plan.source == "klar" else None
             if direct is not None:
                 domain, service, data = direct
@@ -70,6 +70,13 @@ class Executor:
             if not result.get("success"):
                 reply = zh_error(str(result.get("error") or result.get("message") or ""),
                                klar=plan.source == "klar")
+                # P2-12 链失败定位：部分执行已成事实，如实说清第几步、还剩几步
+                # （保留"抱歉"字头——话术层诚实失败纪律被测试钉死）
+                detail = reply[3:] if reply.startswith("抱歉，") else reply
+                if len(steps) > 1 and idx > 0:
+                    reply = f"抱歉，前面 {idx} 步已完成，但第 {idx + 1} 步没成功——{detail}"
+                elif len(steps) > 1:
+                    reply = f"抱歉，第 1 步没成功，后面的步骤先不执行了（{detail}）"
                 logger.info("[执行] %s %s → 失败 | %s", name, args, reply)
                 return False, reply
             results.append(result)
@@ -79,8 +86,24 @@ class Executor:
             reply = klar_speech
         elif len(results) == 1:
             reply = self.speech(plan, results[0])
-        else:
+        elif plan.source == "klar":
             reply = "好的，都办妥了"
+        else:
+            # P2-12 复合链：逐步真话术串播（"好的，灯打开了，窗帘关了"），
+            # 拿不准的一步退"都办妥了"，不硬拼英文意图名
+            try:
+                segs = []
+                for i, ((n, a), r) in enumerate(zip(steps, results)):
+                    s = self.speech(Plan(intent=n, args=a, source=plan.source,
+                                         utterance=plan.utterance), r)
+                    if i > 0:
+                        s = s.removeprefix("好的，")
+                    segs.append(s)
+                reply = "，".join(x for x in segs if x) or "好的，都办妥了"
+                if not reply.startswith("好的"):
+                    reply = "好的，" + reply
+            except Exception:
+                reply = "好的，都办妥了"
         tag = f"(+%d步)" % (len(steps) - 1) if len(steps) > 1 else ""
         logger.info("[执行] %s %s%s → 成功 | %s", plan.intent, plan.args, tag, reply)
         return True, reply

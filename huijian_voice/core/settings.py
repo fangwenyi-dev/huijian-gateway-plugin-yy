@@ -36,6 +36,7 @@ DEFAULTS: dict[str, Any] = {
         "provider": "local_kokoro",           # local_kokoro | cloud_openai_compat
         "sid": 45,                             # 定案默认音色：小北（女）。音色表见 web/sid 选项
         "speed": 1.0,                          # 0.8–1.2
+        "cache_enabled": True,                 # 体验批 P0-4：句级 opus LRU 缓存（本地档）
         "cloud": {"provider": "", "base_url": "", "api_key": "", "model": "", "voice": "",
                   "response_format": "", "sample_rate": 0},   # 预设透传项（空/0=pcm@24k）
     },
@@ -66,10 +67,21 @@ DEFAULTS: dict[str, Any] = {
         "max_tool_rounds": 3,
         "allow_scene_write": True,
         "allow_automation_write": False,       # v2 定案：LLM 写自动化默认关，需二次确认
+        "stream": True,                        # 体验批 P2-15：SSE 流式（平台不认自动回退整包）
     },
     "dialog": {
         "fallback_text": const.FALLBACK_TEXT,
         "dedup_window_s": 2.0,                 # 相同文本短时去重（防重复执行，契约 §1.4-②）
+        "context_enabled": True,               # 体验批 P2-10：跨轮目标继承 + LLM 真历史
+        "context_ttl_s": 90.0,                 # 继承窗口：说"关掉它"距上一句不超过 90s 才复用目标
+        "chain_enabled": True,                 # 体验批 P2-12：复合句分句链发（全命中才链）
+        "confirm_risky": True,                 # 体验批 P2-13：解锁/删场景先问「确认」再办
+        "confirm_ttl_s": 30.0,                 # 确认问句存活：超过 30s 不回即作废
+    },
+    "spatial": {
+        # 体验批 P2-11：卫星 IP → 区域名映射（"192.168.1.31": "卧室"）。
+        # 无目标句（"开灯"）默认落说话卫星所在区域；明示目标句零影响。空=行为同旧。
+        "satellite_areas": {},
     },
     "power": {
         "unload_when_idle_min": 0,             # 0=模型常驻；>0 空闲 N 分钟卸载（省电档）

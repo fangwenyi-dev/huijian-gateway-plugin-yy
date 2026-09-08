@@ -27,6 +27,61 @@ KNOWN_DEVICES = sorted(set(_KNOWN_DEVICES_TAIL) | set(KNOWN_DEVICES_PREFIX), key
 EN_DEVICES = ["light", "lamp", "fan", "ac", "airconditioner", "switch", "outlet", "window",
               "curtain", "blind", "tv", "speaker", "heater", "humidifier", "downlight"]
 
+# ── 动态设备词表（体验批 P2-17：别名自学习）────────────────────
+# 静态 KNOWN_DEVICES 是通用词表；真实部署里设备叫「氛围灯带/玄关射灯/新风机」等
+# 千奇百怪。从 HA 实体 friendly_name 派生每装专属词表，parse_target/拼音模糊
+# 共用——设备改名即自动跟上（每 30s 随状态缓存节流重派生），零持久化零学习风险。
+_VOCAB_STOP = {"开关", "状态", "电量", "信号", "电池", "亮度", "色温", "温度", "湿度",
+               "待机", "在线", "离线", "主开关", "设置", "传感器", "实体", "慧尖",
+               "左", "右", "上", "下", "中", "全部", "全屋"}
+_dyn_vocab: tuple[str, ...] = ()      # 已排序（长在前），整体替换赋值（GIL 原子）
+
+
+def _name_tokens(friendly: str) -> list[str]:
+    toks = re.split(r"[\s_\-/·，,、()（）\[\]【】]+", friendly or "")
+    out = []
+    for t in toks:
+        t = t.strip()
+        if not (2 <= len(t) <= 8) or t in _VOCAB_STOP:
+            continue
+        if not all("\u4e00" <= c <= "\u9fff" for c in t):
+            continue
+        out.append(t)
+    return out
+
+
+def sync_vocab(states: dict) -> None:
+    """从 ha 状态缓存派生动态词表（O(实体数) 小任务，pipeline 节流调用）。"""
+    names: set[str] = set()
+    for eid, ent in (states or {}).items():
+        if not str(eid).split(".", 1)[0] in (
+                "light", "cover", "climate", "fan", "switch", "humidifier",
+                "lock", "vacuum", "media_player"):
+            continue
+        fn = str(((ent or {}).get("attributes") or {}).get("friendly_name") or "")
+        names.update(_name_tokens(fn))
+    global _dyn_vocab, ALL_DEVICES, ALL_SET, _ALL_MIN2
+    _dyn_vocab = tuple(sorted(names, key=len, reverse=True))
+    merged = sorted(set(_STATIC_SET) | set(_dyn_vocab), key=len, reverse=True)
+    ALL_DEVICES = tuple(merged)
+    ALL_SET = frozenset(merged)
+    _ALL_MIN2 = tuple(d for d in ALL_DEVICES if len(d) >= 2)   # 已长→短
+
+
+def clear_vocab() -> None:      # 测试隔离
+    global _dyn_vocab, ALL_DEVICES, ALL_SET, _ALL_MIN2
+    _dyn_vocab = ()
+    ALL_DEVICES = tuple(sorted(_STATIC_SET, key=len, reverse=True))
+    ALL_SET = frozenset(_STATIC_SET)
+    _ALL_MIN2 = tuple(d for d in ALL_DEVICES if len(d) >= 2)
+
+
+_STATIC_DEVICES = tuple(KNOWN_DEVICES)          # 已按长度倒序
+_STATIC_SET = frozenset(KNOWN_DEVICES)
+ALL_DEVICES = _STATIC_DEVICES                   # 静态+动态合并视图（parse_target 用）
+ALL_SET = _STATIC_SET
+_ALL_MIN2 = tuple(d for d in ALL_DEVICES if len(d) >= 2)
+
 
 def cn2num(s: str) -> str:
     """中文数字→阿拉伯数字字符串（"二十三"→"23"，递归处理"一百二十三"）。原样移植。"""
@@ -193,7 +248,7 @@ def parse_target(raw: str, action_match=None) -> tuple[str | None, str | None, i
     #    防 "灯打开" 被近音 "灯泡"(dist=2) 截胡（tie 先到优先）。
     #    修A：区域提取统一走 _area_of_prefix（剥「的」+二次回捞），不再因残字丢区域。
     _hit_dev = False
-    for d in sorted((x for x in KNOWN_DEVICES if len(x) >= 2), key=len, reverse=True):
+    for d in _ALL_MIN2:
         idx = stripped.find(d)
         if idx >= 0:
             candidates.append((_area_of_prefix(stripped[:idx]), d, 5))
@@ -214,7 +269,7 @@ def parse_target(raw: str, action_match=None) -> tuple[str | None, str | None, i
             from pypinyin import lazy_pinyin
             py_raw = "".join(lazy_pinyin(stripped))
             best = None  # (dist, -len(d), d)
-            for d in KNOWN_DEVICES:
+            for d in ALL_DEVICES:
                 if len(d) < 2:
                     continue
                 py_dev = "".join(lazy_pinyin(d))
@@ -233,7 +288,7 @@ def parse_target(raw: str, action_match=None) -> tuple[str | None, str | None, i
     best_score, area, name = 0, None, stripped
     for a, n, base in candidates:
         score = base
-        if n in KNOWN_DEVICES or any(k in n.lower() for k in EN_DEVICES):
+        if n in ALL_SET or any(k in n.lower() for k in EN_DEVICES):
             score += 1
         if a and any(a.endswith(w) for w in AREA_SUFFIX):
             score += 1

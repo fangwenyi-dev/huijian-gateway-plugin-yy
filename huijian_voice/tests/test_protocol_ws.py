@@ -54,11 +54,12 @@ class FakePipeline:
     def __init__(self, reply="好的，客厅的灯打开了。还有别的吩咐？"):
         self.reply = reply
 
-    async def handle(self, text):
+    async def handle(self, text, origin="", on_sentence=None):
         @dataclass
         class R:
             text: str
             source: str = "t0"
+            streamed: bool = False
         return R(self.reply)
 
 

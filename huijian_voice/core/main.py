@@ -87,6 +87,7 @@ class Service:
         log.warning(" WS 三通道 :%d  管理 :%d(内部)  主机 %s", const.WS_PORT, const.ADMIN_PORT, self.host)
         log.warning("═" * 46)
         await self.ha.start()
+        self.scenes.refresh_soon()   # 体验批 P0-2：场景契约词表预热（首句零阻塞）
         self.settings.add_listener(self._on_settings_change)
         await self._start_http()
         await asyncio.to_thread(self.mdns.start)  # 构造+register 含阻塞 I/O，禁在 loop 内直调

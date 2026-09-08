@@ -14,6 +14,12 @@ class FakeScenes:
     async def refresh(self, force=False):
         pass
 
+    def needs_blocking(self):
+        return False
+
+    def refresh_soon(self):
+        pass
+
     def check(self, text):
         for t in self.triggers:
             if text == t or text.startswith(t):
@@ -130,3 +136,51 @@ def test_office_spotlight_target(fp):
     assert plan is not None and plan.intent == "TurnDeviceOn"
     assert plan.args["target"] == [{"area": "办公室",
                                     "devices": [{"name": "射灯", "domains": ["light"]}]}], plan.trace
+
+
+# ── 体验批 P2-16/10/12 端到端（真 FastPath 链路）────────────────
+def test_polite_end_to_end(fp):
+    plan = asyncio.run(fp.match("麻烦把客厅灯关掉好吗"))
+    assert plan and plan.intent == "TurnDeviceOff"
+    assert plan.args["target"][0]["area"] == "客厅"
+    assert any(t.startswith("礼貌→") for t in plan.trace)
+
+
+def test_pronoun_is_not_device_name(fp):
+    plan = asyncio.run(fp.match("把它打开"))
+    assert plan and plan.intent == "TurnDeviceOn"
+    assert not plan.args                              # 空目标形态，交上下文注入
+    assert any("代词目标" in t for t in plan.trace)
+    # 真件演示实锤形态（2026-09-12）：代词+副词+动作，绝不许吃成设备名
+    for t, want in [("关掉它", "TurnDeviceOff"), ("把它也关了", "TurnDeviceOff"),
+                    ("那个也关掉", "TurnDeviceOff"), ("关掉那个", "TurnDeviceOff")]:
+        p = asyncio.run(fp.match(t))
+        assert p and p.intent == want and not p.args, (t, p and (p.intent, p.args))
+    # 反例："它的灯"含真实目标词，不能被误判成代词空目标
+    p = asyncio.run(fp.match("打开它的灯"))
+    assert p and p.args.get("target") and not any("代词目标" in x for x in p.trace)
+
+
+def test_anaphora_adverb_lane(fp):
+    plan = asyncio.run(fp.match("再亮一点"))
+    assert plan and plan.intent == "AdjustDeviceAttribute"
+    assert plan.args.get("attribute") == "brightness"
+    assert any(t.startswith("回指→") for t in plan.trace)
+
+
+def test_lock_unlock_lane(fp):
+    # E2E 补洞（2026-09-12）：开解锁令曾全 fallback，确认环与 NLU 脱节
+    for t, want in [("解锁大门", "HassUnlock"), ("大门开锁", "HassUnlock"),
+                    ("把大门解锁", "HassUnlock"), ("开锁", "HassUnlock"),
+                    ("锁上大门", "HassLock"), ("大门锁上了", "HassLock")]:
+        p = asyncio.run(fp.match(t))
+        assert p and p.intent == want, (t, p and (p.intent, p.trace))
+    assert asyncio.run(fp.match("还没上锁")) is None      # 陈述不是命令
+    p = asyncio.run(fp.match("开灯"))                      # 不被解锁车道误吃
+    assert p and p.intent == "TurnDeviceOn"
+
+
+def test_compound_residue_refused(fp):
+    # 链式层否决后的残句绝不单发错猜（实测曾把「客厅的灯，然后再关闭窗帘」
+    # 整体错配成客厅窗帘）
+    assert asyncio.run(fp.match("打开客厅的灯，然后再关闭窗帘")) is None

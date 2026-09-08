@@ -28,6 +28,10 @@ class StoreSnap:
 class ScenesFake:
     triggers = ["观影模式"]
     async def refresh(self, force=False): pass
+    def all(self):
+        return [{"trigger_phrase": "观影模式", "name": "观影", "scene_id": "s1",
+                 "created_at": "2026-09-01T00:00:00",
+                 "actions": [{"intent": "HassTurnOff", "params": {"entity_id": "light.客厅"}}]}]
 
 
 class PipelineFake:
@@ -69,7 +73,15 @@ class SettingsFake:
 
 @pytest.fixture()
 def admin():
-    ctx = AppContext(settings=SettingsFake(), ha=FakeHAClient(), asr=None, tts=TtsFake(),
+    ha = FakeHAClient(
+        states={"automation.auto1": {"entity_id": "automation.auto1", "state": "on",
+                                     "attributes": {}},
+                "light.x": {"entity_id": "light.x", "state": "off", "attributes": {}}},
+        rest={"/api/config/automations/config": {"automations": [
+            {"id": "auto1", "alias": "回家开灯", "description": "地理围栏到家",
+             "last_triggered": "2026-09-12T10:00:00"},
+            {"id": "auto2", "alias": "YAML 未重载"}]}})
+    ctx = AppContext(settings=SettingsFake(), ha=ha, asr=None, tts=TtsFake(),
                      pipeline=PipelineFake(), scenes=ScenesFake(), textcnn=None,
                      store=StoreSnap(), started_at=time.time())
     app = make_admin_app(ctx)
@@ -178,6 +190,32 @@ def test_tts_test_returns_wav(admin):
 
 def test_scenes_and_reload(admin):
     st, body = _get(admin, "/api/scenes")
-    assert st == 200 and "观影模式" in json.loads(body)["triggers"]
-    st2, b2 = _post(admin, "/api/system/reload_models", {})
-    assert st2 == 200 and "note" in json.loads(b2)
+    j = json.loads(body)
+    assert st == 200 and "观影模式" in j["triggers"]        # 兼容键仍在
+    assert j["error"] == ""
+    row = j["scenes"][0]
+    assert row["trigger"] == "观影模式" and row["action_count"] == 1
+    assert row["actions"] == ["HassTurnOff light.客厅"]      # 动作压成人读摘要
+
+
+def test_automations_route(admin):
+    st, body = _get(admin, "/api/automations")
+    j = json.loads(body)
+    assert st == 200 and j["error"] == ""
+    a1, a2 = j["automations"]
+    assert a1 == {"id": "auto1", "alias": "回家开灯", "description": "地理围栏到家",
+                  "last_triggered": "2026-09-12T10:00:00", "state": "on"}
+    assert a2["state"] == ""                                  # 无 automation.auto2 实体
+
+
+def test_automations_no_bridge():
+    """HA API 不可达（rest_get 折叠 None）→ 空表 + 诚实错误，绝不 500。"""
+    import asyncio
+    from types import SimpleNamespace
+    from core.admin_api import CTX_KEY, _automations
+    ctx = AppContext(settings=SettingsFake(), ha=FakeHAClient(), asr=None, tts=TtsFake(),
+                     pipeline=PipelineFake(), scenes=ScenesFake(), textcnn=None,
+                     store=StoreSnap(), started_at=time.time())
+    resp = asyncio.run(_automations(SimpleNamespace(app={CTX_KEY: ctx})))
+    j = json.loads(resp.body)
+    assert j["automations"] == [] and "不可达" in j["error"]

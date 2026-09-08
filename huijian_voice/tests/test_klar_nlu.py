@@ -341,6 +341,13 @@ def _mk_pipe(fp_plan, kl_plan, ex, agent=None):
         async def match(self, t): return self.pl
     class _Q:
         async def answer(self, t): return None
+    class _S:
+        def get(self, k, d=None):
+            return {"dialog.chain_enabled": True, "dialog.context_enabled": True,
+                    "dialog.confirm_risky": True, "spatial.satellite_areas": {},
+                    "dialog.dedup_window_s": 2.0}.get(k, d)
+    p.settings = _S()
+    p._confirm, p._turns, p._last_target, p._origin_ts = {}, {}, {}, {}
     p.fast_path, p.klar, p.executor, p.agent, p.query = _M(fp_plan), _M(kl_plan), ex, agent, _Q()
     return p
 

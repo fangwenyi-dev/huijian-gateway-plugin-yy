@@ -61,6 +61,10 @@ _ACTION_PATTERNS: list[tuple[re.Pattern, str, Any]] = [
     (re.compile(r"^(调到|调为|调成|设为|改成|改|切换为|换为)\s*(除湿|除湿模式|抽湿)"), "SetDeviceMode", {"mode": "dry"}),
     (re.compile(r"^(调到|调为|调成|设为|改成|改|切换为|换为)\s*(送风|送风模式|通风)"), "SetDeviceMode", {"mode": "fan_only"}),
     (re.compile(r"^(调到|调为|调成|设为|改成|改|切换为|换为)\s*(自动|自动模式)"), "SetDeviceMode", {"mode": "auto"}),
+    # 体验批 E2E 补洞（2026-09-12）：开解锁令曾整体走兜底——确认环与 NLU 脱节。
+    # 必须排在通用「开」前，否则 "开锁" 被 TurnDeviceOn(name=锁) 吃掉（语义还反了）。
+    (re.compile(r"^(解锁|开锁|解开锁|打开锁)"), "HassUnlock", None),
+    (re.compile(r"^(上锁|锁上|落锁)"), "HassLock", None),
     (re.compile(r"^(打开|开启|开一下|开了|开)"), "TurnDeviceOn", None),
     (re.compile(r"^(关闭|关掉|关了|关一下|关)"), "TurnDeviceOff", None),
     (re.compile(r"^(open (?:the )?window)(?:\s+|$)", re.I), "ControlWindow", "open"),
@@ -149,6 +153,78 @@ class Plan:
     # ── klar 一级 NLU 专用（其余来源恒默认值，构造全兼容）──
     speech: str = ""                              # 引擎自带的中文播报（优先于话术层）
     extra_steps: list = field(default_factory=list)  # 多分句后续步骤 [{name,args}]
+
+
+# ── 礼貌/口语归一（体验批 P2-16）───────────────────────────────
+# 前缀迭代剥（"请帮我把…"剥完才见动作），尾缀剥语气词。只进 fast_path：
+# 查询族/LLM 档看原文，避免语义动词（"能不能开"类疑问）被误剥成命令。
+_POLITE_HEAD = re.compile(
+    r"^(?:请问|请|麻烦|帮我|帮忙|我想|我要|我要把|你能|你可以|能不能|可不可以|"
+    r"给我|替我|告诉我|说一下|报一下)[，,。!\s]*")
+_POLITE_TAIL = re.compile(
+    r"[，,\s]*(?:吧|呗|呢|啊|呀|哦|嘛|好吗|好么|可以吗|行吗|能不能|谢谢|多谢)[。！？!?\s]*$")
+
+
+def normalize_polite(text: str) -> str:
+    """"帮我把灯打开好吗" → "灯打开"。永不抛；每类最多剥三层防退化。"""
+    for _ in range(3):
+        new = _POLITE_HEAD.sub("", text, count=1).strip()
+        if new == text:
+            break
+        text = new
+    for _ in range(2):
+        new = _POLITE_TAIL.sub("", text, count=1).strip()
+        if new == text:
+            break
+        text = new
+    return text
+
+
+# ── 复合句切分（体验批 P2-12）───────────────────────────────────
+# 只认强连接词（"再"必须跟在标点后，防"再见/再来"误切）。2~3 段封顶，任一段
+# 独立匹配不中即整句回退单发级联（与 klar 多分句 all-or-nothing 同纪律）。
+_COMPOUND = re.compile(
+    r"\s*(?:然后(?:再|把)?|接着|之后|顺便(?:你)?|再帮我|并且|同时|[，,、]\s*再(?=[\u4e00-\u9fff]))\s*")
+
+
+def split_compound(text: str) -> list[str]:
+    """返回 []（非复合/超界/任一段过短）或 2~3 个分句。"""
+    if len(text) < 6:
+        return []
+    parts = [p.strip(" 。！？!?，,、") for p in _COMPOUND.split(text)]
+    parts = [p for p in parts if p]
+    if len(parts) < 2 or len(parts) > 3:
+        return []
+    if any(len(p) < 2 for p in parts):
+        return []
+    if parts == [text]:
+        return []
+    return parts
+
+
+# 指代词（体验批 P2-10）：目标位是代词 = 明示「沿用上一轮目标」，交由 pipeline
+# 上下文注入；本层视作空目标产出全屋形态（保守回退：无上下文可继承时行为同旧）。
+_PRONOUNS = frozenset({"它", "他们", "它们", "她们", "这个", "那个", "这块", "那块", "他", "她"})
+
+# 句首回指副词（"再亮一点"/"还是关掉"）：剥后置标记，目标继承交给 pipeline
+_ANAPHORA_HEAD = re.compile(r"^(?:还是|还要|再|又|继续)(?=[\u4e00-\u9fff])")
+# SOV 语序锁令："X开锁/X解锁/X上锁/X锁上" → 动作前置（X 为 2-8 字目标词）
+_LOCK_INV = re.compile(r"^(.{2,8}?)(开锁|解锁|上锁|锁上)(?:了|啦|咯)?$")
+
+
+def is_pronoun(text: str) -> bool:
+    return (text or "").strip().rstrip("。！!？?") in _PRONOUNS
+
+
+# "它/那个"[也都又还][动作][了吧呢]（t1 rest 常带全文动作词）：仍是代词目标，
+# 不是设备名。演示实锤形态："它也关了" 曾被吃成 name（2026-09-12 真件回归）。
+_PRON_ACT_TAIL = re.compile(
+    r"^(?:它|他|她|它们|他们|这个|那个|这块|那块)"
+    r"(?:也|都|又|还|就|全部?)*"
+    r"(?:打开来|打开|关掉|关闭|开了|关了|开一下|关一下|起来|停|掉|开|关|上|下)?"
+    r"(?:了吧|了|吧|呢|的|呀)*$")
+# 残句里的复合连接词残留（split_compound 未切/链被否时防单发错配）
+_COMPOUND_RESIDUE = re.compile(r"然后|接着|之后|顺便|并且|同时|再帮我")
 
 
 def _extract_text(raw: Any) -> str:
@@ -241,6 +317,21 @@ class FastPath:
             return None
         text = text.strip()
         text = re.sub(r"^[把将]\s*", "", text)   # 处置介词核心化："把灯打开"→"灯打开"
+        # 体验批 P2-16：礼貌语归一（迭代剥，可能再次暴露 把/将）
+        polite = normalize_polite(text)
+        polite = re.sub(r"^[把将]\s*", "", polite).strip()
+        if polite != text:
+            trace.append(f"礼貌→{polite}")
+            text = polite
+        # 体验批 P2-10：句首回指副词（"再亮一点"→"亮一点"；目标由上下文注入）
+        m_an = _ANAPHORA_HEAD.match(text)
+        if m_an:
+            stripped = text[m_an.end():].strip()
+            if len(stripped) >= 2:
+                trace.append(f"回指→{stripped}")
+                text = stripped
+        if not text or len(text.strip()) < 2:
+            return None
         trace.append(f"纠错→{text}")
         if _is_complex_query(text):
             trace.append("复杂查询守卫→交上层")
@@ -253,7 +344,20 @@ class FastPath:
                 return self._miss(trace)
             return await self._scene_plan(plan_src, text, trace)
 
-        await self.scenes.refresh()
+        # 体验批 E2E 补洞：SOV 语序锁令「大门开锁/把门锁上(门+锁上)」动作前置归一。
+        # 否定/疑问字（没不别谁哪）不参与——「还没上锁」是陈述不是命令。
+        m_lv = _LOCK_INV.match(text)
+        if m_lv and not re.search(r"[没不别谁哪怎]", m_lv.group(1)):
+            head = m_lv.group(1)
+            mapped = ("解锁" if m_lv.group(2) in ("开锁", "解锁") else "锁上") + head
+            trace.append(f"语序→{mapped}")
+            text = mapped
+
+        # 场景缓存：稳态后台刷新零等待；仅冷启动未加载过时同步兜一次（P0-2）
+        if self.scenes.needs_blocking():
+            await self.scenes.refresh()
+        else:
+            self.scenes.refresh_soon()
 
         matched_intent: Optional[str] = None
         extra_args: dict[str, Any] = {}
@@ -384,6 +488,17 @@ class FastPath:
         # 收编修复五（移植期新发现的原缺陷）：delta/语气残渣（"亮度调到60%"→"%"、
         # "亮度调暗一点" 去 "暗一点" 后→"亮度调"）不构成设备目标，归零为全屋调节。
         rest_text = (rest_text or "").strip()
+        # 体验批 P2-10：代词目标 → 空目标形态（pipeline._apply_context 注入上一轮
+        # 目标；无上下文时保守回落全屋，行为不劣于旧版把代词当设备名查必 miss）
+        # 复合代词形态："把它关掉" 归一后 rest="它关掉"——代词+动作尾巴，同判。
+        if rest_text and (is_pronoun(rest_text) or _PRON_ACT_TAIL.match(rest_text)):
+            trace.append(f"代词目标:{rest_text}→待上下文注入")
+            rest_text = ""
+        # 体验批 P2-12：链被否决后的复合残句（含"然后/接着"等）绝不猜单目标——
+        # 实测会把「打开客厅的灯，然后再关闭窗帘」错配成客厅窗帘。拒了交回上层。
+        if rest_text and _COMPOUND_RESIDUE.search(rest_text):
+            trace.append("复合残余→拒猜目标")
+            return None
         residue = re.sub(r"[调一些点把将了%％到亮暗度色温风量速为成设]", "", rest_text)
         if not residue.strip():
             rest_text = ""

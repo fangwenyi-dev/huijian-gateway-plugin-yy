@@ -276,6 +276,22 @@ class HAClient:
             logger.debug("[HA] config 读取失败: %s", e)
         return {}
 
+    async def rest_get(self, path: str, timeout: float = 6.0):
+        """通用带鉴权 GET（Web 场景页数据源；path 自带 /api 前缀，同 _url 纪律）。
+        一切失败折叠 None，永不抛。"""
+        if not self.ok or self._session is None:
+            return None
+        try:
+            async with self._session.get(
+                    self._url(path),
+                    timeout=aiohttp.ClientTimeout(total=timeout)) as r:
+                if r.status == 200:
+                    return await r.json(content_type=None)
+                logger.debug("[HA] GET %s → HTTP %s", path, r.status)
+        except Exception as e:
+            logger.debug("[HA] GET %s 失败: %s", path, e)
+        return None
+
     # ── 事件旁路（v4 §2 旁路：回合留痕）──────────────────────────
     async def fire_event(self, event_type: str, data: dict) -> None:
         if not self.ok or self._session is None:

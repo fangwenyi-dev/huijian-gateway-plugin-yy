@@ -47,6 +47,20 @@ class QueryZone:
         if re.search(r"(现在)?(几点了?|什么时间|几点钟|时间)", text) and not re.search(r"定时|预约", text):
             return await self._time_answer()
         area = self._find_area(text)
+        # 体验批 P2-14①：设备属性读数（"空调设定温度多少/灯现在多亮"）——
+        # 先于传感器规则：设备词+属性词是明确指向设备本身，不是房间传感器。
+        m = re.search(r"(空调|灯|风扇|加湿器|净化器|除湿机|热水器|冰箱)[的]?.*?"
+                      r"(设定温度|目标温度|当前温度|温度|亮度|色温|湿度|风量|风速|档位)", text)
+        if m and re.search(r"(多少|几|怎样|怎么样|如何|现在|是)", text):
+            ans = await self._attr_answer(area, m.group(1), m.group(2))
+            if ans:
+                return ans
+        # 体验批 P2-14②：状态聚合计数（"有多少灯开着/几个设备没关"）
+        if re.search(r"(多少|几个|几盏|几台|几只|哪些)[^吗]{0,6}(开着|亮着|没关|运行|工作|开着没)", text) \
+                or re.search(r"(开着|亮着|没关)的[^？?]{0,4}(有哪些|几个|多少)", text):
+            ans = await self._count_answer(area, text)
+            if ans:
+                return ans
         # 温度/湿度/照度
         m = re.search(r"(温度|湿度|照度|亮度)", text)
         if m and re.search(r"(多少|几|怎样|怎么样|如何)", text):
@@ -80,6 +94,73 @@ class QueryZone:
         except Exception:
             now = datetime.now()
         return f"现在是 {now.hour} 点 {now.minute} 分。"
+
+    _ATTR_KEYS = {   # 体验批 P2-14①：设备词 × 属性词 → attribute 取值链（多键尝试，HA 域差异）
+        ("空调", "设定温度"): ("temperature",), ("空调", "目标温度"): ("temperature",),
+        ("空调", "当前温度"): ("current_temperature",), ("空调", "温度"): ("temperature", "current_temperature"),
+        ("灯", "亮度"): ("brightness",), ("灯", "色温"): ("color_temp", "color_temperature"),
+        ("风扇", "风量"): ("percentage",), ("风扇", "风速"): ("percentage",), ("风扇", "档位"): ("percentage",),
+        ("加湿器", "湿度"): ("humidity",), ("加湿器", "档位"): ("fan_speed",),
+        ("净化器", "湿度"): ("aqi",), ("净化器", "档位"): ("fan_speed",),
+        ("除湿机", "湿度"): ("humidity",), ("热水器", "温度"): ("temperature", "current_operation"),
+        ("冰箱", "温度"): ("temperature",),
+    }
+
+    async def _attr_answer(self, area, dev_word: str, attr_word: str) -> Optional[str]:
+        domains = _DEVICE_WORDS.get(dev_word, ())
+        if not domains:
+            return None        # 词表外设备词不猜域（find_entities 空 domains=全量，必错）
+        ents = await self.ha.find_entities(area=area or "", domains=domains)
+        if not ents:
+            return None
+        keys = self._ATTR_KEYS.get((dev_word, attr_word)) or ()
+        ent = next((e for e in ents
+                    if any((e.get("attributes") or {}).get(k) is not None for k in keys)),
+                   None)
+        if ent is None:
+            return None
+        attrs = ent.get("attributes") or {}
+        val = next((attrs[k] for k in keys if attrs.get(k) is not None), None)
+        try:
+            v = float(val)
+        except (TypeError, ValueError):
+            return None
+        nm = attrs.get("friendly_name") or ""
+        prefix = f"{area}的" if area else ""
+        if attr_word in ("亮度",):
+            pct = int(round(v * 100 / 255)) if 0 <= v <= 255 else int(round(v))
+            return f"{prefix}{nm or dev_word}亮度约 {pct}%。"
+        if attr_word == "色温":
+            return f"{prefix}{nm or dev_word}色温 {int(v)}K。"
+        if attr_word in ("风量", "风速", "档位"):
+            pct = int(round(v)) if v <= 100 else int(round(v * 100 / 255))
+            return f"{prefix}{nm or dev_word}风量约 {pct}%。"
+        return f"{prefix}{nm or dev_word}{'设定' if '定' in attr_word else ''}{attr_word}是 {v:g}。"
+
+    async def _count_answer(self, area, text: str) -> Optional[str]:
+        """体验批 P2-14②：开着/没关 设备计数与点名（≤3 具名，多则只报数）。"""
+        m = re.search(r"(灯|空调|风扇|加湿器|净化器|窗帘|所有)?[^吗]{0,4}"
+                      r"(?:开着|亮着|没关|运行|工作)", text)
+        word = (m.group(1) if m else "") or ""
+        domains = _DEVICE_WORDS.get(word, ())
+        if word in ("所有", "") and not domains:
+            domains = ("light", "climate", "fan", "cover", "humidifier", "switch")
+        ents = await self.ha.find_entities(area=area or "", domains=domains or ())
+        on_words = {"on", "open", "opening", "heating", "cooling", "auto", "fan_only",
+                    "dry", "heat_cool", "eco", "playing", "paused", "heat", "preheat"}
+        on_ents = [e for e in ents if str(e.get("state", "")) in on_words]
+        prefix = f"{area}的" if area else ""
+        noun = {"灯": "盏灯", "空调": "台空调", "风扇": "台风扇", "窗帘": "幅窗帘",
+                "加湿器": "台加湿器", "净化器": "台净化器"}.get(word, "个设备")
+        if not domains or word == "所有" or word == "":
+            noun = "个设备"
+        if not on_ents:
+            return f"{prefix}{noun}都关着呢。"
+        names = [((e.get("attributes") or {}).get("friendly_name") or e.get("entity_id", ""))
+                 for e in on_ents]
+        if len(on_ents) <= 3:
+            return f"{prefix}开着{len(on_ents)}{noun}：" + "、".join(names) + "。"
+        return f"{prefix}开着{len(on_ents)}{noun}，比如{'、'.join(names[:2])}。"
 
     async def _sensor_answer(self, area: Optional[str], device_class: str, cn: str) -> Optional[str]:
         states = await self.ha.states()

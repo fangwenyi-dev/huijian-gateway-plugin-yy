@@ -1,5 +1,10 @@
 """TTS 引擎（默认本地 Kokoro-82M multi-lang，sid=45 小北；云可配回落本地）。
 
+体验批 P0-4：句级 opus 缓存。控制类回复高度模板化（"好的，X打开了"），
+按 (句, sid, speed) 缓存编码完成的裸 opus 帧——命中即首包归零、4C8G 卸载
+省电档下不再为同一句话反复烧 Kokoro。云档不缓存（外部服务输出不稳定）；
+模型换载/卸载即清空（缓存与当代模型同源）。
+
 定案链：v4.1 ②「本地默认+云可配自动回落」；音色 sid45 中文女声（用户授权选定）。
 运行形态（sherpa-onnx 1.13.7 API 实测钉桩）：
   OfflineTts(OfflineTtsConfig(model=OfflineTtsModelConfig(kokoro=OfflineTtsKokoroModelConfig(
@@ -13,6 +18,7 @@ import asyncio
 import logging
 import threading
 import time
+from collections import OrderedDict
 from typing import AsyncIterator, Optional
 
 import numpy as np
@@ -51,6 +57,10 @@ def split_sentences(text: str) -> list[str]:
     return out
 
 
+_CACHE_MAX_ITEMS = 256          # 播报句集收敛得快，256 句封顶
+_CACHE_MAX_BYTES = 4 << 20      # 4MB 硬闸（opus 32kbps×10s≈40KB/句，量级宽裕）
+
+
 class TtsEngine:
     def __init__(self, settings, model_store):
         self.settings = settings
@@ -60,6 +70,11 @@ class TtsEngine:
         self._busy = 0          # 在飞合成数（卸载避让；审查 F1）
         self.last_used = time.time()
         self.encoder_rate = const.SAMPLE_RATE
+        # P0-4 (text, sid, speed) → (packets, bytes) LRU；仅本地档，asyncio 单线程
+        # 内读写（编码在 executor，但回主循环后才入表），无需锁。
+        self._cache: "OrderedDict[tuple, tuple]" = OrderedDict()
+        self._cache_bytes = 0
+        self.cache_hits = 0     # 观测计数（状态页/排障）
 
     # ── 生命周期 ────────────────────────────────────────────────
     def ready(self) -> bool:
@@ -97,6 +112,7 @@ class TtsEngine:
                     cfg.rule_fsts = ",".join(str(d / f) for f in fsts)
                 tts = so.OfflineTts(cfg)
                 self._tts = tts
+                self._cache.clear(); self._cache_bytes = 0   # 换代模型：旧音频作废
                 self.last_used = time.time()
                 logger.warning("[TTS] Kokoro multi-lang 已加载（%d 音色），sid=%s",
                                tts.num_speakers, self.settings.get("tts.sid", 45))
@@ -112,6 +128,8 @@ class TtsEngine:
                 logger.info("[TTS] 合成进行中，本轮跳过卸载")
                 return False
             self._tts = None
+            # 缓存刻意不清：省电档卸载后，高频模板句仍可秒回旧帧（同代模型
+            # 重载输出逐比特一致；换代路径 ensure_loaded 已负责清空）。
             logger.warning("[TTS] 模型已卸载（省电档）")
             return True
 
@@ -128,19 +146,49 @@ class TtsEngine:
             except Exception as e:
                 logger.warning("[TTS] 云合成失败(%s) → 回落本地", e)
         loop = asyncio.get_running_loop()
-        if not self.ready():
-            if not await loop.run_in_executor(None, self.ensure_loaded):
-                return
         sid = int(self.settings.get("tts.sid", 45))
         speed = float(self.settings.get("tts.speed", 1.0))
+        load_checked = self.ready()
         for sent in split_sentences(text):
+            key = (sent, sid, speed)
+            hit = self._cache.get(key)
+            if hit is not None:
+                self._cache.move_to_end(key)
+                self.cache_hits += 1
+                self.last_used = time.time()
+                for pkt in hit[0]:
+                    yield pkt
+                continue
+            # 首错 miss 才拉模型：全命中回合在省电档卸载态也能完整播出
+            if not load_checked:
+                if not await loop.run_in_executor(None, self.ensure_loaded):
+                    return
+                load_checked = True
             pcm16 = await loop.run_in_executor(None, self._synth, sent, sid, speed)
             if not pcm16:
                 continue
             # F5：整句 opus 编码是 CPU 活，出事件循环
-            for pkt in await loop.run_in_executor(None, self._encode, pcm16):
+            packets = await loop.run_in_executor(None, self._encode, pcm16)
+            if packets:
+                self._cache_put(key, packets)
+            for pkt in packets:
                 yield pkt
         self.last_used = time.time()
+
+    def _cache_put(self, key: tuple, packets: list) -> None:
+        if not self.settings.get("tts.cache_enabled", True):
+            return
+        size = sum(len(p) for p in packets)
+        if size > _CACHE_MAX_BYTES:
+            return
+        old = self._cache.pop(key, None)
+        if old:
+            self._cache_bytes -= old[1]
+        self._cache[key] = (packets, size)
+        self._cache_bytes += size
+        while len(self._cache) > _CACHE_MAX_ITEMS or self._cache_bytes > _CACHE_MAX_BYTES:
+            _k, (_pkt, b) = self._cache.popitem(last=False)
+            self._cache_bytes -= b
 
     @staticmethod
     def _encode(pcm16: bytes) -> list:
