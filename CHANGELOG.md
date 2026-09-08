@@ -3,6 +3,13 @@
 所有版本变更记录在此文件中。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [1.0.14] - 2026-09-08
+
+### 修复
+
+- **配选实体 translation placeholders 告警**（2026-09-08 实机配对后 HA 日志钉出）：`EsphomeAssistPipelineSelect` 携带 `{index}` 模板名却无对应占位符，每次条目加载刷 `entity.py:706` 告警「translation placeholders '{}' do not match the name 'Assistant{index}'」。根因在上游 core#152245：`AssistPipelineSelect` 的 `pipeline`/`pipeline_n` 键均不传 `translation_placeholders`，本仓 translations 沿用带 `{index}` 模板名 → 台架 2026.9.1（上游 PR#165676 未及版本）触发。子类 `__init__` 照抄同文件 wake_word 实体形态补齐（index=0→`""`、index≥1→`str(index+1)`，与 core 键语义一致）；上游修复发布后本补强幂等无害。仅消噪，不改用户可见名称。
+- 三端契约定稿配套：本次实机验证扫码配对链路——固件 v2.1.8 `persistNoisePskSync` 配网模式 NVS 直写成功、HA 条目建成握手一次通过；CMD20 槽5/6 三端冻结恒空、`mcp_endpoint` 无 `?token=` 垃圾值；集成侧 `_clean_mcp_endpoint` 归一逻辑经检验对冻结空值天然免疫（存量未刷机设备亦被覆盖）。集成 v1.0.13→v1.0.14 仅上项消噪，三端协议零变更。
+
 ## [1.0.13] - 2026-09-08
 
 ### 修复（上游模型资产重打包批）

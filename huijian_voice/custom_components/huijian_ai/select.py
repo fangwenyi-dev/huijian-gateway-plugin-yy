@@ -92,6 +92,18 @@ class EsphomeAssistPipelineSelect(EsphomeAssistEntity, AssistPipelineSelect):
         AssistPipelineSelect.__init__(
             self, hass, DOMAIN, self._device_info.mac_address, index=index
         )
+        # core#152245 同款缺陷（台架 2026.9.1 实证）：core AssistPipelineSelect 的
+        # pipeline/pipeline_n 键均不传 translation_placeholders，而本仓 translations
+        # 沿用带 {index} 模板的名字 → entity.py:706 每次条目加载刷
+        # 「translation placeholders '{}' do not match」告警。补齐逻辑照抄 core
+        # wake_word 实体形态（同文件下方）：index=0 → "pipeline" 模板 "Assistant{index}"
+        # 填 ""（裸 "Assistant"）；index≥1 → core 已换 "pipeline_n" 模板
+        # "Assistant {index}"（自带空格）填 str(index+1)，键错位与 core 一致。
+        # 上游 PR#165676 修复发布后本块幂等无害。
+        if index:
+            self._attr_translation_placeholders = {"index": str(index + 1)}
+        else:
+            self._attr_translation_placeholders = {"index": ""}
 
 
 class EsphomeVadSensitivitySelect(EsphomeAssistEntity, VadSensitivitySelect):
