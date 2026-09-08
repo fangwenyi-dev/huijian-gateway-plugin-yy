@@ -3,6 +3,17 @@
 所有版本变更记录在此文件中。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [1.0.18] - 2026-09-08
+
+### 修复
+
+- **加载项 ASR 尾词丢失（台架仿真实锤）**：流式 Paraformer 收流前无 tail padding，encoder 以 600ms 整块消费且带 look-ahead，不足整块的语音尾巴被静默丢弃——实测「打开办公室射灯」→「打开办公室射」、「打开射灯」→「打开」、长句丢「好吗」。现 `input_finished` 前补 1s 静音（sherpa-onnx 官方 demo 同款做法）。同款模型（streaming-paraformer-bilingual-zh-en int8）+ 出货源码函数本地实证：修复前 3 样本全部丢尾，修复后全部完整识别。
+- **集成 config_flow `async_abort` 覆写签名错误（台架仿真实锤）**：旧覆写是无参协程版，而 core 的 `async_abort` 是同步 keyword-only 且必带 reason——任何带 reason 的 abort（如 assist 引擎条目更新分支 `async_update_reload_and_abort`、`no_setup_data`）都会 TypeError 并吞掉真实错误。现对齐 core 签名，清理逻辑（cancel_wait_task + clean_setup）保持不变。
+
+### 测试
+
+真实栈回归：pytest 261（含管道接线/abort 签名/ASR tail-padding 三新钉桩）；模拟 ESP 端到端（in-process 真 HA 2026.8.3 + 真 1.0.17 集成 + 台架真 TTS/STT/LLM 通道，Tailscale 隧道）——条目装配、管道自动接线、台架合成语音→台架识别→意图真执行（办公室射灯实体真开真关）全链路判绿；ASR 修复以同款模型 + 出货函数源码 A/B 实证。
+
 ## [1.0.17] - 2026-09-08
 
 ### 新增

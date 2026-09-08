@@ -116,6 +116,12 @@ class AsrEngine:
             stream = rec.create_stream()
             for i in range(0, len(samples), _CHUNK):
                 stream.accept_waveform(const.SAMPLE_RATE, samples[i:i + _CHUNK])
+            # 尾部补 1s 静音（sherpa-onnx 流式 demo 同款 tail padding）：流式
+            # Paraformer encoder 以 600ms 整块消费且带 look-ahead，input_finished
+            # 时不足整块的语音尾巴直接被丢——台架仿真 2026-09-08 实测
+            # 「打开办公室射灯」→「打开办公室射」、「打开射灯」→「打开」。
+            # 补静音让末块凑整 + look-ahead 喂足，再收流。
+            stream.accept_waveform(const.SAMPLE_RATE, [0.0] * const.SAMPLE_RATE)
             stream.input_finished()
             while rec.is_ready(stream):
                 rec.decode_stream(stream)

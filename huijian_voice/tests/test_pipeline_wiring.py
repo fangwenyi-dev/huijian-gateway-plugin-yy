@@ -32,3 +32,22 @@ def test_pipeline_takeover_guarded():
     body = init.split("def _async_ensure_huijian_pipeline", 1)[1]
     assert "not cur.stt_engine" in body, "preferred 接管必须以当前默认缺 STT 为条件"
     assert "except Exception" in body, "接线必须 fail-open"
+
+
+def test_config_flow_abort_signature_matches_core():
+    """v1.0.18：core async_abort 是同步 keyword-only(reason)，本集成覆写必须
+    同构——旧 `async def async_abort(self)` 让更新分支 abort 必 TypeError
+    并吞真错（台架仿真实发）。"""
+    cf = _src("config_flow.py")
+    head = cf.split("def async_abort", 1)[1].split("\n", 1)[0]
+    assert "*, reason" in head, head
+    assert "async def async_abort" not in cf, "abort 覆写不得是协程"
+
+
+def test_asr_tail_padding_present():
+    """v1.0.18：流式 Paraformer 收流前必须尾补静音（台架仿真实锤丢尾词）。"""
+    asr = (Path(__file__).resolve().parents[1] / "core" / "asr.py").read_text(
+        encoding="utf-8")
+    body = asr.split("def _local_transcribe", 1)[1]
+    feed = body.index("stream.input_finished()")
+    assert "0.0] * const.SAMPLE_RATE" in body[:feed], "input_finished 前须补 ≥1s 静音"

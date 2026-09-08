@@ -216,10 +216,16 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
             self._wait_task.cancel()
             self._wait_task = None
 
-    async def async_abort(self) -> None:
+    def async_abort(self, *, reason: str = "user", description_placeholders=None):
+        # v1.0.18：对齐 core 签名（同步、keyword-only、必带 reason）。
+        # 旧覆写是无参协程版——任何带 reason 的 abort（如更新分支的
+        # async_update_reload_and_abort、no_setup_data）都会 TypeError 并
+        # 吞掉真实错误（台架仿真实发取证 2026-09-08）。
         self._cancel_wait_task()
         self.clean_setup()
-        return await super().async_abort()
+        return super().async_abort(
+            reason=reason, description_placeholders=description_placeholders
+        )
 
     async def _async_step_user_base(
         self, user_input: dict[str, Any] | None = None, error: str | None = None
