@@ -3,6 +3,12 @@
 所有版本变更记录在此文件中。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [1.0.17] - 2026-09-08
+
+### 新增
+
+- **语音管道自动接线（剥洋葱最后一层，台架实发链）**：此前集成只自动创建 STT/TTS/对话**引擎条目**，core assist_pipeline 的管道从未接线——引擎齐全而管道空壳时，卫星按键仍 `validation-error: the pipeline does not support speech-to-text`（v1.0.16 闩锁自愈后此缺口显形）。现 assist 引擎条目每次装配后自动确保「慧尖语音」管道存在并绑定三引擎（stt.huijian_asr / tts.huijian_speech / conversation.huijian_agent）；默认（preferred）管道仅在"不存在或没有 STT"时接管给慧尖管道——用户配好的默认管道绝不抢占，可在 设置→语音助手→管道 随时改回。真实栈实证：in-process 真 HA 2026.8.3 + 真 assist_pipeline 组件 + 真 config flow 全链路 E2E 九项断言全绿（建条目/三实体注册/管道创建/引擎绑定/默认接管/reload 幂等/尊重用户默认）。
+
 ## [1.0.16] - 2026-09-08
 
 ### 修复

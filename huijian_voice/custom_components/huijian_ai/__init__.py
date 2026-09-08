@@ -12,6 +12,7 @@ from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT, Platform
 from homeassistant.const import __version__ as ha_version
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.issue_registry import async_delete_issue
 from homeassistant.helpers.network import get_url
 from homeassistant.helpers.typing import ConfigType
@@ -113,6 +114,88 @@ async def _async_auto_ensure_assist(hass: HomeAssistant, entry: ESPHomeConfigEnt
         LOGGER.exception("assist 语音引擎自动补建失败（设备装配不受影响）")
 
 
+# 引擎实体在 stt.py/tts.py/conversation.py 中固定 entity_id（显式赋值）——
+# 管道接线直接引用这些字面量，与三平台保持同步。
+_HUIJIAN_STT_ENTITY = "stt.huijian_asr"
+_HUIJIAN_TTS_ENTITY = "tts.huijian_speech"
+_HUIJIAN_AGENT_ENTITY = "conversation.huijian_agent"
+HUIJIAN_PIPELINE_NAME = "慧尖语音"
+
+
+async def _async_ensure_huijian_pipeline(hass: HomeAssistant) -> None:
+    """assist 引擎条目装配后，把引擎三件套接成 core 语音管道（v1.0.17）。
+
+    台架实发链（2026-09-08 剥洋葱）：引擎条目齐全，但 core assist_pipeline
+    的默认管道 Speech-to-text 为空——卫星按键仍 validation-error
+    （"the pipeline does not support speech-to-text"）。"有引擎没管道"是
+    从未接线的产品缺口：安装向导与自动补建都止步于引擎条目。
+
+    策略（幂等、尊重用户）：
+      1. 名称「慧尖语音」的管道不存在则建（stt/tts 用本集成固定实体）；
+      2. 建/更 conversation_engine 指向 huijian_agent（对话实体存在时）；
+      3. 仅当当前 preferred（默认）管道不存在或没有 STT 时，才把 preferred
+         接管给慧尖管道——用户自己配好的默认管道绝不抢占。
+    任何失败只记日志（fail-open），不阻塞条目装配。
+    """
+    try:
+        from homeassistant.components.assist_pipeline import pipeline as ap
+
+        pipeline_data = hass.data[ap.KEY_ASSIST_PIPELINE]
+        col = pipeline_data.pipeline_store
+        items = col.async_items() or []
+
+        existing = next(
+            (p for p in items if p.name == HUIJIAN_PIPELINE_NAME), None
+        )
+        if existing is None:
+            pipeline = await ap.async_create_default_pipeline(
+                hass,
+                stt_engine_id=_HUIJIAN_STT_ENTITY,
+                tts_engine_id=_HUIJIAN_TTS_ENTITY,
+                pipeline_name=HUIJIAN_PIPELINE_NAME,
+            )
+            if pipeline is None:
+                LOGGER.warning(
+                    "慧尖语音管道未创建：STT/TTS 引擎未就绪（%s/%s）——"
+                    "确认加载项在线并重启 HA 重试",
+                    _HUIJIAN_STT_ENTITY,
+                    _HUIJIAN_TTS_ENTITY,
+                )
+                return
+            mine = pipeline
+        else:
+            mine = existing
+
+        updates: dict = {}
+        if (
+            mine.conversation_engine != _HUIJIAN_AGENT_ENTITY
+            and er.async_get(hass).async_get(_HUIJIAN_AGENT_ENTITY) is not None
+        ):
+            updates["conversation_engine"] = _HUIJIAN_AGENT_ENTITY
+        if mine.stt_engine != _HUIJIAN_STT_ENTITY:
+            updates["stt_engine"] = _HUIJIAN_STT_ENTITY
+        if mine.tts_engine != _HUIJIAN_TTS_ENTITY:
+            updates["tts_engine"] = _HUIJIAN_TTS_ENTITY
+        if updates:
+            await ap.async_update_pipeline(hass, mine, **updates)
+
+        # preferred（默认管道）接管：只救空壳/缺失，不抢用户已配好的默认
+        preferred_id = col.async_get_preferred_item()
+        if preferred_id != mine.id:
+            cur = next(
+                (p for p in col.async_items() if p.id == preferred_id), None
+            )
+            if cur is None or not cur.stt_engine:
+                col.async_set_preferred_item(mine.id)
+                LOGGER.info(
+                    "默认语音管道无 STT，已接管为「%s」（可随时在"
+                    " 设置→语音助手→管道 改回自己的默认）",
+                    HUIJIAN_PIPELINE_NAME,
+                )
+    except Exception:  # noqa: BLE001 —— fail-open：管道装配不影响条目 setup
+        LOGGER.exception("慧尖语音管道自动装配失败（引擎条目装配不受影响）")
+
+
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the esphome component."""
     ffmpeg_proxy.async_setup(hass)
@@ -145,6 +228,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> b
             PLATFORMS.add(Platform.TTS)
         await mcp_transport.async_setup_entry(hass, entry)
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        # v1.0.17：引擎实体就位后接线 core 语音管道（fail-open，见函数注释）。
+        # forward 已 await 平台装配，固定 entity_id 此刻在注册表可见。
+        await _async_ensure_huijian_pipeline(hass)
         return True
 
     host: str = entry.data[CONF_HOST]
