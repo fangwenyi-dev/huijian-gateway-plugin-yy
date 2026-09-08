@@ -366,6 +366,18 @@ class EsphomeAssistSatellite(
                 }
         elif event_type == VoiceAssistantEventType.VOICE_ASSISTANT_ERROR:
             assert event.data is not None
+            if event.data.get("code") == "validation-error" and not any(
+                e.data.get("config_type") == "assist"
+                for e in self.hass.config_entries.async_entries(DOMAIN)
+            ):
+                # 台架实发（2026-09-08）：assist 引擎条目被用户删除后按键，pipeline
+                # validate 抛 validation-error。定案不静默补回被删条目（见
+                # _AUTO_ASSIST_DONE 注释）——但 HA 日志必须给出修复指引，
+                # 否则两端各剩一条无上下文的告警，排障无从下手。
+                _LOGGER.warning(
+                    "慧尖语音会话 pipeline 校验失败：域内无 assist 引擎条目。"
+                    "修复：重启 HA 由设备条目自动补建，或在 设置→语音助手 手动添加"
+                )
             data_to_send = {
                 "code": event.data["code"],
                 "message": event.data["message"],

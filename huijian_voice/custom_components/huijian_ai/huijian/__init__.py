@@ -30,7 +30,20 @@ async def get_haid(hass):
 def get_entry_data(hass, entry, field=None, set_default=None, pop=False):
     config_type = entry.data.get("config_type")
     if config_type == "assist":
-        data = entry.runtime_data
+        # HA core 在 unload 成功后执行 object.__delattr__(entry, "runtime_data")，
+        # 且 setup 失败的条目从未 set 过该属性（类级 annotation 不提供缺省值）；
+        # 而 remove 回调在 unload 之后运行——裸访问在删除 assist 条目时必炸
+        # AttributeError（2026-09-08 台架实发 "Error calling entry remove
+        # callback"）。数据缺席即视为空：读路径返回 None；写路径（仅 setup 期）
+        # 永远发生在 runtime_data 构建之后，不受此守卫影响。
+        data = getattr(entry, "runtime_data", None)
+        if data is None:
+            # 缺席语义与在场空 dict 对齐：field 读→None、set_default→默认值、
+            # 无 field→空视图（写不落盘——数据容器已不存在，本就无法持久）。
+            tmp: dict = {}
+            if field and set_default is not None:
+                return tmp.setdefault(field, set_default)
+            return None if field else {}
     else:
         domain_data = hass.data.setdefault(DOMAIN, {})
         data = domain_data.setdefault(entry.entry_id, {})

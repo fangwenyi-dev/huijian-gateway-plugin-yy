@@ -204,7 +204,11 @@ async def async_reload_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry):
 async def async_unload_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> bool:
     """Unload an esphome config entry."""
     this_data = get_entry_data(hass, entry)
-    for k in ["llm_transport", "stt_transport", "tts_transport"]:
+    # mcp_transport 一并在此关闭：core 在 unload 成功后即删除 assist 的
+    # runtime_data，remove 回调再取已无对象（close 不可达）。unload 是唯一
+    # 数据仍存活的钩子；device 条目走 hass.data，async_remove_entry 内 pop
+    # 自身保证 remove 回调二次调用为 no-op，不会双关。
+    for k in ["llm_transport", "stt_transport", "tts_transport", "mcp_transport"]:
         if transport := this_data.get(k):
             await transport.async_remove_entry()
 

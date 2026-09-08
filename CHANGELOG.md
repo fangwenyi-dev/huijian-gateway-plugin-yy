@@ -3,6 +3,24 @@
 所有版本变更记录在此文件中。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [1.0.15] - 2026-09-08
+
+### 修复
+
+- **删除 assist 引擎条目必炸 remove 回调**（2026-09-08 台架实发 `AttributeError: 'ConfigEntry' object has no attribute 'runtime_data'`）：HA core 的删除流程是 unload（成功后 `object.__delattr__(entry, "runtime_data")`）→ `async_remove_entry`，本 fork `get_entry_data` 的 assist 分支与 `diagnostics` 均裸访问该属性——setup 失败或 unload 后的条目必抛。三处收口：`get_entry_data` assist 分支 `getattr` 缺席守卫（读语义与空 dict 对齐，写路径仅存在于 setup 期不受影响）、`diagnostics` 未加载条目降级返回、回归测试 `tests/test_runtime_data_guards.py`（stub 真 import 复现最小场景 + 源码防回退钉桩）。
+- **mcp_transport 清理不可达 → 关闭时点移到 unload**：assist 的 runtime_data 在 remove 回调时已被 core 删除，`async_remove_entry` 里再取 transport 永远拿不到（配置了 MCP 的场景 WS 泄漏跨 reload）。`async_unload_entry` 关闭列表并入 `mcp_transport`（transport 的 `async_remove_entry` 自带 pop，remove 回调二次触发为 no-op，无双重关闭）。
+- **validation-error 两端都看不见原因**（同次台架实发：删引擎条目后按唤醒键，设备只有空文案 `code=validation-error error=`，HA 侧零日志）：卫星 `on_pipeline_event` 对 `validation-error` 且域内无 assist 条目时输出修复指引 WARNING（按既有定案不静默补回被用户删除的条目，只保证可诊断）。配套固件 v2.1.10：ERROR 事件载荷同时接受 `error`/`message` 键名（core 实际发 `message`，此前真实文案被吞成空串）。
+
+### 配套（固件仓 0513gujian v2.1.10）
+
+- **按钮/唤醒 0ms 假超时根修**：`voice_assistant.loop()` 循环顶 `const now` 早于 wake 块内 `set_state(START_PIPELINE)` 刷新的 `state_since_ms_`，uint32 相减下溢成巨值 → 进 switch 首帧即判超时自拆会话（台架日志 send 与 "did not answer" 同毫秒实锤；HA 的 port=0 Response 仅 20ms 后到达）。wake 块后刷新 `now` 基准。
+- ERROR 事件 `message` 键名解析（见上条）。
+
+### 排障
+
+- 商店更新竞态窗口入档：`main` 推送即商店可见新版本，而镜像 ~15 分钟后才经 CI（e2e→manifest→push-acr）到 ACR；窗口内点「更新」报 `unknown error with app ... Check Supervisor logs`。恢复 = 稍后重试；发布方自检用 `scripts/verify_release.py`（ACR/ghcr 双源 manifest+blob 探活）。根治方案（tag 触发发版、main 殿后）见 DOCS 排障节，待整链实发验证后实施。
+- 巡检发现 ACR 无 tag 管理新政实发：v1.0.11 镜像当日 CI 全绿推送、数小时后 404（仅最近两版+latest 存活）；正常升级不受影响（按目标 tag 精确拉），回滚需从 ghcr 灾备源回推。
+
 ## [1.0.14] - 2026-09-08
 
 ### 修复

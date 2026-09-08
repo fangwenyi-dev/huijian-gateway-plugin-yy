@@ -32,7 +32,12 @@ async def async_get_config_entry_diagnostics(
 
     diag["config"] = config_entry.as_dict()
 
-    entry_data = config_entry.runtime_data
+    # 未加载/setup 失败的条目没有 runtime_data（core 在 unload 成功后会删除
+    # 该属性；类级 annotation 不保证存在）——下载诊断信息不该炸日志。
+    entry_data = getattr(config_entry, "runtime_data", None)
+    if entry_data is None:
+        diag["note"] = "entry not loaded; runtime data unavailable"
+        return diag
     device_info = entry_data.device_info
     device_name: str | None = (
         device_info.name if device_info else config_entry.data.get(CONF_DEVICE_NAME)

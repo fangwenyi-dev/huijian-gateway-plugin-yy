@@ -106,6 +106,17 @@ OpenAI 兼容端点：
   ③ 灾备换源：把仓库文件中 `huijian_voice/config.yaml` 的 image 整行临时改为
   `image: ghcr.io/fangwenyi-dev/{arch}-huijian-voice`（同镜像官方源，
   需你的网络可达 GitHub Registry），保存后检查更新再安装。
+- **刚出新版后点「更新」报 `An unknown error occurred with app … Check
+  Supervisor logs`**：新版本号进入商店 git 后，镜像还要 ~15 分钟才经 CI
+  （构建→e2e→推送 ACR）出厂；点太快 Supervisor 拉到不存在的镜像 tag，
+  就报这个笼统错误。**等十几分钟再点一次「更新」即可**，不是加载项故障。
+  发布方自检镜像是否已就位可跑仓库 `scripts/verify_release.py`
+  （ACR/ghcr 双源 manifest+blob 探活，退出码 0 = GO）。
+- **按唤醒键无反应、设备日志 `HA did not answer` 或 `code=validation-error`**：
+  ① 先确认「设置→语音助手」里慧尖 Assist 管道存在（引擎条目被手动删除后
+  卫星会校验失败，HA 日志有对应指引；重启 HA 可自动补建）；
+  ② 固件需 ≥ v2.1.10（v2.1.9 及以前存在按钮会话 0ms 假超时缺陷，
+  现象即"发了请求立刻自己拆会话"）。
 - **装好后设备连不上**：确认设备与 HA 主机同网段（本加载项**纯局域网**，
   不提供公网通道）；管理页「配对」区复制带 token 的完整端点给设备。
 - **首次说话延迟高**：首启要下载模型（约 450MB，管理页「模型」区看进度）；
