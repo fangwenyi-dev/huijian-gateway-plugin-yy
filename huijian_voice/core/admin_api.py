@@ -116,10 +116,12 @@ async def _nlu_test(request):
     dry = await ctx.pipeline.dry_run(text)
     executed = None
     if body.get("execute"):    # 显式勾选「真实执行」才走执行（调试面板默认关）
-        plan = await ctx.pipeline.fast_path.match(text)
-        if plan:
-            ok, speech = await ctx.pipeline.executor.run(plan)
-            executed = {"ok": ok, "speech": speech}
+        # v1.0.9：必须与真实流量同一条 _cascade 全链（三层裁决+互为降级+LLM
+        # 次序）。旧版在这里只跑 fast_path.match——面板显示裁决为 klar、实际
+        # 执行的却是 t0 计划，两条通道各挂各的，调试结论全是错的。
+        r = await ctx.pipeline._cascade(text)
+        executed = {"ok": r.ok, "speech": r.text,
+                    "source": r.source, "trace": r.trace}
     return web.json_response({"input": text, "cascade": dry, "executed": executed,
                               "textcnn": {"available": bool(ctx.textcnn and ctx.textcnn.available)}})
 

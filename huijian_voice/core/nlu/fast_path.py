@@ -404,7 +404,21 @@ class FastPath:
                         args={"temperature": _to_int(extra["delta"]), "area": ""},
                         source=source, utterance=text, trace=trace + ["温度改道 ClimateSetTemperature"])
 
+        _was_on = intent == "TurnDeviceOn"
         area, name, score = T.parse_target(rest_text, action_match=_any_action_match)
+        # 窗型词落进设备名 → 按钮按压语义，不是开关设备（实机 2026-09-08：
+        # 「打开 办公室平开窗」被错产成 TurnDeviceOn，集成按开关找窗必 miss）。
+        if intent in ("TurnDeviceOn", "TurnDeviceOff") and name:
+            wt = _window_type(name)
+            if not wt and _window_type(rest_text):
+                # parse_target 把窗型词切碎（「推拉门」的推/拉被当残留动词
+                # → name 只剩「门」）；rest 尾部找回完整窗名顶替。
+                name = wt = _window_type(rest_text)
+            if wt:
+                trace.append(f"窗型纠正:{name}→ControlWindow")
+                intent = "ControlWindow"
+                extra = {**extra, "action": extra.get("action") or
+                         ("open" if _was_on else "close")}
         if name is None:
             # 全局类："开灯/关灯"（rest 为空但设备词在原文里）
             if intent in ("TurnDeviceOn", "TurnDeviceOff") and rest_text.strip():
@@ -440,6 +454,21 @@ class FastPath:
             trace.append(f"miss:{why}")
             logger.debug("[T0/T1] %s | %s", why, " ← ".join(trace))
         return None
+
+
+# 12 窗型 + 泛称「窗户」（与 custom_components/huijian_ai WINDOW_ACTION_MAPPING 对齐，
+# 长词在前防短词截胡）；窗帘/纱窗=标准 cover，不在此表。
+_WINDOW_TYPES = ("内开内倒窗", "外装平开窗", "单内倒窗", "平推窗", "平开窗",
+                 "推拉窗", "内开窗", "外开窗", "推拉门", "智能窗", "天窗",
+                 "飘窗", "窗户")
+
+
+def _window_type(name: str) -> Optional[str]:
+    n = str(name or "")
+    for w in _WINDOW_TYPES:
+        if w in n:
+            return w
+    return None
 
 
 def _any_action_match(rest: str) -> bool:

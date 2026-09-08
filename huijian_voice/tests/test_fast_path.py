@@ -64,6 +64,9 @@ MATRIX = {
     "观影模式": ("HassTriggerVoiceScene", None),
     # 英文
     "turn on the living room light": ("TurnDeviceOn", None),
+    # 窗型词落在设备名（2026-09-08 实机：曾被错产成 Turn*）
+    "打开 办公室平开窗": ("ControlWindow", {"area": "办公室"}),
+    "关闭卧室推拉门": ("ControlWindow", {"area": "卧室"}),
 }
 
 GUARD_NONE = [
@@ -84,6 +87,20 @@ def test_matrix(fp, text, expect):
     assert plan.intent == intent, (text, plan.intent, plan.trace)
     if area_must:
         assert area_must.items() <= plan.args["target"][0].items(), (text, plan.args)
+
+
+def test_window_type_device_name_rewrites(fp):
+    plan = asyncio.run(fp.match("打开 办公室平开窗"))
+    assert plan.intent == "ControlWindow" and plan.args["action"] == "open"
+    assert plan.args["target"][0]["devices"][0]["name"] == "平开窗"
+    assert any("窗型纠正" in t for t in plan.trace), plan.trace
+    off = asyncio.run(fp.match("关闭办公室推拉窗"))
+    assert off.intent == "ControlWindow" and off.args["action"] == "close"
+
+
+def test_curtain_stays_turn_device(fp):
+    plan = asyncio.run(fp.match("关闭客厅窗帘"))
+    assert plan is not None and plan.intent == "TurnDeviceOff"
 
 
 @pytest.mark.parametrize("text", GUARD_NONE)

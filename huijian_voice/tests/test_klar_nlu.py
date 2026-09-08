@@ -521,3 +521,32 @@ def test_non_klar_source_never_direct():
 def test_call_service_method_present():
     hc = _text("core/ha_client.py")
     assert "async def call_service" in hc and "/api/services/" in hc
+
+
+# ── ⑦ 失败话术归属（2026-09-08 实机误报：Supervisor 5xx 被播成「集成没生效」）─
+class Proxy500HA(SpyHA):
+    async def call_service(self, domain, service, data, timeout=10.0):
+        return {"success": False, "message": "HA 内部错误(500)", "raw": None}
+
+    async def handle_intent(self, name, data):
+        return {"success": False, "message": "HA 内部错误(500)", "raw": None}
+
+
+def test_klar_channel_never_blames_integration():
+    ok, reply = arun(Executor(Proxy500HA()).run(_klar_plan(
+        "HassTurnOn", {"entity_id": "light.ban_gong_shi_she_deng"})))
+    assert not ok
+    assert "集成" not in reply, reply
+    assert "没有走通" in reply
+
+
+def test_intent_channel_keeps_integration_speech():
+    ok, reply = arun(Executor(Proxy500HA()).run(
+        Plan(intent="TurnDeviceOn", args={}, source="t0")))
+    assert not ok and "集成还没生效" in reply
+
+
+def test_panel_execute_runs_full_cascade():
+    aa = _text("core/admin_api.py")
+    assert "ctx.pipeline._cascade(text)" in aa
+    assert "plan = await ctx.pipeline.fast_path.match(text)" not in aa

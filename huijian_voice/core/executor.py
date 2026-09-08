@@ -35,10 +35,16 @@ _EN_ERR_MAP = [
 ]
 
 
-def zh_error(raw: str) -> str:
+def zh_error(raw: str, klar: bool = False) -> str:
+    """英文错误 → 中文播报。klar=True（引擎直调/内置意图通道）时，禁止把
+    失败归因到「慧尖集成没生效」——该通道与集成无关，2026-09-08 实机误报：
+    Supervisor 代理 5xx 被播成了集成话术，把用户引去装集成。"""
     low = (raw or "").lower()
     for key, zh in _EN_ERR_MAP:
         if key in low:
+            if klar and "集成" in zh:
+                return ("抱歉，和 Home Assistant 的连接没有走通，这次没有执行。"
+                        "请检查 HA 核心是否正常运行、加载项 API 地址配置是否正确")
             return f"抱歉，{zh}"
     return f"抱歉，这一步没有执行成功（{raw[:30]}），可以换个说法再试"
 
@@ -62,7 +68,8 @@ class Executor:
             else:
                 result = await self.ha.handle_intent(name, args)
             if not result.get("success"):
-                reply = zh_error(str(result.get("error") or result.get("message") or ""))
+                reply = zh_error(str(result.get("error") or result.get("message") or ""),
+                               klar=plan.source == "klar")
                 logger.info("[执行] %s %s → 失败 | %s", name, args, reply)
                 return False, reply
             results.append(result)
