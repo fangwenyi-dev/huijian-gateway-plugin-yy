@@ -14,8 +14,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#030712">
 <title>慧尖HA语音插件</title>
-<link rel="stylesheet" href="css/huijian.css?v=1.0.20">
-<link rel="stylesheet" href="css/voice.css?v=1.0.20">
+<link rel="stylesheet" href="css/huijian.css?v=1.0.21">
+<link rel="stylesheet" href="css/voice.css?v=1.0.21">
 </head>
 <body>
 <!-- 「星辰大海」背景层（与网关加载项同一设计标准/同一固定种子＝同一片天）：
@@ -127,6 +127,10 @@
     <textarea id="sat_areas" placeholder='{"192.168.1.31": "卧室"}'></textarea>
   </div>
 
+  <div class="card"><h3>音乐（语音点歌 · 过渡带）</h3>
+    <div class="hj-row"><div style="flex:1 1 100%"><label class="hj-field">播放端点 entity_id（需已装 Music Assistant 并由其托管该播放器；说"播放周杰伦/暂停/下一首/停止播放"即达。留空=点歌只回配置指引，不抢闲聊）</label><input id="music_player" placeholder="media_player.客厅音箱"></div></div>
+  </div>
+
   <div class="card"><h3>大模型兜底（LLM，默认关闭）</h3>
     <div class="hj-row">
       <div><label><input id="llm_enabled" type="checkbox" style="width:auto"> 启用（快速通道未命中时交给大模型；需填端点）</label></div>
@@ -226,7 +230,7 @@
 
 <script>
 "use strict";
-const CURRENT_VERSION = "1.0.20";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
+const CURRENT_VERSION = "1.0.21";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
 // 音色表 = kokoro-multi-lang-v1_0 官方 sid 映射（docs/source/onnx/tts/pretrained_models/kokoro.rst 实证）
 const VOICES = [
   [45,"zf_xiaobei · 小北（默认）"],[46,"zf_xiaoni · 小尼"],[47,"zf_xiaoxiao · 晓晓"],[48,"zf_xiaoyi · 小艺"],
@@ -361,6 +365,7 @@ async function loadSettings(){
   $("#dlg_chain").checked = S.dialog?.chain_enabled !== false;
   $("#dlg_confirm").checked = S.dialog?.confirm_risky !== false;
   try { $("#sat_areas").value = JSON.stringify(S.spatial?.satellite_areas||{},null,0); } catch(e){}
+  $("#music_player").value = S.music?.player_entity || "";
   $("#llm_enabled").checked = !!S.llm.enabled;
   $("#llm_stream").checked = S.llm.stream !== false;
   $("#llm_base").value = S.llm.base_url||""; $("#llm_model").value = S.llm.model||"";
@@ -388,6 +393,7 @@ $("#saveBtn").onclick = async ()=>{
     dialog:{ fallback_text: $("#fallback").value, context_enabled:$("#dlg_context").checked,
              chain_enabled:$("#dlg_chain").checked, confirm_risky:$("#dlg_confirm").checked },
     spatial:{ satellite_areas: safeJson($("#sat_areas").value, {}) },
+    music:{ player_entity: $("#music_player").value.trim() },
   };
   if($("#nlu_corr").value.trim() && typeof body.nlu.corrections_extra!=="object"){ toast("纠错词条不是合法 JSON"); return; }
   if($("#sat_areas").value.trim() && typeof body.spatial.satellite_areas!=="object"){ toast("卫星区域映射不是合法 JSON"); return; }
@@ -492,6 +498,6 @@ $("#regenBtn").onclick = async ()=>{
   try { await post("/api/token/regenerate",{}); toast("已重置"); loadEndpoints(); } catch(e){ toast(e.message); }
 };
 </script>
-<script src="js/starsky.js?v=1.0.20"></script>
+<script src="js/starsky.js?v=1.0.21"></script>
 </body>
 </html>

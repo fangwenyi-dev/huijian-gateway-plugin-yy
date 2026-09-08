@@ -83,6 +83,11 @@ DEFAULTS: dict[str, Any] = {
         # 无目标句（"开灯"）默认落说话卫星所在区域；明示目标句零影响。空=行为同旧。
         "satellite_areas": {},
     },
+    "music": {
+        # 零改动音乐过渡带（用户定向 2026-09-12）：语音点歌/播控直连 HA 标准
+        # media_player 服务；端点填 MA 托管播放器的 entity_id。空=点歌只回配置指引。
+        "player_entity": "",
+    },
     "power": {
         "unload_when_idle_min": 0,             # 0=模型常驻；>0 空闲 N 分钟卸载（省电档）
     },

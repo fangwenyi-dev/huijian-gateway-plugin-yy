@@ -207,6 +207,14 @@ class Executor:
             return f"好的，{area}空调已调到{t}度"
         if intent == "HassGetCurrentTime":
             return result.get("speech", {}).get("plain", {}).get("output", "") or "好的"
+        # 解锁/上锁（v1.0.20 车道；真机名实相符话术，集成 intent_lock 返回 states 带 name）
+        if intent in ("HassUnlock", "HassLock"):
+            names = [s.get("name", "") for s in (result.get("states") or [])
+                     if s.get("success") and s.get("name")]
+            who = "、".join(names[:3])
+            verb = "已解锁" if intent == "HassUnlock" else "已上锁"
+            return f"好的，{who}{verb}" if who else \
+                ("好的，锁已打开" if intent == "HassUnlock" else "好的，已上锁")
         # control_targets 族（TurnDeviceOn/Off、ControlWindow、AdjustDeviceAttribute、SetDeviceMode）
         targets = result.get("control_targets") or []
         if targets:

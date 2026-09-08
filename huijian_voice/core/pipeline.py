@@ -33,6 +33,7 @@ from typing import Any, Callable, Coroutine, Optional
 from . import const
 from .nlu.fast_path import FastPath, Plan, is_pronoun, split_compound
 from .nlu import targets as T
+from .nlu import music
 from .nlu.klar_client import KlarClient
 
 logger = logging.getLogger("huijian.pipeline")
@@ -371,6 +372,11 @@ class Pipeline:
             ans = None
         if ans:
             return Reply(ans, "query", True, [f"query:{text}"])
+        # ⑤b 音乐过渡带（零改动，用户定向 2026-09-12）：点歌/播控直连 HA 标准
+        # media_player 服务，置于 LLM 前——点歌令绝不落入闲聊吞掉
+        mcmd = music.parse_music(text)
+        if mcmd is not None:
+            return await self._music(mcmd, text, origin)
         # ⑥ LLM
         if self.agent and self.agent.enabled:
             llm = await self._llm(text, origin, on_sentence)
@@ -378,6 +384,40 @@ class Pipeline:
                 return llm
         # ⑦ 固定兜底
         return Reply(self.settings.get("dialog.fallback_text", const.FALLBACK_TEXT), "fallback")
+
+    _MUSIC_SVC = {"pause": "media_pause", "resume": "media_play",
+                  "stop": "media_stop", "next": "media_next_track",
+                  "prev": "media_previous_track"}
+    _MUSIC_SAY = {"pause": "好的，先暂停了", "resume": "继续播放",
+                  "stop": "已停止播放", "next": "来，下一首",
+                  "prev": "退回上一首"}
+
+    async def _music(self, cmd: dict, text: str, origin: str) -> Reply:
+        """音乐过渡带执行：HA core 标准 media_player 服务族（永不抛，ha_client
+        已折叠）。端点未配置=一句配置指引；失败话术保「抱歉」前缀纪律。"""
+        entity = str(self.settings.get("music.player_entity", "") or "").strip()
+        if not entity:
+            return Reply("想点歌的话，先到 设置-音乐 里配置播放端点"
+                         "（Music Assistant 托管的音箱实体）。",
+                         "music", ok=False, trace=["music:未配置端点"])
+        act = cmd["action"]
+        if act == "play":
+            if not cmd["query"]:
+                return Reply("想听点什么？说歌名或歌手就行。",
+                             "music", trace=["music:泛点歌"])
+            res = await self.ha.call_service("media_player", "play_media", {
+                "entity_id": entity, "media_content_type": "music",
+                "media_content_id": cmd["query"]})
+            ok = bool(res.get("success"))
+            speech = f"好的，正在播放《{cmd['query']}》" if ok \
+                else "抱歉，播放端点没有响应"
+        else:
+            res = await self.ha.call_service(
+                "media_player", self._MUSIC_SVC[act], {"entity_id": entity})
+            ok = bool(res.get("success"))
+            speech = self._MUSIC_SAY[act] if ok else "抱歉，播放端点没有响应"
+        self._remember_turn(origin, text, speech)
+        return Reply(speech, "music", ok, [f"music:{act}"])
 
     async def _llm(self, text: str, origin: str = "",
                    on_sentence: Optional[Callable[[str], Any]] = None) -> Optional[Reply]:

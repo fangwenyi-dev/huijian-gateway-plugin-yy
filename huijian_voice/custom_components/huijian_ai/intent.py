@@ -9,6 +9,7 @@ from .intent_automation import (HassCreateAutomationIntent,
                                 HassListAutomationsIntent,
                                 HassUpdateAutomationIntent)
 from .intent_live_context import HuijianGetLiveContextIntent
+from .intent_lock import HassLockIntent, HassUnlockIntent
 from .intent_set_mode import SetDeviceModeIntent
 from .intent_turn import TurnDeviceOffIntent, TurnDeviceOnIntent
 from .intent_voice_scene import (HassCreateVoiceSceneIntent,
@@ -29,6 +30,8 @@ async def async_setup_intents(hass: HomeAssistant):
     intent.async_register(hass, SetDeviceModeIntent())
     intent.async_register(hass, AdjustDeviceAttributeIntent())
     intent.async_register(hass, ControlWindowIntent())
+    intent.async_register(hass, HassUnlockIntent())
+    intent.async_register(hass, HassLockIntent())
     intent.async_register(hass, HassCreateVoiceSceneIntent())
     intent.async_register(hass, HassTriggerVoiceSceneIntent())
     intent.async_register(hass, HassDeleteVoiceSceneIntent())

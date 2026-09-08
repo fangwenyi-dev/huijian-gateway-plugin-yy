@@ -184,3 +184,23 @@ def test_compound_residue_refused(fp):
     # 链式层否决后的残句绝不单发错猜（实测曾把「客厅的灯，然后再关闭窗帘」
     # 整体错配成客厅窗帘）
     assert asyncio.run(fp.match("打开客厅的灯，然后再关闭窗帘")) is None
+
+
+def test_music_generic_word_not_device(fp):
+    # 音乐泛词守卫：「关掉音乐」不当设备名（交音乐带），但「关掉音乐开关」
+    # 与带区域的「关掉客厅的音乐」仍可正常解析
+    assert asyncio.run(fp.match("关掉音乐")) is None
+    assert asyncio.run(fp.match("关音乐")) is None
+    p = asyncio.run(fp.match("关掉音乐开关"))
+    assert p is not None and p.intent == "TurnDeviceOff"
+
+
+def test_window_pause_survives_music_lookahead(fp):
+    # 负面向：窗帘暂停语义不因音乐带让位而回归（裸"暂停"/"暂停窗帘"仍 ControlWindow）
+    p1 = asyncio.run(fp.match("暂停"))
+    assert p1 is not None and p1.intent == "ControlWindow"
+    p2 = asyncio.run(fp.match("暂停窗帘"))
+    assert p2 is not None and p2.intent == "ControlWindow"
+    # 让位面向：后接音乐补语的播控令不产窗户计划
+    assert asyncio.run(fp.match("停止播放")) is None
+    assert asyncio.run(fp.match("暂停音乐")) is None

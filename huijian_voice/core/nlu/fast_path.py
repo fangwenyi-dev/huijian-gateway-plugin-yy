@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from . import corrector, targets as T
+from .music import GENERIC_WORDS as _MUSIC_WORDS
 
 logger = logging.getLogger("huijian.fastpath")
 
@@ -30,7 +31,9 @@ _ACTION_PATTERNS: list[tuple[re.Pattern, str, Any]] = [
     (re.compile(r"^(开窗|打开窗|开窗户|打开窗户|窗户打开)"), "ControlWindow", "open"),
     (re.compile(r"^(关窗|关闭窗|关窗户|关闭窗户|窗户关闭)"), "ControlWindow", "close"),
     (re.compile(r"^(内倒|内导|内岛|内到|内道|内达|内打|内大|内藻)"), "ControlWindow", "A"),
-    (re.compile(r"^(暂停|停止|停)"), "ControlWindow", "pause"),
+    # 音乐带（2026-09-12）：后接音乐补语（播放/音乐/歌）时让位——"停止播放"
+    # 是播控令不是窗帘暂停；裸"暂停/停"与"暂停窗帘"仍走窗户语义。
+    (re.compile(r"^(暂停|停止|停)(?!(?:播放|音乐|歌|一?首))"), "ControlWindow", "pause"),
     (re.compile(r"^(开到|打开到|关到)\s*(\d+)"), "AdjustDeviceAttribute", {"attribute": "position", "delta": "$2"}),
     (re.compile(r"^关一半"), "AdjustDeviceAttribute", {"attribute": "position", "delta": "50"}),
     (re.compile(r"^(调到|调为|调成|温度调到|温度设到|温度设为)\s*(\d+)\s*度"), "AdjustDeviceAttribute", {"attribute": "temperature", "delta": "$2"}),
@@ -542,6 +545,12 @@ class FastPath:
                 area, name = None, None          # 无目标=全屋（Turn* / ControlWindow 通用窗）
             else:
                 return self._miss(trace, f"提取质量低(score={score})")
+        # 音乐泛词守卫（2026-09-12 零改动过渡带）：Turn* 车道若把泛音乐词
+        # ("关掉音乐/关音乐")吃成设备名，会错关同名实体或空转失败。放行 None，
+        # 交回级联 ⑤b 音乐带处理（真叫"音乐"的设备请说"关掉音乐开关"消歧）。
+        if (intent in ("TurnDeviceOn", "TurnDeviceOff") and name and area is None
+                and str(name).strip() in _MUSIC_WORDS):
+            return self._miss(trace, f"音乐泛词:{name}→交音乐带")
         # 空调区域守卫（原 L662-668）
         if name and any(k in name.lower() for k in ("空调", "空調", "aircondition")):
             if not area:
