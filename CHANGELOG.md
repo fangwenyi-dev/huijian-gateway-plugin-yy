@@ -3,6 +3,18 @@
 所有版本变更记录在此文件中。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [1.0.13] - 2026-09-08
+
+### 修复（上游模型资产重打包批）
+
+- models.lock.json TTS Kokoro sha256 回填：上游 k2-fsa/sherpa-onnx 重打包重传了 kokoro-multi-lang-v1_0.tar.bz2（本机直下复核：377 文件、model.onnx 325560556B、required_files 与旧实测逐项一致——内容未变、字节变），旧锁值在 v1.0.12 E2E 硬门禁双源 5 连败。不修影响：新装/重下模型的设备 TTS 陷入下载-校验死循环（E2E 只是最先撞上）。paraformer ASR 包双源实测未变，不动。
+
+- 本发布顺带携全 v1.0.12 内容（6053 重启窗 30s 校准 + 窗户误动作闸）：v1.0.12 镜像被 E2E 门禁阻断、从未进入 ACR 仓库，v1.0.13 是其唯一分发载体；HA 商店更新卡片将由 1.0.11 直接到 1.0.13。
+
+### 测试
+
+- 升锁后 E2E 真镜像门禁全链通过（Lint/Build×2/E2E/Manifest/Push ACR）。pytest 248 全绿不变（仅动 lock 与版本 pin）。
+
 ## [1.0.12] - 2026-09-08
 
 ### 修复（2026-09-08 真机配对闭环批）

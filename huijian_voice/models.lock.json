@@ -4,6 +4,7 @@
     "下载链：urls 顺序回退（国内代理→官方→镜像站），sha256 校验，tmp+rename 原子落盘；",
     "model_auto_download=false 或下载全失败时，支持手动导入：把 tarball 放进 /data/models/import/ 即可。",
     "sha256 为本地研究包实测值（2026-09-08，与官方 release 文件名一致；E2E 首跑若校验不过=官方更新同版本包，需人工复核后回填）。",
+    "2026-09-08 命中预案：E2E 对 kokoro-multi-lang-v1_0 双源 5 连败——本机直下复核：377 文件 / model.onnx 325560556B / required_files 全与旧实测一致（上游仅重打包重传，内容未变），回填新值 c5f7e2d2…（旧 c133d263…）。paraformer 双源实测未变，不动。",
     "top_dir=解包后的根目录名，解到 /data/models/<key>/ 时自动剥掉该前缀。",
     "2026-09-08 复核：asr/sherpa-onnx-paraformer-zh-int8-2025-10-07.tar.bz2 经 tar 内 README 实证实为 WSChuan 四川话模型（ASLP-lab/WSChuan-ASR Paraformer-large-Chuan 导出），非普通话——已从清单剔除，主 ASR 定案为 bilingual 流式包（实测 RTF 0.042/RSS ~400MB）。"
   ],
@@ -25,7 +26,7 @@
     "display_name": "TTS · Kokoro 中英多音色 (sid45 小北默认)",
     "default_provider": true,
     "tarball": "kokoro-multi-lang-v1_0.tar.bz2",
-    "sha256": "c133d26353d776da730870dac7da07dbfc9a5e3bc80cc5e8e83ab6e823be7046",
+    "sha256": "c5f7e2d2caf082bc1d20fb70334a61d99d20b484500aad32e7cf84c128ea3298",
     "top_dir": "kokoro-multi-lang-v1_0",
     "required_files": ["model.onnx", "voices.bin", "tokens.txt", "lexicon-zh.txt", "dict/jieba.dict.utf8"],
     "size_mb": 333,
