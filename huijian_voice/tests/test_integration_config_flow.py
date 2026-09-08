@@ -188,12 +188,15 @@ def test_reboot_retry_no_retry_on_deterministic_errors():
         assert s.calls == 1, f"{err} 是确定性错误，重试只会拖慢配对面板"
 
 
-def test_reboot_retry_window_covers_firmware_10s():
+def test_reboot_retry_window_covers_reboot_and_boot():
+    # v1.0.11 校准教训（12:24 实机日志）：窗口不是固件那条 10s 延迟本身，
+    # 而是 10s 延迟 + esp_restart boot≈3s + WiFi 重连 5~10s + ESPHome API
+    # 起听 ≈ POST 后 18~25s。只钉 >=10 是假达标（12s 窗实测恒撞墙），
+    # floor 提到 25s = 10s 重启延迟 + 15s boot/重连余量。
     src = _src()
     delay = float(re.search(r"_REBOOT_RETRY_DELAY\s*=\s*([\d.]+)", src).group(1))
     attempts = int(re.search(r"_REBOOT_RETRY_ATTEMPTS\s*=\s*(\d+)", src).group(1))
-    # 固件 CMD20 后延迟 10s 重启才真正 listen :6053（ble_manager.cc:745 注释链）
-    assert delay * attempts >= 10, f"重试窗 {delay * attempts:.0f}s 盖不住设备 10s 重启"
+    assert delay * attempts >= 25, f"重试窗 {delay * attempts:.0f}s 盖不住重启+boot（就绪≈POST+25s）"
     # device 分支必须走带重试的封装，防回退成裸 fetch
     assert "error = await self._fetch_device_info_through_reboot()" in src
 

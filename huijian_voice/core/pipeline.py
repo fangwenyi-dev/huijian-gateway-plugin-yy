@@ -68,7 +68,18 @@ def select_fallback_plan(primary: Optional[Plan], fp: Optional[Plan],
     if primary.source != "klar":
         # 慧尖意图失败：常见根因就是「集成还没加载」——klar 直调不依赖集成，
         # 只要 klar 同句有命中（裁决时让位给契约/独占类），值得一试。
-        return kl if (kl is not None and kl is not primary) else None
+        if kl is None or kl is primary:
+            return None
+        # v1.0.12 窗户误动作闸（2026-09-08 实机：ControlWindow 未注册时
+        # 「打开 办公室平开窗」降级 klar 命中办公室灯，真把灯点亮——比
+        # 礼貌失败糟糕得多）。窗户是慧尖独占语义（开合器=按钮按压），
+        # klar 兜底只允许同样打在窗类目标上；否则不降级，用主话术如实
+        # 报「集成未运行」（v1.0.9 指令①诊断话术已点破根因）。
+        if (primary.intent == "ControlWindow"
+                or _mentions_window_device(primary.args)) \
+                and not _mentions_window_device(kl.args):
+            return None
+        return kl
     # klar 失败（实体漂移/服务拒绝）：非场景类的字面表命中可作替代路径。
     return fp if (fp is not None and fp is not primary and fp.source != "scene") else None
 

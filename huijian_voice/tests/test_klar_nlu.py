@@ -286,6 +286,36 @@ def test_fallback_none_primary():
     assert select_fallback_plan(None, None, None, "") is None
 
 
+# ── v1.0.12 窗户误动作闸（实机：ControlWindow 挂→klar 兜底点亮办公室灯）──
+_WIN_ARGS = {"target": [{"area": "办公室",
+                           "devices": [{"name": "平开窗", "domains": []}]}],
+             "action": "open"}
+
+
+def test_fallback_window_never_hits_lights():
+    fp = _plan("t0", "ControlWindow", _WIN_ARGS)
+    lamp = _plan("klar", "HassTurnOn", _std_on())
+    assert select_fallback_plan(fp, fp, lamp, "抱歉，慧尖 AI 集成还没生效") is None
+    # 主计划即便不带 ControlWindow 名（字面表其它窗句），args 含窗类词同样受闸
+    other = _plan("t1", "SetDeviceMode", {"name": "内倒窗", "mode": "通风"})
+    assert select_fallback_plan(other, other, lamp, "抱歉") is None
+
+
+def test_fallback_window_to_window_entity_allowed():
+    # klar 兜底若真命中窗类实体（开合器以 cover 暴露且名含窗型），放行不误伤
+    fp = _plan("t0", "ControlWindow", _WIN_ARGS)
+    win_kl = _plan("klar", "HassTurnOn", _std_on(name="办公室平开窗"))
+    assert select_fallback_plan(fp, fp, win_kl, "抱歉") is win_kl
+
+
+def test_fallback_curtain_unaffected_by_window_gate():
+    # 窗帘=标准 cover（v1.0.9 契约，不进 ControlWindow 路径）：目标词被
+    # _mentions_window_device 剔除 → 闸不拦，klar 兜底合法，行为与 v1.0.11 一致
+    curtain = _plan("t0", "TurnDeviceOn", _std_on(name="客厅窗帘"))
+    kl = _plan("klar", "HassTurnOn", _std_on(name="客厅窗帘"))
+    assert select_fallback_plan(curtain, curtain, kl, "抱歉") is kl
+
+
 # ── ③c _cascade 行为（降级链 + LLM 复议次序）────────────────────
 class SeqExecutor:
     def __init__(self, results):        # plan.source → (ok, speech)

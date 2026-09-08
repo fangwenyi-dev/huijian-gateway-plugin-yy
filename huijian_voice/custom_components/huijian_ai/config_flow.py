@@ -1225,10 +1225,13 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
         return None
 
     # 固件 BLEManager::RestartAfter10s: CMD20 → 10s restart → ha_url 门控
-    # 开机读取，首次配对 :6053 在 POST 返回时尚未 listen。重试 2 次共 12s
-    # 覆盖该窗口；第 3 次仍 refused 视为非配对时序问题，照常报错。
+    # 开机读取，首次配对 :6053 在 POST 返回时尚未 listen。窗口不是 10s：
+    # 12:24 实机日志校准 = 10s 延迟重启 + boot≈3s + WiFi 重连≈5~10s +
+    # ESPHome API 起来 ≈ POST 后 18~25s 就绪。v1.0.11 的 12s 窗（6s×2）
+    # 差约 13s 恒撞墙（267740b 发版后实机复现），拉到 6s×5=30s 覆盖。
+    # 30s 仍 refused 视为非配对时序问题（IP 变了/设备没起来），照常报错。
     _REBOOT_RETRY_DELAY = 6.0
-    _REBOOT_RETRY_ATTEMPTS = 2
+    _REBOOT_RETRY_ATTEMPTS = 5
 
     async def _fetch_device_info_through_reboot(self) -> str | None:
         """fetch_device_info，带设备 CMD20 后 10s 重启窗口的自动重试。
@@ -1237,7 +1240,8 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
         连 :6053 → Errno 111（refused）——固件把 ha_url/noise 门控放在开机
         读取（ble_manager.cc:745），CMD20 后延迟 10s 重启才真正 listen 6053。
         仅 connection_error 重试；鉴权/加密键错误是确定性的，重试只会拖慢
-        配对面板，维持一次即报。
+        配对面板，维持一次即报。最坏耗时 30s，处于等待 setup 的分钟级
+        面板节奏内可接受。
         """
         error = await self.fetch_device_info()
         for _ in range(self._REBOOT_RETRY_ATTEMPTS):
