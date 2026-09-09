@@ -14,8 +14,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#030712">
 <title>慧尖HA语音插件</title>
-<link rel="stylesheet" href="css/huijian.css?v=1.0.28">
-<link rel="stylesheet" href="css/voice.css?v=1.0.28">
+<link rel="stylesheet" href="css/huijian.css?v=1.0.29">
+<link rel="stylesheet" href="css/voice.css?v=1.0.29">
 </head>
 <body>
 <!-- 「星辰大海」背景层（与网关加载项同一设计标准/同一固定种子＝同一片天）：
@@ -230,12 +230,37 @@
 
 <script>
 "use strict";
-const CURRENT_VERSION = "1.0.28";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
-// 音色表 = kokoro-multi-lang-v1_0 官方 sid 映射（docs/source/onnx/tts/pretrained_models/kokoro.rst 实证）
+const CURRENT_VERSION = "1.0.29";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
+// 音色表 = kokoro-multi-lang-v1_1 官方 103 sid 全表（k2-fsa docs sid 表实证；
+// 标注=对用户上传试听样本的 CAM++ 声纹溯源榜：v1_1 不含晓晓/云扬，
+// sid18=zf_026 女声最似晓晓(0.454 全场最近)，sid81=zm_055 最似云扬）
 const VOICES = [
-  [45,"zf_xiaobei · 小北"],[46,"zf_xiaoni · 小尼"],[47,"zf_xiaoxiao · 晓晓（默认）"],[48,"zf_xiaoyi · 小艺"],
-  [49,"zm_yunjian · 云健"],[50,"zm_yunxi · 云希"],[51,"zm_yunxia · 云夏"],[52,"zm_yunyang · 云扬"],
-  [2,"af_bella（英文女）"],[17,"am_onyx（英文男）"],[21,"bf_emma（英音女）"],[26,"bm_george（英音男）"]
+  [0,"af_maple（英文）"],[1,"af_sol（英文）"],[2,"bf_vale（英文）"],[3,"zf_001 · 女声"],
+  [4,"zf_002 · 女声"],[5,"zf_003 · 女声"],[6,"zf_004 · 女声"],[7,"zf_005 · 女声"],
+  [8,"zf_006 · 女声"],[9,"zf_007 · 女声"],[10,"zf_008 · 女声"],[11,"zf_017 · 女声"],
+  [12,"zf_018 · 女声"],[13,"zf_019 · 女声"],[14,"zf_021 · 女声"],[15,"zf_022 · 女声"],
+  [16,"zf_023 · 女声"],[17,"zf_024 · 女声"],[18,"zf_026 · 女声（默认·最似晓晓）"],[19,"zf_027 · 女声"],
+  [20,"zf_028 · 女声"],[21,"zf_032 · 女声"],[22,"zf_036 · 女声"],[23,"zf_038 · 女声"],
+  [24,"zf_039 · 女声"],[25,"zf_040 · 女声"],[26,"zf_042 · 女声"],[27,"zf_043 · 女声"],
+  [28,"zf_044 · 女声"],[29,"zf_046 · 女声"],[30,"zf_047 · 女声"],[31,"zf_048 · 女声"],
+  [32,"zf_049 · 女声"],[33,"zf_051 · 女声"],[34,"zf_059 · 女声"],[35,"zf_060 · 女声"],
+  [36,"zf_067 · 女声"],[37,"zf_070 · 女声"],[38,"zf_071 · 女声"],[39,"zf_072 · 女声"],
+  [40,"zf_073 · 女声"],[41,"zf_074 · 女声"],[42,"zf_075 · 女声"],[43,"zf_076 · 女声"],
+  [44,"zf_077 · 女声"],[45,"zf_078 · 女声"],[46,"zf_079 · 女声"],[47,"zf_083 · 女声"],
+  [48,"zf_084 · 女声"],[49,"zf_085 · 女声"],[50,"zf_086 · 女声"],[51,"zf_087 · 女声"],
+  [52,"zf_088 · 女声"],[53,"zf_090 · 女声"],[54,"zf_092 · 女声"],[55,"zf_093 · 女声"],
+  [56,"zf_094 · 女声"],[57,"zf_099 · 女声"],[58,"zm_009 · 男声"],[59,"zm_010 · 男声"],
+  [60,"zm_011 · 男声"],[61,"zm_012 · 男声"],[62,"zm_013 · 男声"],[63,"zm_014 · 男声"],
+  [64,"zm_015 · 男声"],[65,"zm_016 · 男声"],[66,"zm_020 · 男声"],[67,"zm_025 · 男声"],
+  [68,"zm_029 · 男声"],[69,"zm_030 · 男声"],[70,"zm_031 · 男声"],[71,"zm_033 · 男声"],
+  [72,"zm_034 · 男声"],[73,"zm_035 · 男声"],[74,"zm_037 · 男声"],[75,"zm_041 · 男声"],
+  [76,"zm_045 · 男声"],[77,"zm_050 · 男声"],[78,"zm_052 · 男声"],[79,"zm_053 · 男声"],
+  [80,"zm_054 · 男声"],[81,"zm_055 · 男声（最似云扬）"],[82,"zm_056 · 男声"],[83,"zm_057 · 男声"],
+  [84,"zm_058 · 男声"],[85,"zm_061 · 男声"],[86,"zm_062 · 男声"],[87,"zm_063 · 男声"],
+  [88,"zm_064 · 男声"],[89,"zm_065 · 男声"],[90,"zm_066 · 男声"],[91,"zm_068 · 男声"],
+  [92,"zm_069 · 男声"],[93,"zm_080 · 男声"],[94,"zm_081 · 男声"],[95,"zm_082 · 男声"],
+  [96,"zm_089 · 男声"],[97,"zm_091 · 男声"],[98,"zm_095 · 男声"],[99,"zm_096 · 男声"],
+  [100,"zm_097 · 男声"],[101,"zm_098 · 男声"],[102,"zm_100 · 男声"]
 ];
 const MODEL_NAMES = {asr_sensevoice_small:"STT · SenseVoice-Small 中英粤", asr_paraformer_bilingual:"STT · Paraformer 中英双语流式", tts_kokoro_multilang:"TTS · Kokoro 多语包"};
 const $ = s => document.querySelector(s);
@@ -349,7 +374,7 @@ async function loadSettings(){
   try { S = await api("/api/settings"); } catch(e){ toast("读取设置失败："+e.message); return; }
   const sid = $("#tts_sid");
   if (sid.options.length===0) VOICES.forEach(([v,n])=>sid.add(new Option(n,v)));
-  sid.value = String(S.tts.sid ?? 47);
+  sid.value = String(S.tts.sid ?? 18);
   $("#tts_speed").value = S.tts.speed ?? 1.0;
   $("#stt_provider").value = S.stt.provider==="cloud" ? "cloud" : "local_paraformer";
   $("#tts_provider").value = S.tts.provider==="cloud" ? "cloud" : "local_kokoro";
@@ -499,6 +524,6 @@ $("#regenBtn").onclick = async ()=>{
   try { await post("/api/token/regenerate",{}); toast("已重置"); loadEndpoints(); } catch(e){ toast(e.message); }
 };
 </script>
-<script src="js/starsky.js?v=1.0.28"></script>
+<script src="js/starsky.js?v=1.0.29"></script>
 </body>
 </html>

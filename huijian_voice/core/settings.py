@@ -36,7 +36,7 @@ DEFAULTS: dict[str, Any] = {
     },
     "tts": {
         "provider": "local_kokoro",           # local_kokoro | cloud_openai_compat
-        "sid": 47,                             # 定案默认音色：晓晓 zf_xiaoxiao（女，用户试听拍板 2026-09-13）。音色表见 web/sid 选项
+        "sid": 18,                             # v1.1 定案默认：zf_026（女，声纹最似晓晓；用户知情拍板 2026-09-13）。103 音色 web 全可选
         "speed": 1.0,                          # 0.8–1.2
         "cache_enabled": True,                 # 体验批 P0-4：句级 opus LRU 缓存（本地档）
         "cloud": {"provider": "", "base_url": "", "api_key": "", "model": "", "voice": "",

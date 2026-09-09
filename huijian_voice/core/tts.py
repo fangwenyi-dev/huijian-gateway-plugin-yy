@@ -1,22 +1,29 @@
-"""TTS 引擎（本地 Kokoro-82M multi-lang **v1.0 fp32**——现役包不换；
-sid=47 zf_xiaoxiao 晓晓女声默认，用户试听拍板 2026-09-13；云可配回落本地）。
+"""TTS 引擎（本地 Kokoro-82M multi-lang **v1.1 fp32 包 kokoro-multi-lang-v1_1**
+——103 音色 web 全可选，默认 sid=18 zf_026 女声（声纹最似晓晓），用户知情拍板
+2026-09-13；云可配回落本地）。
 
 体验批 P0-4：句级 opus 缓存。控制类回复高度模板化（"好的，X打开了"），
 按 (句, sid, speed) 缓存编码完成的裸 opus 帧——命中即首包归零、4C8G 卸载
 省电档下不再为同一句话反复烧 Kokoro。云档不缓存（外部服务输出不稳定）；
 模型换载/卸载即清空（缓存与当代模型同源）。
 
-2026-09-13 v1.1 换代调研定案（维持 v1.0 包，证据入 models.lock.json _comment）：
-· v1_1（int8/fp32 两包 voices.bin 逐字节同一份）103 音色全为编号名 zf_001…zm_100，
-  "晓晓/云扬/小北"等具名中文音色**不存在**（k2-fsa 官方 sid 表+pykokoro 双源核）；
-  v1.0 的 53 音色向量逐比特比对 0 保留（v1.1-zh 全新说话人集）→ 要晓晓必须 v1_0。
-· RTF 四包横评（同机 2 线程）：v1.0-fp32 0.281（最快）/ v1.1-fp32 0.300 /
-  v1.0-int8 0.685 / v1.1-int8 0.720——int8 在本机 VNNI 下仍慢 2.4×，ARM 风险更大。
-· 本次真修复=lang=""（语种自动路由）：lang="zh" 下 espeak-ng cmn 通道把英文
-  片段全部 "Failed to set eSpeak-ng voice" 静默丢弃——即现网遗留"英文实体名片段
-  句中缺词/纯英整句静音"根因；lang 矩阵（v1.0/v1.1 × 纯中/中英混/纯英）实证
-  lang="" 三型全过、纯中逐比特同长 → v1.0 包直接受益。
-· 加载器兼容 model.int8.onnx→回落 model.onnx 双命名：手动导入口放 int8 包亦可跑。
+2026-09-13 声纹溯源与 v1.1 升级终案（证据链入 models.lock.json _comment）：
+· CAM++ 说话人嵌入×两代包全 157 sid 逐一比对（脚本/结果留存 _dl voice_trace3*）：
+  文章试听嗓=v1_0 sid47 晓晓(0.076~0.23)/sid52 云扬(0.17)——v1_1 **不含**这两嗓
+  （最近 0.45/0.50=另一人），已明确告知用户，仍决定升级 v1.1 换 103 音色可选。
+· 音色构成：0-2 英文具名(af_maple/af_sol/bf_vale)、3-57 女 zf_001…、58-102 男
+  zm_009…；默认 sid18=zf_026（v1_1 女声最似晓晓）、sid81=zm_055（最似云扬），
+  web 音色表已按声纹榜单标注。**升级后存量 sid45-52 配置指向 v1_1 新嗓**（重
+  映射已知会，用户在 web 重选即可）。
+· 选 fp32 弃 v1_1-int8：int8 同句实测 >8kHz 量化噪声能量 3.9×（用户试听否决
+  int8 音质）+ RTF 更快（fp32 0.300 vs int8 0.720，x86 台架；两包声纹同源）。
+· v1_1 合成 stderr 每句一条 "Unknown token: ❓"=本包 tokens.txt 句界标记，
+  实证三型产出完整无害，非现网缺词根因（那已由 lang="" 修复，见下）。
+· lang=""（语种自动路由）保留 v1.0.28 根修：lang="zh" 下 espeak-ng cmn 通道把
+  英文片段静默丢弃；lang 矩阵（v1.0/v1.1 × 纯中/中英混/纯英）实证 lang=""
+  三型全过、纯中逐比特同长。
+· 加载器兼容 model.int8.onnx→回落 model.onnx：手动导入口放两代任意包皆可跑
+  （回退 v1_0 零改码，旧包 sha 在 lock _comment 可查）。
 定案链：v4.1 ②「本地默认+云可配自动回落」。
 运行形态（sherpa-onnx 1.13.7 API 实测钉桩）：
   OfflineTts(OfflineTtsConfig(model=OfflineTtsModelConfig(kokoro=OfflineTtsKokoroModelConfig(
@@ -143,7 +150,7 @@ class TtsEngine:
                 self._cache.clear(); self._cache_bytes = 0   # 换代模型：旧音频作废
                 self.last_used = time.time()
                 logger.warning("[TTS] Kokoro multi-lang 已加载（%d 音色），sid=%s",
-                               tts.num_speakers, self.settings.get("tts.sid", 47))
+                               tts.num_speakers, self.settings.get("tts.sid", 18))
                 return True
             except Exception as e:
                 logger.error("[TTS] 加载失败: %s", e)
@@ -174,7 +181,7 @@ class TtsEngine:
             except Exception as e:
                 logger.warning("[TTS] 云合成失败(%s) → 回落本地", e)
         loop = asyncio.get_running_loop()
-        sid = int(self.settings.get("tts.sid", 47))
+        sid = int(self.settings.get("tts.sid", 18))
         speed = float(self.settings.get("tts.speed", 1.0))
         load_checked = self.ready()
         for sent in split_sentences(text):
@@ -252,7 +259,7 @@ class TtsEngine:
         loop = asyncio.get_running_loop()
         if not self.ready() and not await loop.run_in_executor(None, self.ensure_loaded):
             return b""
-        sid = int(self.settings.get("tts.sid", 47))
+        sid = int(self.settings.get("tts.sid", 18))
         speed = float(self.settings.get("tts.speed", 1.0))
         out = b""
         for sent in split_sentences(text):
