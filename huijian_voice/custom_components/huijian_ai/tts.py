@@ -44,7 +44,18 @@ class HuijianTtsEntity(BaseEntity):
         )
         self._attr_default_language = "zh-Hans"
         self._attr_supported_languages = ["en", "zh", "zh-Hans"]
-        self._attr_supported_options = []
+        # v1.0.26：必须声明首选格式键，否则 HA core 会把它们从 options 里
+        # **弹出**（tts/__init__.py _async_generate_tts_audio：不在
+        # supported_options 里的 preferred_* 一律 pop，引擎根本收不到），
+        # 于是本实体恒走 mp3、再由 HA 用 ffmpeg 二次转码——v1.0.25 的
+        # s16le→wav 纯 Python 直封成了死代码。声明后引擎直接按卫星要求
+        # 产 16k/mono/16bit WAV，少一次有损转码。
+        self._attr_supported_options = [
+            "preferred_format",
+            "preferred_sample_rate",
+            "preferred_sample_channels",
+            "preferred_sample_bytes",
+        ]
         self._attr_extra_state_attributes = {}
 
     async def async_added_to_hass(self):
@@ -117,6 +128,10 @@ class HuijianTtsEntity(BaseEntity):
         # 空 WAV 一路无声；现在两端日志各留一行，链路可逐跳对账。
         if not audio:
             _LOGGER.error("[TTS] 合成结果为空（加载项未回音频/转换失败）: %r", message[:40])
-        else:
-            _LOGGER.info("[TTS] 音频就绪：%s %d 字节（原文 %r）", fmt, len(audio), message[:40])
+            # 空结果绝不能返回 (fmt, b"")——HA 会把它写进 TTS 缓存，之后同一句
+            # 永远命中空缓存（连引擎都不再调用），现场形态就是"灯开了、永远没
+            # 声音、日志一片安静"（2026-09-09 实锤）。返回 (None, None) 让 HA
+            # 报错并跳过缓存，问题当场可见。
+            return None, None
+        _LOGGER.info("[TTS] 音频就绪：%s %d 字节（原文 %r）", fmt, len(audio), message[:40])
         return fmt, audio

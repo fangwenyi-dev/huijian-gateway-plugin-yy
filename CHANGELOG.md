@@ -3,6 +3,23 @@
 所有版本变更记录在此文件中。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [1.0.26] - 2026-09-09
+
+### 修复
+
+- **空音频不再污染 TTS 缓存（播报永久静音的根因）**：合成结果为空时，集成此前把空字节交回 Home Assistant。HA 只把 `None` 判为失败，空字节算"成功"，于是被写进 `/config/tts/` 磁盘缓存；缓存键含「文本+语言+参数+引擎」，此后**同一句话永不再调用合成引擎**——现场形态就是"设备执行了指令、但永远没声音、日志一片安静"，而且**重启 Home Assistant 也不会自愈**（磁盘缓存跨重启存活）。现在空结果直接判失败并打 ERROR 日志，缓存不可能再被空条目污染。
+- **TTS 实体补声明首选格式选项**：`supported_options` 增加 `preferred_format` / `preferred_sample_rate` / `preferred_sample_channels` / `preferred_sample_bytes`。Home Assistant 对不在该列表里的首选格式键会在送达引擎前**直接剔除**，导致引擎收不到"要 WAV"的要求、恒定输出 MP3，再靠 HA 用 ffmpeg 二次转码（v1.0.25 的纯 Python WAV 直封因此在流水线路径上并未真正生效）。补声明后引擎按卫星要求直出 16kHz/单声道/16bit WAV，省掉一次有损转码。
+
+### 提示
+
+- **升级到本版请务必清一次 TTS 缓存**：开发者工具 → 操作 → 搜索 `tts.clear_cache` 执行（或删除 `/config/tts/` 下的缓存文件）。历史静音期间写入的空条目不清掉，会一直顶着新代码出声。
+- 与 v1.0.25 同样：升级后需重启 Home Assistant Core（或重载「慧尖 AI」集成）让落盘的集成代码生效。
+
+### 工程
+
+- 新增 2 项钉桩：AST 校验空音频分支必须返回 `(None, None)`（防回归到污染缓存的形态）；`supported_options` 必须声明上述四个键（防再次被 HA 剔除参数）。全套回归 **355 项全绿**。
+- 本版结论依据 Home Assistant core 2026.9.1 `components/tts/__init__.py` 源码逐行核对（缓存键构成、`data is None` 才 raise、`preferred_*` 的 pop/get 分支）。
+
 ## [1.0.25] - 2026-09-09
 
 ### 修复

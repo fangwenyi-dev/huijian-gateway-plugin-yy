@@ -90,3 +90,49 @@ def test_tts_and_satellite_fail_loud():
     asat = _read("assist_satellite.py")
     assert "音频 0 帧" in asat, "卫星端 0 帧静音不再告警"
     assert "推流 %d 帧" in asat, "卫星端推流无痕"
+
+
+def test_tts_declares_preferred_format_options():
+    """supported_options 必须声明 preferred_*。
+
+    HA core 的 _async_generate_tts_audio 对「不在 supported_options 里」的
+    preferred_* 一律 `options.pop(...)`——引擎收不到首选格式就恒回 mp3，
+    再由 HA 用 ffmpeg 二次转码（v1.0.25 的 s16le→wav 直封成死代码）。
+    2026-09-09 抓 HA core tts/__init__.py 源码实锤。
+    """
+    tts = _read("tts.py")
+    for key in (
+        "preferred_format",
+        "preferred_sample_rate",
+        "preferred_sample_channels",
+        "preferred_sample_bytes",
+    ):
+        assert f'"{key}"' in tts, f"supported_options 缺 {key}（HA 会弹掉它）"
+    assert "_attr_supported_options = []" not in tts, "supported_options 仍为空表"
+
+
+def test_tts_empty_audio_never_poisons_cache():
+    """空音频必须返回 (None, None)。
+
+    返回 (fmt, b"") 会被 HA 写进 TTS 缓存，此后同一句话永远命中空缓存
+    （连 TTS 引擎都不再被调用），现场形态即"灯开了、永远没声音、日志一片
+    安静"（2026-09-09 实锤）。返回 None 让 HA 报错并跳过缓存。
+    """
+    import ast
+
+    tree = ast.parse((CC / "tts.py").read_text(encoding="utf-8"))
+    fn = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))
+        and n.name == "async_get_tts_audio"
+    )
+    guard = next(
+        n
+        for n in ast.walk(fn)
+        if isinstance(n, ast.If) and ast.unparse(n.test).strip() == "not audio"
+    )
+    rets = [ast.unparse(s) for s in guard.body if isinstance(s, ast.Return)]
+    # ast.unparse 可能渲染成 "return (None, None)"
+    norm = {r.replace("(", "").replace(")", "").strip() for r in rets}
+    assert "return None, None" in norm, f"空音频分支未返回 (None, None)：{rets}"
