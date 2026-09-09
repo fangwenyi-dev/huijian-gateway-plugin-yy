@@ -19,15 +19,55 @@ def _read(p):
 
 
 def _extract_func(path: Path, name: str, extra_ns: dict | None = None):
-    """按仓惯例从真实源码抽出纯函数执行（不复制逻辑）。"""
+    """按仓惯例从真实源码抽出纯函数执行（不复制逻辑）。
+
+    Python ≤3.13 与 3.14 的关键差异（CI 实锤）：注解与默认值在 **def 时求值**
+    （3.14 起 PEP 649 延迟求值），所以抽出单个函数节点去 exec 时，注解里出现的
+    类型名必须在命名空间可解析——否则 `HomeAssistant` 这类名字直接 NameError。
+    本机 3.14 全绿而 CI 3.12/3.13 红，正是此因。做法：能真实导入的泛型
+    （collections.abc，需支持 X[...] 下标）给真身，其余给可下标占位类。
+    """
     import ast
+    import builtins
     import io
     import wave
+    from collections.abc import AsyncGenerator, AsyncIterable
+
+    class _Ann:
+        """注解占位：必须能吃下 `X[...]` 下标（≤3.13 在 def 时求值）。"""
+
+        def __class_getitem__(cls, item):
+            return None
 
     tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
-            ns: dict = {"io": io, "wave": wave}
+            ns: dict = {
+                "io": io,
+                "wave": wave,
+                "AsyncIterable": AsyncIterable,
+                "AsyncGenerator": AsyncGenerator,
+            }
+            args = node.args
+            eager = [
+                a.annotation
+                for a in list(args.posonlyargs) + list(args.args) + list(args.kwonlyargs)
+            ]
+            if node.returns is not None:
+                eager.append(node.returns)
+            eager += list(args.defaults) + list(args.kw_defaults)
+            for expr in eager:
+                if expr is None:
+                    continue
+                for sub in ast.walk(expr):
+                    # 只补"非内建"的裸名字：`list`/`dict`/`int` 这类被占位覆盖会
+                    # 连带污染函数体运行期（实机自证：list(input_params) 变 _Ann(...)）
+                    if (
+                        isinstance(sub, ast.Name)
+                        and sub.id not in ns
+                        and not hasattr(builtins, sub.id)
+                    ):
+                        ns[sub.id] = _Ann
             if extra_ns:
                 ns.update(extra_ns)
             exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), "exec"), ns)
