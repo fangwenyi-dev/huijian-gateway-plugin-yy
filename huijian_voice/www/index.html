@@ -14,8 +14,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#030712">
 <title>慧尖HA语音插件</title>
-<link rel="stylesheet" href="css/huijian.css?v=1.0.22">
-<link rel="stylesheet" href="css/voice.css?v=1.0.22">
+<link rel="stylesheet" href="css/huijian.css?v=1.0.23">
+<link rel="stylesheet" href="css/voice.css?v=1.0.23">
 </head>
 <body>
 <!-- 「星辰大海」背景层（与网关加载项同一设计标准/同一固定种子＝同一片天）：
@@ -230,7 +230,7 @@
 
 <script>
 "use strict";
-const CURRENT_VERSION = "1.0.22";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
+const CURRENT_VERSION = "1.0.23";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
 // 音色表 = kokoro-multi-lang-v1_0 官方 sid 映射（docs/source/onnx/tts/pretrained_models/kokoro.rst 实证）
 const VOICES = [
   [45,"zf_xiaobei · 小北（默认）"],[46,"zf_xiaoni · 小尼"],[47,"zf_xiaoxiao · 晓晓"],[48,"zf_xiaoyi · 小艺"],
@@ -277,7 +277,8 @@ async function refreshStatus(){
     const up = st.uptime_s>=0 ? (st.uptime_s>86400 ? (st.uptime_s/86400).toFixed(1)+" 天" : Math.floor(st.uptime_s/3600)+" 时 "+ (st.uptime_s%3600/60|0)+" 分") : "–";
     $("#statusGrid").innerHTML = [
       statRow("服务运行", `<span class="pill ok">正常 ${up}</span>`),
-      statRow("HA 桥接", st.ha_bridge?pill("在线","ok"):pill("不可达","bad")),
+      statRow("HA 桥接", st.ha_bridge?pill("在线","ok")
+        :pill("不可达","bad")+(st.ha_error?`<span class="hint" style="margin-left:8px">${String(st.ha_error).slice(0,60)}</span>`:"")),
       statRow("STT 引擎", st.stt_loaded?pill("已加载","ok"):pill("未就绪","warn")),
       statRow("TTS 引擎", st.tts_loaded?pill("已加载","ok"):pill("未就绪","warn")),
       statRow("意图分类", st.textcnn?pill("可用","ok"):pill("缺资产","warn")),
@@ -498,6 +499,6 @@ $("#regenBtn").onclick = async ()=>{
   try { await post("/api/token/regenerate",{}); toast("已重置"); loadEndpoints(); } catch(e){ toast(e.message); }
 };
 </script>
-<script src="js/starsky.js?v=1.0.22"></script>
+<script src="js/starsky.js?v=1.0.23"></script>
 </body>
 </html>

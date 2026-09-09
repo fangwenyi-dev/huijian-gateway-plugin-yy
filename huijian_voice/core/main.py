@@ -147,11 +147,13 @@ class Service:
     async def _loop_status(self) -> None:
         while True:
             try:
+                await ha_health_tick(self.ha)   # 桥接自愈（2026-09-12 真机实锤）
                 snap = {
                     "ok": True,
                     "version": self._version(),
                     "uptime_s": int(time.time() - self.ctx.started_at),
                     "ha_bridge": self.ha.reachable and bool(self.ha.token),
+                    "ha_error": self.ha.last_error,
                     "sessions": len(self.ctx.sessions),
                     "stt_loaded": self.asr.ready(), "tts_loaded": self.tts.ready(),
                     "textcnn": self.textcnn.available,
@@ -229,6 +231,21 @@ class Service:
         await self.klar.close()
         await self.ha.close()
         logger.warning("[退出] 完成")
+
+
+async def ha_health_tick(ha) -> None:
+    """HA 桥接自愈：不可达时轻量重探（GET /api/states 恒存在，成本极低）。
+
+    2026-09-12 真机实锤（用户 HAOS 18.2 / Core 2026.9.1）：加载项重启若撞上
+    HA Core 启动窗口，启动期 `ha.start()` 那次探测失败后**没有任何周期重探**，
+    状态页「HA 桥接 不可达」会一直亮到下一句语音/查询碰巧调用 HA 为止
+    （用户实感"手动触发一次才在线"）。状态循环每 5s 顺带重探即可自愈；
+    refresh_states 自带 5s TTL，不会打爆 HA。
+    """
+    if ha is None or ha.reachable or not ha.ok:
+        return
+    with contextlib.suppress(Exception):
+        await ha.refresh_states()
 
 
 def _atomic_write(path: Path, content: str) -> None:

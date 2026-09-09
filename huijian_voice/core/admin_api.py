@@ -46,6 +46,7 @@ async def _health(request):
         "version": _addon_version(),
         "uptime_s": int(time.time() - ctx.started_at),
         "ha_bridge": bool(ctx.ha and ctx.ha.reachable),
+        "ha_error": (getattr(ctx.ha, "last_error", "") if ctx.ha else ""),
         "sessions": len(ctx.sessions),
         "models_ready": {k: ctx.store.is_ready(k) for k in ctx.store.keys()},
         "asr_loaded": bool(ctx.asr.ready()) if ctx.asr else False,
