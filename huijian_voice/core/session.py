@@ -224,6 +224,7 @@ class TtsSession(BaseSession):
     async def _stream(self, text: str, gen: int) -> None:
         deadline = time.monotonic() + const.TTS_STREAM_BUDGET_S
         sent_any = False
+        n_frames = n_bytes = 0
         try:
             # F5：预算必须覆盖「生成器挂起」——逐包用剩余预算做 wait_for，
             # native 合成卡死也能按点收束（finally 的 stop 义务不变）。
@@ -242,6 +243,8 @@ class TtsSession(BaseSession):
                 if not await self.send_bytes(pkt):
                     return
                 sent_any = True
+                n_frames += 1
+                n_bytes += len(pkt)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -250,7 +253,12 @@ class TtsSession(BaseSession):
             # 仅当自己仍是当前代时才收束（防被顶替后发孤儿 stop）
             if gen == self._gen:
                 await self.send_json({"type": "tts", "state": "stop"})
-                if not sent_any and text:
+                # v1.0.25：成功也留一行——「灯开了不播报」必须能逐跳对账
+                # （加载项下发 → 集成收帧 → 卫星推流 → 设备出声），此前成功全静默。
+                if sent_any:
+                    logger.info("[TTS] 播报下发：%d 帧 / %d 字节 / %r",
+                                n_frames, n_bytes, text[:30])
+                elif text:
                     logger.warning("[TTS] 空音频收束（模型未就绪？）: %r", text[:30])
 
     async def on_close(self) -> None:

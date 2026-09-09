@@ -1,5 +1,7 @@
 import asyncio
+import io
 import logging
+import wave
 from collections.abc import AsyncGenerator, AsyncIterable
 
 import numpy as np
@@ -10,6 +12,17 @@ from homeassistant.core import HomeAssistant
 from ..const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def wrap_pcm_as_wav(pcm: bytes, rate: int, channels: int, sample_bytes: int = 2) -> bytes:
+    """裸 PCM → WAV 容器（纯 Python，无 ffmpeg 依赖；卫星推流目标同构）。"""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wav_file:
+        wav_file.setnchannels(channels)
+        wav_file.setsampwidth(sample_bytes)
+        wav_file.setframerate(rate)
+        wav_file.writeframes(pcm)
+    return buf.getvalue()
 
 
 async def async_convert_audio(
@@ -25,6 +38,33 @@ async def async_convert_audio(
     input_params: list | None = None,
 ) -> AsyncGenerator[bytes, None]:
     """Convert audio to a preferred format using ffmpeg."""
+    # ── s16le → wav 纯 Python 直封（v1.0.25）──────────────────────────
+    # 卫星推流只认 16k/mono/16bit WAV，而加载项 WS tts 通道吐的正是裸
+    # s16le 16k/mono——本可原样封容器。此前一律走 ffmpeg，而
+    # ffmpeg.get_ffmpeg_manager(hass) 要求 HA 已配置 ffmpeg 集成，
+    # 未配置即 RuntimeError → 播报静默且报错离病因很远（2026-09-09 排查）。
+    # 直封后关键路径零外部依赖、零子进程，字节级可断言。
+    if from_extension == "s16le" and to_extension == "wav":
+        rate, channels = 16000, 1
+        params = list(input_params or [])
+        for idx, param in enumerate(params):
+            if param == "-ar" and idx + 1 < len(params):
+                rate = int(params[idx + 1])
+            elif param == "-ac" and idx + 1 < len(params):
+                channels = int(params[idx + 1])
+        pcm = b"".join([chunk async for chunk in audio_bytes_gen])
+        wav = wrap_pcm_as_wav(pcm, rate, channels, 2)
+        _LOGGER.info(
+            "[TTS] s16le→wav 直封：%d 帧 %.2fs（%dHz/%dch/16bit，%d 字节）",
+            len(pcm) // (2 * channels),
+            len(pcm) / (2 * channels * rate) if pcm else 0.0,
+            rate,
+            channels,
+            len(wav),
+        )
+        yield wav
+        return
+
     ffmpeg_manager = ffmpeg.get_ffmpeg_manager(hass)
     command = [
         ffmpeg_manager.binary,

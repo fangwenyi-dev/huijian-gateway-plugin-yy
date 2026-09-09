@@ -695,7 +695,17 @@ class EsphomeAssistSatellite(
                     _LOGGER.error("Can only stream 16Khz 16-bit mono WAV")
                     return
 
-                _LOGGER.debug("Streaming %s audio samples", wav_file.getnframes())
+                frames = wav_file.getnframes()
+                if frames <= 0:
+                    # v1.0.25 fail-loud：0 帧 WAV 会让设备端「起流即收流」——
+                    # 灯照常执行、播报全哑，此前这里只有 debug 行，排查无从下手。
+                    _LOGGER.warning(
+                        "[TTS] 音频 0 帧（%d 字节 WAV），设备将静音", len(data)
+                    )
+                else:
+                    _LOGGER.info(
+                        "[TTS] 推流 %d 帧 %.2fs", frames, frames / sample_rate
+                    )
 
                 while self._is_running:
                     chunk = wav_file.readframes(samples_per_chunk)

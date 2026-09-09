@@ -113,4 +113,10 @@ class HuijianTtsEntity(BaseEntity):
         )
         async for chunk in converting:
             audio += chunk
+        # v1.0.25 fail-loud：空音频是「灯开了不播报」的直接病灶，此前静默返回
+        # 空 WAV 一路无声；现在两端日志各留一行，链路可逐跳对账。
+        if not audio:
+            _LOGGER.error("[TTS] 合成结果为空（加载项未回音频/转换失败）: %r", message[:40])
+        else:
+            _LOGGER.info("[TTS] 音频就绪：%s %d 字节（原文 %r）", fmt, len(audio), message[:40])
         return fmt, audio
