@@ -14,8 +14,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#030712">
 <title>慧尖HA语音插件</title>
-<link rel="stylesheet" href="css/huijian.css?v=1.0.27">
-<link rel="stylesheet" href="css/voice.css?v=1.0.27">
+<link rel="stylesheet" href="css/huijian.css?v=1.0.28">
+<link rel="stylesheet" href="css/voice.css?v=1.0.28">
 </head>
 <body>
 <!-- 「星辰大海」背景层（与网关加载项同一设计标准/同一固定种子＝同一片天）：
@@ -72,7 +72,7 @@
     <div class="hj-row">
       <div><label class="hj-field">引擎</label>
         <select id="stt_provider">
-          <option value="local_paraformer">本地 · Paraformer 中英双语流式（默认，离线可用）</option>
+          <option value="local_paraformer">本地 · SenseVoice 中英粤（默认，离线可用）</option>
           <option value="cloud">云端 · OpenAI 兼容 /audio/transcriptions</option>
         </select></div>
     </div>
@@ -230,14 +230,14 @@
 
 <script>
 "use strict";
-const CURRENT_VERSION = "1.0.27";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
+const CURRENT_VERSION = "1.0.28";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
 // 音色表 = kokoro-multi-lang-v1_0 官方 sid 映射（docs/source/onnx/tts/pretrained_models/kokoro.rst 实证）
 const VOICES = [
-  [45,"zf_xiaobei · 小北（默认）"],[46,"zf_xiaoni · 小尼"],[47,"zf_xiaoxiao · 晓晓"],[48,"zf_xiaoyi · 小艺"],
+  [45,"zf_xiaobei · 小北"],[46,"zf_xiaoni · 小尼"],[47,"zf_xiaoxiao · 晓晓（默认）"],[48,"zf_xiaoyi · 小艺"],
   [49,"zm_yunjian · 云健"],[50,"zm_yunxi · 云希"],[51,"zm_yunxia · 云夏"],[52,"zm_yunyang · 云扬"],
   [2,"af_bella（英文女）"],[17,"am_onyx（英文男）"],[21,"bf_emma（英音女）"],[26,"bm_george（英音男）"]
 ];
-const MODEL_NAMES = {asr_paraformer_bilingual:"STT · Paraformer 中英双语流式", tts_kokoro_multilang:"TTS · Kokoro 多语包"};
+const MODEL_NAMES = {asr_sensevoice_small:"STT · SenseVoice-Small 中英粤", asr_paraformer_bilingual:"STT · Paraformer 中英双语流式", tts_kokoro_multilang:"TTS · Kokoro 多语包"};
 const $ = s => document.querySelector(s);
 /* Ingress 适配（网关同款实证）：页面挂在 /api/hassio_ingress/<token>/ 下，
    根绝对路径 fetch 会打到 HA Core。由 location.pathname 推导前缀；
@@ -349,7 +349,7 @@ async function loadSettings(){
   try { S = await api("/api/settings"); } catch(e){ toast("读取设置失败："+e.message); return; }
   const sid = $("#tts_sid");
   if (sid.options.length===0) VOICES.forEach(([v,n])=>sid.add(new Option(n,v)));
-  sid.value = String(S.tts.sid ?? 45);
+  sid.value = String(S.tts.sid ?? 47);
   $("#tts_speed").value = S.tts.speed ?? 1.0;
   $("#stt_provider").value = S.stt.provider==="cloud" ? "cloud" : "local_paraformer";
   $("#tts_provider").value = S.tts.provider==="cloud" ? "cloud" : "local_kokoro";
@@ -499,6 +499,6 @@ $("#regenBtn").onclick = async ()=>{
   try { await post("/api/token/regenerate",{}); toast("已重置"); loadEndpoints(); } catch(e){ toast(e.message); }
 };
 </script>
-<script src="js/starsky.js?v=1.0.27"></script>
+<script src="js/starsky.js?v=1.0.28"></script>
 </body>
 </html>

@@ -26,3 +26,6 @@ _probe.py
 
 # push-acr 转码调试日志（临时产物，勿提交）
 _tr_*.log
+
+# ASR A/B 台架（本地 scratch，模型与产物不入库）
+_bench/

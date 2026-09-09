@@ -6,11 +6,27 @@
     "sha256 为本地研究包实测值（2026-09-08，与官方 release 文件名一致；E2E 首跑若校验不过=官方更新同版本包，需人工复核后回填）。",
     "2026-09-08 命中预案：E2E 对 kokoro-multi-lang-v1_0 双源 5 连败——本机直下复核：377 文件 / model.onnx 325560556B / required_files 全与旧实测一致（上游仅重打包重传，内容未变），回填新值 c5f7e2d2…（旧 c133d263…）。paraformer 双源实测未变，不动。",
     "top_dir=解包后的根目录名，解到 /data/models/<key>/ 时自动剥掉该前缀。",
-    "2026-09-08 复核：asr/sherpa-onnx-paraformer-zh-int8-2025-10-07.tar.bz2 经 tar 内 README 实证实为 WSChuan 四川话模型（ASLP-lab/WSChuan-ASR Paraformer-large-Chuan 导出），非普通话——已从清单剔除，主 ASR 定案为 bilingual 流式包（实测 RTF 0.042/RSS ~400MB）。"
+    "2026-09-08 复核：asr/sherpa-onnx-paraformer-zh-int8-2025-10-07.tar.bz2 经 tar 内 README 实证实为 WSChuan 四川话模型（ASLP-lab/WSChuan-ASR Paraformer-large-Chuan 导出），非普通话——已从清单剔除，主 ASR 定案为 bilingual 流式包（实测 RTF 0.042/RSS ~400MB）。",
+    "2026-09-13 A/B 台架定案（_bench/bench_result.txt，用户批准换引擎）：主 ASR=SenseVoice-Small int8（真实录音不丢尾/粤语/code-switch 显著强、命令推理快 2.3×、单引擎 RSS 370MB≤旧档 413MB）；bilingual 流式降为兼容回落档保留（stt.local_model=paraformer 显式回退，主档故障自动降级）。sv sha256=gh-proxy 直下实测；hf-mirror 无该包同名仓（实测 404），不设第三源，手动导入 /data/models/import/ 为逃生门。",
+    "2026-09-13 TTS 换代调研（维持 v1_0 包）：v1_1（int8/fp32 同份 voices.bin 实测 sha 一致）103 音色全为编号名 zf_001…zm_100（k2-fsa 官方 sid 表+pykokoro 双源核），zf_xiaoxiao/zm_yunyang 等具名中文音色只存在于 v1_0——某公众号文章标 v1_1 实为误标；v1_0 的 53 音色向量在 v1_1 中逐比特 0 保留。RTF 四包横评（同机 2 线程）：v1.0-fp32 0.281 / v1.1-fp32 0.300 / v1.0-int8 0.685 / v1.1-int8 0.720——int8 无 VNNI 收益反慢 2.4×。用户试听拍板定晓晓=v1_0 sid47 为默认音色（原 45 小北）。同期 tts.py 真修复：lang zh→''（语言矩阵实证 lang=zh 吞英文片段=现网缺词根因，纯中零差异）；加载器兼容 model.int8.onnx/model.onnx 双命名。"
   ],
+  "asr_sensevoice_small": {
+    "display_name": "STT · SenseVoice-Small 中英粤 (int8)",
+    "default_provider": true,
+    "tarball": "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17.tar.bz2",
+    "sha256": "f6b2a72ebcb1ac7a764d4cfccd886e6bcb2a95c4657c2199d0ba95ed4b9ea71a",
+    "top_dir": "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
+    "required_files": ["model.int8.onnx", "tokens.txt"],
+    "size_mb": 1000,
+    "_file_note": "包内同带 fp32 model.onnx(937MB)：代码只引用 model.int8.onnx(239MB)，fp32 解包占盘但绝不加载；勿改引用。",
+    "urls": [
+      "https://gh-proxy.com/https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17.tar.bz2",
+      "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17.tar.bz2"
+    ]
+  },
   "asr_paraformer_bilingual": {
     "display_name": "STT · Paraformer 中英双语流式 (int8)",
-    "default_provider": true,
+    "default_provider": false,
     "tarball": "sherpa-onnx-streaming-paraformer-bilingual-zh-en.tar.bz2",
     "sha256": "5462a1fce42693deae572af1e8c4687124b12aa85fe61ff4d3168bb5280e205f",
     "top_dir": "sherpa-onnx-streaming-paraformer-bilingual-zh-en",
@@ -23,7 +39,7 @@
     ]
   },
   "tts_kokoro_multilang": {
-    "display_name": "TTS · Kokoro 中英多音色 (sid45 小北默认)",
+    "display_name": "TTS · Kokoro 中英多音色 (sid47 晓晓默认)",
     "default_provider": true,
     "tarball": "kokoro-multi-lang-v1_0.tar.bz2",
     "sha256": "c5f7e2d2caf082bc1d20fb70334a61d99d20b484500aad32e7cf84c128ea3298",

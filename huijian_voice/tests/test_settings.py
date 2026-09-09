@@ -14,7 +14,7 @@ def test_first_boot_creates_and_persists(settings):
 def test_defaults_match_decisions(settings):
     assert settings.get("stt.provider") == "local_paraformer"
     assert settings.get("tts.provider") == "local_kokoro"
-    assert settings.get("tts.sid") == 45               # 定案默认音色：小北
+    assert settings.get("tts.sid") == 47               # 定案默认音色：晓晓（2026-09-13 试听拍板，原 45 小北）
     assert settings.get("llm.enabled") is False        # LLM 默认关
     assert settings.get("power.unload_when_idle_min") == 0
 
@@ -36,7 +36,7 @@ def test_masked_writeback_noop(settings):
 def test_corrupt_file_rebuilt(settings):
     settings.path.write_text("{ broken", encoding="utf-8")
     settings.load_or_create()
-    assert settings.get("tts.sid") == 45
+    assert settings.get("tts.sid") == 47
     assert settings.path.with_suffix(".json.bak").exists()
 
 

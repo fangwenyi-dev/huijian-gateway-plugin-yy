@@ -25,8 +25,10 @@ logger = logging.getLogger("huijian.settings")
 # ── 默认值（=「装完即用」的全部内置值；除 token 外均可 Web UI 修改）──
 DEFAULTS: dict[str, Any] = {
     "stt": {
-        # local_paraformer | local_paraformer_offline | cloud_openai_compat
+        # provider：local_paraformer(=本地引擎总开关值，历史兼容，勿改字面) | cloud_openai_compat
+        # v4.2：本地具体引擎由 local_model 决定；provider 字面值保持兼容存量 settings.json
         "provider": "local_paraformer",
+        "local_model": "sensevoice",          # sensevoice(默认中英粤) | paraformer(双语流式兼容回落档)
         "language": "zh-CN",
         # 云档示例：{"provider":"cloud_openai_compat","base_url":"https://dashscope.aliyuncs.com/compatible-mode/v1","api_key":"","model":"paraformer 或 whisper 兼容名"}
         # 云失败自动回落本地（v4.1-②）
@@ -34,7 +36,7 @@ DEFAULTS: dict[str, Any] = {
     },
     "tts": {
         "provider": "local_kokoro",           # local_kokoro | cloud_openai_compat
-        "sid": 45,                             # 定案默认音色：小北（女）。音色表见 web/sid 选项
+        "sid": 47,                             # 定案默认音色：晓晓 zf_xiaoxiao（女，用户试听拍板 2026-09-13）。音色表见 web/sid 选项
         "speed": 1.0,                          # 0.8–1.2
         "cache_enabled": True,                 # 体验批 P0-4：句级 opus LRU 缓存（本地档）
         "cloud": {"provider": "", "base_url": "", "api_key": "", "model": "", "voice": "",

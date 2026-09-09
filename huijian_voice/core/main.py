@@ -135,6 +135,10 @@ class Service:
                     loop = asyncio.get_running_loop()
                     if need_asr and not self.asr.ready():
                         await loop.run_in_executor(None, self.asr.ensure_loaded)
+                    elif need_asr and self.asr.stale_kind():
+                        # v4.2：回落档在载/用户切了 local_model——主档就绪即原地换绑
+                        # （推理在飞 rebind 返回 False，60s 后下一轮再试，不断会话）
+                        await loop.run_in_executor(None, self.asr.rebind_primary)
                     if need_tts and not self.tts.ready():
                         await loop.run_in_executor(None, self.tts.ensure_loaded)
                     # TextCNN 预热（小模型，镜像内置）

@@ -1,11 +1,23 @@
-"""TTS 引擎（默认本地 Kokoro-82M multi-lang，sid=45 小北；云可配回落本地）。
+"""TTS 引擎（本地 Kokoro-82M multi-lang **v1.0 fp32**——现役包不换；
+sid=47 zf_xiaoxiao 晓晓女声默认，用户试听拍板 2026-09-13；云可配回落本地）。
 
 体验批 P0-4：句级 opus 缓存。控制类回复高度模板化（"好的，X打开了"），
 按 (句, sid, speed) 缓存编码完成的裸 opus 帧——命中即首包归零、4C8G 卸载
 省电档下不再为同一句话反复烧 Kokoro。云档不缓存（外部服务输出不稳定）；
 模型换载/卸载即清空（缓存与当代模型同源）。
 
-定案链：v4.1 ②「本地默认+云可配自动回落」；音色 sid45 中文女声（用户授权选定）。
+2026-09-13 v1.1 换代调研定案（维持 v1.0 包，证据入 models.lock.json _comment）：
+· v1_1（int8/fp32 两包 voices.bin 逐字节同一份）103 音色全为编号名 zf_001…zm_100，
+  "晓晓/云扬/小北"等具名中文音色**不存在**（k2-fsa 官方 sid 表+pykokoro 双源核）；
+  v1.0 的 53 音色向量逐比特比对 0 保留（v1.1-zh 全新说话人集）→ 要晓晓必须 v1_0。
+· RTF 四包横评（同机 2 线程）：v1.0-fp32 0.281（最快）/ v1.1-fp32 0.300 /
+  v1.0-int8 0.685 / v1.1-int8 0.720——int8 在本机 VNNI 下仍慢 2.4×，ARM 风险更大。
+· 本次真修复=lang=""（语种自动路由）：lang="zh" 下 espeak-ng cmn 通道把英文
+  片段全部 "Failed to set eSpeak-ng voice" 静默丢弃——即现网遗留"英文实体名片段
+  句中缺词/纯英整句静音"根因；lang 矩阵（v1.0/v1.1 × 纯中/中英混/纯英）实证
+  lang="" 三型全过、纯中逐比特同长 → v1.0 包直接受益。
+· 加载器兼容 model.int8.onnx→回落 model.onnx 双命名：手动导入口放 int8 包亦可跑。
+定案链：v4.1 ②「本地默认+云可配自动回落」。
 运行形态（sherpa-onnx 1.13.7 API 实测钉桩）：
   OfflineTts(OfflineTtsConfig(model=OfflineTtsModelConfig(kokoro=OfflineTtsKokoroModelConfig(
       model/voices/tokens/data_dir/dict_dir/lexicon/lang))))) → generate(text,sid,speed)
@@ -92,7 +104,12 @@ class TtsEngine:
             try:
                 import sherpa_onnx as so
                 k = so.OfflineTtsKokoroModelConfig()
-                k.model = str(d / "model.onnx")
+                # 两代命名都认：int8 包主模型叫 model.int8.onnx、fp32 包叫
+                # model.onnx（现役定案=v1.1 fp32；导入口放哪种都收，审查换包免改码）。
+                main = d / "model.int8.onnx"
+                if not main.exists():
+                    main = d / "model.onnx"
+                k.model = str(main)
                 k.voices = str(d / "voices.bin")
                 k.tokens = str(d / "tokens.txt")
                 lex = [str(d / f) for f in ("lexicon-zh.txt", "lexicon-us-en.txt") if (d / f).exists()]
@@ -101,7 +118,11 @@ class TtsEngine:
                     k.data_dir = str(d / "espeak-ng-data")
                 if (d / "dict").is_dir():
                     k.dict_dir = str(d / "dict")
-                k.lang = "zh"
+                k.lang = ""   # 语种自动：kokoro v1.1 multi-lang 前端自带中英路由。
+                # 定案依据（2026-09-13 台架 lang 矩阵）：lang="zh" 时 espeak-ng 走 cmn
+                # 通道，英文片段全部 "Failed to set eSpeak-ng voice" 静默丢弃——
+                # 即现场遗留"英文实体名片段致句中缺词/整句静音"根因；lang="" 在
+                # 纯中/中英混/纯英三型均完整产出（v1.0/v1.1 两代包同验，纯中零差异）。
                 model_cfg = so.OfflineTtsModelConfig()
                 model_cfg.kokoro = k
                 model_cfg.num_threads = 2
@@ -122,7 +143,7 @@ class TtsEngine:
                 self._cache.clear(); self._cache_bytes = 0   # 换代模型：旧音频作废
                 self.last_used = time.time()
                 logger.warning("[TTS] Kokoro multi-lang 已加载（%d 音色），sid=%s",
-                               tts.num_speakers, self.settings.get("tts.sid", 45))
+                               tts.num_speakers, self.settings.get("tts.sid", 47))
                 return True
             except Exception as e:
                 logger.error("[TTS] 加载失败: %s", e)
@@ -153,7 +174,7 @@ class TtsEngine:
             except Exception as e:
                 logger.warning("[TTS] 云合成失败(%s) → 回落本地", e)
         loop = asyncio.get_running_loop()
-        sid = int(self.settings.get("tts.sid", 45))
+        sid = int(self.settings.get("tts.sid", 47))
         speed = float(self.settings.get("tts.speed", 1.0))
         load_checked = self.ready()
         for sent in split_sentences(text):
@@ -231,7 +252,7 @@ class TtsEngine:
         loop = asyncio.get_running_loop()
         if not self.ready() and not await loop.run_in_executor(None, self.ensure_loaded):
             return b""
-        sid = int(self.settings.get("tts.sid", 45))
+        sid = int(self.settings.get("tts.sid", 47))
         speed = float(self.settings.get("tts.speed", 1.0))
         out = b""
         for sent in split_sentences(text):
