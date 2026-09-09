@@ -587,3 +587,26 @@ def test_panel_execute_runs_full_cascade():
     aa = _text("core/admin_api.py")
     assert "ctx.pipeline._cascade(text)" in aa
     assert "plan = await ctx.pipeline.fast_path.match(text)" not in aa
+
+
+# ── zh_cn 语料包拼音残留修复（2026-09-09 播报静音事故） ──────────────
+def test_to_plan_sanitizes_pinyin_speech():
+    """引擎直出 "deng 办公室开了。"——ASCII 词走 espeak 通道致整句合成
+    失败（灯开了但静音）；to_plan 出口必须换成中文。"""
+    c = KlarClient(DictSettings())
+    obj = execute_payload([("HassTurnOn", {"area": "办公室"})],
+                          speech="deng 办公室开了。")
+    p = c.to_plan(obj, "打开办公室射灯")
+    assert p.speech == "办公室开了。"
+
+
+def test_fix_zh_pinyin_shapes():
+    from core.nlu.klar_client import fix_zh_pinyin as f
+    assert f("deng 办公室开了。") == "办公室开了。"
+    assert f("deng办公室关了。") == "办公室关了。"
+    assert f("kongtiao 客厅 26") == "空调 客厅 26"
+    assert f("Deng 卧室 开了。") == "卧室 开了。"
+    assert f("办公室射灯 deng 开了") == "办公室射灯 开了"
+    assert f("deng alone") == "灯 alone"
+    assert f("我没听清。") == "我没听清。"
+    assert f("好的，办公室射灯打开了") == "好的，办公室射灯打开了"

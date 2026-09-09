@@ -111,6 +111,13 @@ class TtsEngine:
                 if fsts:
                     cfg.rule_fsts = ",".join(str(d / f) for f in fsts)
                 tts = so.OfflineTts(cfg)
+                # fail-loud：kokoro multi-lang 对含英文/拼音字母的词走 espeak-ng
+                # 音素通道，缺数据目录时 sherpa 只在 stderr 报
+                # "Failed to set eSpeak-ng voice"、Python 侧全句静默失败
+                # （2026-09-09 播报静音事故）。此处显式点名，不再让人猜。
+                if not (d / "espeak-ng-data").is_dir():
+                    logger.error("[TTS] 模型目录缺 espeak-ng-data/：含英文字母的句子"
+                                 "将合成失败，请重导 kokoro-multi-lang 完整包")
                 self._tts = tts
                 self._cache.clear(); self._cache_bytes = 0   # 换代模型：旧音频作废
                 self.last_used = time.time()
@@ -205,6 +212,11 @@ class TtsEngine:
             audio_obj = tts.generate(sent, sid=sid, speed=speed)
             samples = np.asarray(audio_obj.samples, dtype=np.float32)
             rate = int(audio_obj.sample_rate)
+            if samples.size == 0:
+                # espeak 音素失败等引擎内错误只打 stderr、不抛异常，全句空音频
+                # 若无此告警则整链静默（播报静音最难查的一段）
+                logger.warning("[TTS] 合成产出空音频，原文: %r", sent[:40])
+                return b""
             pcm = audio.f32_to_pcm16(samples)
             return audio.resample_pcm16(pcm, rate, const.SAMPLE_RATE)
         except Exception as e:

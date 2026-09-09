@@ -23,6 +23,7 @@ home graph 直读 /homeassistant/.storage）。本客户端只做 POST /api/v2/p
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any, Optional
 
@@ -51,6 +52,29 @@ KLAR_CONTROL_INTENTS = frozenset({
     "HassFanSetSpeed", "HassFanSetPresetMode",
     "HassVacuumStart", "HassVacuumPause", "HassVacuumReturnToBase",
 })
+
+# ── zh_cn 语料包上游遗留拼音修复 ─────────────────────────────────────
+# nlu/klar-ha-nlu src/lang/packs/zh_cn/speech.rs 把 area_light="deng {loc}"、
+# light_suffix=" deng"、heat_noun/cool_noun="kongtiao" 写成拼音占位。实机事故
+# （2026-09-09）：话术 "deng 办公室开了。" ①半中半拼直接见用户；②ASCII 词被
+# Kokoro 走 espeak-ng 音素通道，加载项容器缺 espeak-ng-data 时整句合成失败
+# →「灯答应开了但播报静音」。引擎二进制由上游分发，唯一出路是出口侧后处理。
+# 前缀形（area_light="deng {loc}"）："deng 办公室开了。"→"办公室开了。"——
+# loc 后紧跟的中文也可能是谓语，不能整段吞，只删引导词本身。
+_PINYIN_PREP_RE = re.compile(r"deng\s*(?=[\u4e00-\u9fff])", re.IGNORECASE)
+_PINYIN_SUFFIX_RE = re.compile(r"(?<=[\u4e00-\u9fff])\s+deng(?![A-Za-z])", re.IGNORECASE)
+_PINYIN_TOKEN_RE = re.compile(r"\b(deng|kongtiao)\b", re.IGNORECASE)
+_PINYIN_TOKEN_MAP = {"deng": "灯", "kongtiao": "空调"}
+
+
+def fix_zh_pinyin(speech: str) -> str:
+    """引擎话术拼音残留 → 中文。'deng 办公室开了。' → '办公室开了。'"""
+    low = speech.lower()
+    if "deng" not in low and "kongtiao" not in low:
+        return speech
+    s = _PINYIN_PREP_RE.sub("", speech)
+    s = _PINYIN_SUFFIX_RE.sub("", s)
+    return _PINYIN_TOKEN_RE.sub(lambda m: _PINYIN_TOKEN_MAP[m.group(0).lower()], s)
 
 
 class KlarClient:
@@ -172,7 +196,7 @@ class KlarClient:
             picked.append((name, self._slots_to_args(intent)))
         if not picked:
             return None
-        speech = str(obj.get("speech") or "")
+        speech = fix_zh_pinyin(str(obj.get("speech") or ""))
         first_name, first_args = picked[0]
         extra = [{"name": n, "args": a} for n, a in picked[1:]]
         trace = [f"klar:conf={conf:.2f}" if conf is not None else "klar:conf=?",
