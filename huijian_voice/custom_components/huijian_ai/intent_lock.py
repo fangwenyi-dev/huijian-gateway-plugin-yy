@@ -13,9 +13,9 @@ import logging
 from typing import Any
 
 import voluptuous as vol
-from homeassistant.components.lock.const import (DOMAIN as LOCK_DOMAIN,
-                                                 SERVICE_LOCK, SERVICE_UNLOCK)
-from homeassistant.const import ATTR_ENTITY_ID
+from homeassistant.components.lock.const import DOMAIN as LOCK_DOMAIN
+from homeassistant.const import (ATTR_ENTITY_ID, SERVICE_LOCK,
+                                 SERVICE_UNLOCK)
 from homeassistant.helpers import intent
 from homeassistant.util.json import JsonObjectType
 
@@ -42,8 +42,19 @@ class LockIntentBase(intent.IntentHandler):
             slots = self.async_validate_slots(intent_obj.slots)
             targets = (slots.get("target") or {}).get("value") or []
             if targets:
+                # 只认锁域：加载项对"大门/门锁"这类词的 domain_hint 为空
+                # （2026-09-12 实测 14 个常见设备名），空 domains 在真机匹配会
+                # 直接 DOMAIN 失败；这里统一收窄到 lock，既修匹配又绝不误动
+                # 同名非锁实体（如名为"大门"的开关）。
+                narrowed = []
+                for t in targets:
+                    t = dict(t)
+                    devices = t.get("devices") or [{}]
+                    t["devices"] = [dict(d, domains=[LOCK_DOMAIN])
+                                    for d in devices]
+                    narrowed.append(t)
                 error_msg, candidates = await match_intent_entities(
-                    intent_obj, targets)
+                    intent_obj, narrowed)
                 if error_msg:
                     return error_msg
                 states = [c.state for c in (candidates or [])]
@@ -53,12 +64,20 @@ class LockIntentBase(intent.IntentHandler):
                                  if s.domain == LOCK_DOMAIN})
             if not entity_ids:
                 return {"success": False, "error": "未找到可用的门锁设备"}
-            await hass.services.async_call(
-                LOCK_DOMAIN, self.lock_service,
-                {ATTR_ENTITY_ID: entity_ids},
-                context=intent_obj.context,
-                blocking=True,
-                timeout=self.service_timeout,
+            # 与 intent_turn.py 同构：_run_then_background 到点（service_timeout）
+            # 放后台续跑，避免锁服务慢时拖死对话回合。注意
+            # ServiceRegistry.async_call 无 timeout 形参（2026-09-12 核 core
+            # 2025.1.0 签名：domain/service/service_data/blocking/context/
+            # target/return_response），超时只走 _run_then_background。
+            await self._run_then_background(
+                hass.async_create_task(
+                    hass.services.async_call(
+                        LOCK_DOMAIN, self.lock_service,
+                        {ATTR_ENTITY_ID: entity_ids},
+                        context=intent_obj.context,
+                        blocking=True,
+                    )
+                )
             )
             names = [str((s.attributes or {}).get("friendly_name")
                          or s.entity_id)

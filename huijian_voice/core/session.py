@@ -144,7 +144,16 @@ class SttSession(BaseSession):
     async def _transcribe_and_reply(self) -> None:
         # 上一轮识别未回时不并发（保 stop 语义单条）
         if self._task and not self._task.done():
+            # P1-8 契约「每 stop 必回且仅回一条」：被抢占的 stop 必须收束。
+            # 2026-09-12 模拟台实锤竞态——若 cancel() 落在任务首次调度前，协程体
+            # 根本不会执行，_run 里的 CancelledError 收束分支也就永远不跑，
+            # 该 stop 静默丢帧（快速连发可复现）。故改由**抢占方**当场收束，
+            # 与任务是否起跑无关。
             self._task.cancel()
+            self._task = None
+            logger.info("[STT] 在飞识别被抢占，本 stop 以空文本收束")
+            with contextlib.suppress(Exception):
+                await self._reply_stt("")
         pcm = bytes(self._pcm)
         self._pcm.clear()
         self._task = asyncio.create_task(self._run(pcm))
@@ -160,12 +169,9 @@ class SttSession(BaseSession):
         except asyncio.TimeoutError:
             logger.warning("[STT] 识别超预算 %ss", const.STT_RESULT_BUDGET_S)
         except asyncio.CancelledError:
-            # P1-8：被新一轮 stop 抢占/断连取消——契约 §1.4"每 stop 必回且仅回
-            # 一条"不容破例：本 stop 以空文本收束后继续上抛取消。shield 保证
-            # 二次取消（关站风暴）下收束帧仍会发出。
-            logger.info("[STT] 在飞识别被抢占，本 stop 以空文本收束")
-            with contextlib.suppress(Exception):
-                await asyncio.shield(self._reply_stt(""))
+            # 收束已由抢占方（_transcribe_and_reply）或断连（on_close）负责，
+            # 这里不再补发，避免双帧（2026-09-12 竞态修复配套）。
+            logger.info("[STT] 在飞识别被取消")
             raise
         except Exception:
             logger.exception("[STT] 识别异常")

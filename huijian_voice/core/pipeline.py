@@ -53,6 +53,21 @@ HUIJIAN_ONLY_INTENTS = frozenset({
     "HassListAutomations", "HassUpdateAutomation", "HuijianGetLiveContext",
 })
 
+# 空间化兜底域（无目标位时补 target 用；绝不发 area-only——集成端
+# target["devices"] 会 KeyError，2026-09-12 实锤）
+_SPATIAL_DOMAIN = {
+    "ControlWindow": ["cover"],
+    "AdjustDeviceAttribute": ["light"],
+    "SetDeviceMode": ["climate"],
+}
+
+# 泛类设备词：这类目标（"开灯/关窗帘"）才做卫星区域限定；指名道姓的设备句
+# 零影响（v1.0.20 原设计语义，2026-09-12 补实现）
+_GENERIC_DEVICE_WORDS = frozenset({
+    "灯", "灯光", "灯带", "筒灯", "射灯", "吊灯", "窗帘", "空调", "风扇",
+    "插座", "开关", "电视", "音箱", "净化器", "加湿器", "扫地机", "热水器",
+})
+
 _INTEGRATION_HINTS = ("集成",)
 
 
@@ -496,6 +511,10 @@ class Pipeline:
         if args is None:                       # 坑：`plan.args or {}` 对空 dict 会
             args = plan.args = {}              # 另造孤儿 dict，注入写进去等于没写
         if _has_explicit_target(args):
+            # 明示目标（非代词/回指解析）也补卫星区域——v1.0.20 空间化此前被
+            # 这道早退挡住，"开灯"永不落本区域（2026-09-12 探针实锤）。
+            if not self._is_anaphoric(plan, text):
+                self._apply_spatial(plan, args, origin)
             return plan
         if seed is not None:
             spec, fresh = seed, True           # 链内先行分句，天然新鲜
@@ -527,15 +546,49 @@ class Pipeline:
                 plan.trace.append(f"{tag}:沿用实体 {spec['target']}")
                 injected = True
         if not injected:
-            area = (self.settings.get("spatial.satellite_areas") or {}).get(origin)
-            if area:
-                if plan.intent in HUIJIAN_ONLY_INTENTS or "target" in args:
-                    args["target"] = [{"area": area}]
-                    plan.trace.append(f"空间化:卫星→{area}")
-                elif "area" in args and not args.get("area"):
-                    args["area"] = area
-                    plan.trace.append(f"空间化:卫星→{area}")
+            self._apply_spatial(plan, args, origin)
         return plan
+
+    @staticmethod
+    def _is_anaphoric(plan: Plan, text: str) -> bool:
+        """该计划的目标是否来自代词/回指解析（此类目标不得再叠卫星区域）。"""
+        return (any(("代词目标" in t or "回指→" in t or "链内回指" in t)
+                    for t in plan.trace)
+                or is_pronoun(text) or "它" in text or "们" in text)
+
+    def _apply_spatial(self, plan: Plan, args: dict, origin: str) -> None:
+        """卫星区域空间化：只补缺（明示区域优先），永不发 area-only 目标。
+
+        2026-09-12 三端深挖两坑同修：①此前 HUIJIAN_ONLY 分支发 {"area": x}
+        无 devices 键 → 集成端 target["devices"] 必 KeyError；②Turn* 因早退
+        恒不命中 → "开灯"不落本区域。
+        """
+        area = (self.settings.get("spatial.satellite_areas") or {}).get(origin)
+        if not area:
+            return
+        targets = args.get("target")
+        if isinstance(targets, list) and targets:
+            # 只给"泛类词"目标补区域（灯/窗帘/空调…），指名道姓的设备句零影响
+            # ——原设计语义如此，且避免把「打开射灯」这类明示句误缩到本房间。
+            changed = False
+            for t in targets:
+                if not isinstance(t, dict) or t.get("area"):
+                    continue
+                names = [str(d.get("name") or "") for d in (t.get("devices") or [])
+                         if isinstance(d, dict)]
+                if names and all(n in _GENERIC_DEVICE_WORDS for n in names if n):
+                    t["area"] = area
+                    changed = True
+            if changed:
+                plan.trace.append(f"空间化:卫星→{area}")
+            return
+        if plan.intent in HUIJIAN_ONLY_INTENTS or "target" in args:
+            args["target"] = [{"area": area,
+                               "devices": [{"domains": _SPATIAL_DOMAIN.get(plan.intent, [])}]}]
+            plan.trace.append(f"空间化:卫星→{area}")
+        elif "area" in args and not args.get("area"):
+            args["area"] = area
+            plan.trace.append(f"空间化:卫星→{area}")
 
     def _spec_of(self, plan: Plan) -> Optional[dict]:
         """从计划抽「明示目标」三形态 spec（不带 ts）；无明示目标返回 None。

@@ -212,7 +212,12 @@ def test_dedup_abandon_on_cancel_frees_waiters():
 
 # ── P1-8 STT 抢占收束 ─────────────────────────────────────────
 def test_stt_preempted_stop_still_gets_one_frame():
-    """被抢占/取消的旧识别任务必须以一条空 stt 帧收束（契约 §1.4 每 stop 必回）。"""
+    """被抢占的 stop 必须恰收一条空帧——含"任务尚未起跑就被取消"竞态。
+
+    2026-09-12 模拟台实锤：旧实现把收束放在 _run 的 CancelledError 分支里，
+    若 cancel() 落在任务首次调度前，协程体根本不执行 → 该 stop 静默丢帧。
+    现改为抢占方当场收束（_transcribe_and_reply），与起跑与否无关。
+    """
     from core.session import SttSession
 
     async def scenario():
@@ -225,19 +230,38 @@ def test_stt_preempted_stop_still_gets_one_frame():
             async def send_str(self, s):
                 self.sent.append(json.loads(s))
 
+        started = asyncio.Event()
+
         async def slow(pcm):
+            started.set()
             await asyncio.sleep(5)
             return "不该出现"
 
+        ctx = type("C", (), {"asr": type("A", (), {
+            "transcribe_pcm": staticmethod(slow)})()})()
+
+        # 情形 A：旧任务已起跑 → 抢占后仍恰一条空帧
         ws = Ws()
-        ctx = type("C", (), {"asr": type("A", (), {"transcribe_pcm": staticmethod(slow)})()})()
         s = SttSession(ws, ctx)
-        t1 = asyncio.create_task(s._run(b"x"))
-        await asyncio.sleep(0.02)
-        t1.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await t1
-        assert ws.sent == [{"type": "stt", "text": ""}]  # 恰好一条空文本收束帧
+        s._pcm = bytearray(b"x")
+        await s._transcribe_and_reply()
+        await asyncio.wait_for(started.wait(), 1)
+        s._pcm = bytearray(b"y")
+        await s._transcribe_and_reply()
+        assert ws.sent == [{"type": "stt", "text": ""}]
+
+        # 情形 B：旧任务尚未起跑（同一 tick 内连发两个 stop）→ 仍恰一条空帧
+        ws2 = Ws()
+        s2 = SttSession(ws2, ctx)
+        s2._pcm = bytearray(b"x")
+        await s2._transcribe_and_reply()
+        s2._pcm = bytearray(b"y")
+        await s2._transcribe_and_reply()
+        assert ws2.sent == [{"type": "stt", "text": ""}], ws2.sent
+        for t in (s._task, s2._task):
+            if t:
+                t.cancel()
+
     asyncio.run(scenario())
 
 
@@ -311,8 +335,34 @@ def test_spatial_area_injected_for_targetless_satellite():
     st = PSettings({"spatial.satellite_areas": {"10.0.0.9": "卧室"}})
     p = _pipe(fp=Lane(single=_p("TurnDeviceOn", {"target": []})), ex=ex, settings=st)
     arun(p.handle("开灯", origin="10.0.0.9"))
-    assert ex.plans[0].args["target"] == [{"area": "卧室"}]
+    # 2026-09-12 三端深挖：旧钉 [{"area": x}] 是 area-only 目标，集成端
+    # target["devices"] 必 KeyError——那是把 bug 当契约钉住了；正确形态必须带
+    # devices（无目标位时按 intent 补兜底域）。
+    assert ex.plans[0].args["target"] == [
+        {"area": "卧室", "devices": [{"domains": []}]}]
     assert any("空间化:卫星→卧室" in t for t in ex.plans[0].trace)
+
+
+def test_spatial_area_scopes_generic_word_target():
+    """泛类词目标（"开灯"→name=灯）也要落本区域：v1.0.20 因早退恒空转。"""
+    ex = RecExecutor()
+    st = PSettings({"spatial.satellite_areas": {"10.0.0.9": "卧室"}})
+    tgt = {"target": [{"devices": [{"name": "灯", "domains": ["light"]}]}]}
+    p = _pipe(fp=Lane(single=_p("TurnDeviceOn", tgt)), ex=ex, settings=st)
+    arun(p.handle("开灯", origin="10.0.0.9"))
+    assert ex.plans[0].args["target"] == [{
+        "area": "卧室", "devices": [{"name": "灯", "domains": ["light"]}]}]
+
+
+def test_spatial_does_not_scope_specific_device_name():
+    """指名道姓（非泛类词）的设备句零影响——「打开客厅通道」不缩到本房间。"""
+    ex = RecExecutor()
+    st = PSettings({"spatial.satellite_areas": {"10.0.0.9": "卧室"}})
+    tgt = {"target": [{"devices": [{"name": "客厅通道", "domains": []}]}]}
+    p = _pipe(fp=Lane(single=_p("TurnDeviceOn", tgt)), ex=ex, settings=st)
+    arun(p.handle("打开客厅通道", origin="10.0.0.9"))
+    assert ex.plans[0].args["target"] == [{
+        "devices": [{"name": "客厅通道", "domains": []}]}]
 
 
 def test_spatial_does_not_touch_explicit_target():

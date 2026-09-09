@@ -201,14 +201,22 @@ async def _match_with_constraints(
     all_expanded_domains: set[str] = set()
 
     for target in targets:
-        for device in target["devices"]:
+        # 2026-09-12 三端深挖实锤两坑（core 2025.1.0 源码核定）：
+        # ①area-only 目标（加载项空间化曾发 {"area": x} 无 devices 键）→ 旧写法
+        #   target["devices"] 必 KeyError；改 .get() 兜底并补一个"任意域"设备。
+        # ②domains=[] 会把空列表直接传给 HA async_match_targets，而
+        #   `hass.states.async_all([])` 返回空表 → 立刻 MatchFailedReason.DOMAIN
+        #   （实测：通道/插座/开关/大门/音箱 等 14 个常见设备名 domain_hint 为空，
+        #   真机"没找到设备"）。空列表语义必须是"不按域过滤"=None。
+        devices = target.get("devices") or [{"domains": []}]
+        for device in devices:
             area_name = target.get("area")
-            expanded_domains = _expand_domains(device["domains"])
+            expanded_domains = _expand_domains(device.get("domains") or [])
             all_expanded_domains.update(expanded_domains)
             match_constraints = intent.MatchTargetsConstraints(
                 name=device.get("name"),
                 area_name=area_name,
-                domains=expanded_domains,
+                domains=expanded_domains or None,
                 assistant=assistant,
                 single_target=False,
                 allow_duplicate_names=True,
@@ -292,7 +300,7 @@ async def match_intent_entities(
     # 这样可以避免 HA 子串匹配导致的过匹配问题
     requested_name = None
     for target in targets:
-        for device in target["devices"]:
+        for device in target.get("devices") or []:   # area-only 目标无 devices 键
             name = device.get("name")
             if name:
                 requested_name = name
