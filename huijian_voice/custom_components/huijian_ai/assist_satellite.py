@@ -307,6 +307,10 @@ class EsphomeAssistSatellite(
             return
 
         data_to_send: dict[str, Any] = {}
+        # v1.0.27：API 推流设备的 TTS_END{url} 与推流并发发出，实测抢跑会把
+        # 固件刚起的会话拆掉（详见固件 v2.1.16）。此类设备本就无 media_url
+        # 自取能力，流的生死由 STREAM_START/STREAM_END 这对消息表达即可。
+        suppress_event = False
         if event_type == VoiceAssistantEventType.VOICE_ASSISTANT_STT_START:
             self._entry_data.async_set_assist_pipeline_state(True)
         elif event_type == VoiceAssistantEventType.VOICE_ASSISTANT_STT_END:
@@ -362,6 +366,15 @@ class EsphomeAssistSatellite(
                             "esphome_voice_assistant_tts",
                         )
                     )
+                    if feature_flags & VoiceAssistantFeature.API_AUDIO:
+                        # 只吃 API 音频、无 media_player 自取能力的设备（慧尖板
+                        # v2.1.11 起只宣告 API_AUDIO）：url 事件对它无意义，
+                        # 还会与推流赛跑 → 抑制。SPEAKER 型（真 ESPHome 喇叭）
+                        # 仍靠 url 播放，保持原样发送。
+                        suppress_event = True
+                        _LOGGER.debug(
+                            "[TTS] API 推流设备：抑制抢跑的 TTS_END{url} 事件"
+                        )
         elif event_type == VoiceAssistantEventType.VOICE_ASSISTANT_WAKE_WORD_END:
             assert event.data is not None
             if not event.data["wake_word_output"]:
@@ -400,7 +413,8 @@ class EsphomeAssistSatellite(
                 # No TTS
                 self._entry_data.async_set_assist_pipeline_state(False)
 
-        self.cli.send_voice_assistant_event(event_type, data_to_send)
+        if not suppress_event:
+            self.cli.send_voice_assistant_event(event_type, data_to_send)
 
     @convert_api_error_ha_error
     async def async_announce(

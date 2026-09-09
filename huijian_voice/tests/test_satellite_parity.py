@@ -18,7 +18,7 @@ def _read(p):
     return (CC / p).read_text(encoding="utf-8")
 
 
-def _extract_func(path: Path, name: str):
+def _extract_func(path: Path, name: str, extra_ns: dict | None = None):
     """按仓惯例从真实源码抽出纯函数执行（不复制逻辑）。"""
     import ast
     import io
@@ -26,8 +26,10 @@ def _extract_func(path: Path, name: str):
 
     tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name == name:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
             ns: dict = {"io": io, "wave": wave}
+            if extra_ns:
+                ns.update(extra_ns)
             exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), "exec"), ns)
             return ns[name]
     raise AssertionError(f"{path} 中未找到 {name}")
@@ -80,6 +82,76 @@ def test_wav_fastpath_bypasses_ffmpeg():
     # 用带赋值的代码行定位真实调用（注释里也提到该符号，不能误锚）
     ffmpeg = src.index("ffmpeg_manager = ffmpeg.get_ffmpeg_manager(hass)")
     assert fast < ffmpeg, "wav 直封被挪到 ffmpeg 之后（关键路径重新依赖 ffmpeg）"
+
+
+def test_wav_fastpath_requires_matching_output_request():
+    """直封只在「输出要求 == 源 PCM 形态」时成立，否则必须回退 ffmpeg。
+
+    v1.0.25 的直封只按 input_params 推源形态，忽略 to_sample_rate/
+    to_sample_channels/to_sample_bytes：一旦调用方要求立体声或异率，就会封出
+    **头字段与要求不符**的 WAV——卫星按 WAV 头校验（16k/16bit/mono）直接拒收，
+    又是一场静音；媒体播放器则变速播放。正反两向都钉住。
+    """
+    import asyncio
+    import io
+    import logging
+    import types
+    import wave
+
+    audio_py = CC / "huijian" / "audio.py"
+    reached: list[int] = []
+
+    def _boom(_hass):
+        reached.append(1)
+        raise RuntimeError("stub: HA 未配置 ffmpeg 集成")
+
+    convert = _extract_func(
+        audio_py,
+        "async_convert_audio",
+        extra_ns={
+            "ffmpeg": types.SimpleNamespace(get_ffmpeg_manager=_boom),
+            "_LOGGER": logging.getLogger("pin"),
+            "wrap_pcm_as_wav": _extract_func(audio_py, "wrap_pcm_as_wav"),
+        },
+    )
+
+    pcm = b"\x00\x01" * 160
+
+    async def _src():
+        yield pcm
+
+    async def _run(**kw):
+        chunks = []
+        async for c in convert(
+            None,
+            _src(),
+            "s16le",
+            "wav",
+            input_params=["-ar", "16000", "-ac", "1"],
+            **kw,
+        ):
+            chunks.append(c)
+        return b"".join(chunks)
+
+    # ① 卫星契约形态：必须直封，一次 ffmpeg 都不碰
+    wav = asyncio.run(
+        _run(to_sample_rate=16000, to_sample_channels=1, to_sample_bytes=2)
+    )
+    assert reached == [], "卫星契约形态竟回退了 ffmpeg（直封失效＝v1.0.25 退化）"
+    with wave.open(io.BytesIO(wav), "rb") as w:
+        assert (w.getframerate(), w.getnchannels(), w.getsampwidth()) == (16000, 1, 2)
+        assert w.getnframes() == 160
+        assert w.readframes(160) == pcm, "PCM 必须原样入容器"
+
+    # ② 要求立体声：绝不许封一个头字段不符的 WAV 糊过去，必须走 ffmpeg
+    try:
+        asyncio.run(
+            _run(to_sample_rate=16000, to_sample_channels=2, to_sample_bytes=2)
+        )
+    except RuntimeError:
+        assert reached == [1], "未落到 ffmpeg 分支（异常来源可疑）"
+    else:
+        raise AssertionError("异形态请求仍走直封 → 会产出头字段与要求不符的 WAV")
 
 
 def test_tts_and_satellite_fail_loud():
@@ -136,3 +208,23 @@ def test_tts_empty_audio_never_poisons_cache():
     # ast.unparse 可能渲染成 "return (None, None)"
     norm = {r.replace("(", "").replace(")", "").strip() for r in rets}
     assert "return None, None" in norm, f"空音频分支未返回 (None, None)：{rets}"
+
+
+def test_tts_end_suppressed_for_api_audio():
+    """v1.0.27：API 推流设备不再收到抢跑的 TTS_END{url} 事件。
+
+    实机 2026-09-09 17:21:36：TTS_END 事件先到、1.14s 音频（35×1024+640B）
+    后到，固件据此把刚起的会话拆掉、整段播报当"状态不对"丢光——现场表现
+    仍是"灯开了没声音"。慧尖板只宣告 API_AUDIO、无 media_player 自取能力，
+    url 对它无意义，流的生死由 STREAM_START/STREAM_END 表达即可。
+    门必须收紧在 API_AUDIO：若沿用 SPEAKER|API_AUDIO 并集，会把真 ESPHome
+    喇叭设备（靠 url 播放）的播报一并打死。
+    """
+    n = " ".join(_read("assist_satellite.py").split())
+    assert "if feature_flags & VoiceAssistantFeature.API_AUDIO:" in n, \
+        "抑制门未收紧到 API_AUDIO（会误伤 SPEAKER 型设备的 url 播报）"
+    assert "suppress_event = True" in n, "API 推流分支未置抑制标志"
+    assert (
+        "if not suppress_event: "
+        "self.cli.send_voice_assistant_event(event_type, data_to_send)" in n
+    ), "事件发送尾巴未受抑制标志约束"

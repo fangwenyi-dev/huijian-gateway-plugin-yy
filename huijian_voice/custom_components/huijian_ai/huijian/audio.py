@@ -52,18 +52,37 @@ async def async_convert_audio(
                 rate = int(params[idx + 1])
             elif param == "-ac" and idx + 1 < len(params):
                 channels = int(params[idx + 1])
-        pcm = b"".join([chunk async for chunk in audio_bytes_gen])
-        wav = wrap_pcm_as_wav(pcm, rate, channels, 2)
+        # v1.0.27：直封成立的前提是「输出要求 == 源 PCM 形态」。源是 16bit
+        # 裸 PCM 故 to_sample_bytes 只容 None/2；to_sample_rate/-channels 被
+        # 要求成别的值（如 tts.speak 要立体声或 22050）时必须回退 ffmpeg——
+        # 否则封出的 WAV 头字段与调用方要求不符：卫星按头校验直接拒收
+        # （「Can only stream 16Khz 16-bit mono WAV」→ 又一场静音），媒体
+        # 播放器则变速播放。宁慢勿错。
+        if (
+            to_sample_rate in (None, rate)
+            and to_sample_channels in (None, channels)
+            and to_sample_bytes in (None, 2)
+        ):
+            pcm = b"".join([chunk async for chunk in audio_bytes_gen])
+            wav = wrap_pcm_as_wav(pcm, rate, channels, 2)
+            _LOGGER.info(
+                "[TTS] s16le→wav 直封：%d 帧 %.2fs（%dHz/%dch/16bit，%d 字节）",
+                len(pcm) // (2 * channels),
+                len(pcm) / (2 * channels * rate) if pcm else 0.0,
+                rate,
+                channels,
+                len(wav),
+            )
+            yield wav
+            return
         _LOGGER.info(
-            "[TTS] s16le→wav 直封：%d 帧 %.2fs（%dHz/%dch/16bit，%d 字节）",
-            len(pcm) // (2 * channels),
-            len(pcm) / (2 * channels * rate) if pcm else 0.0,
+            "[TTS] 直封不适用：输出要求 %sHz/%sch/%sbyte ≠ 源 %dHz/%dch/16bit，转 ffmpeg",
+            to_sample_rate,
+            to_sample_channels,
+            to_sample_bytes,
             rate,
             channels,
-            len(wav),
         )
-        yield wav
-        return
 
     ffmpeg_manager = ffmpeg.get_ffmpeg_manager(hass)
     command = [
