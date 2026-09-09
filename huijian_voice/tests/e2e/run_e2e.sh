@@ -37,11 +37,16 @@ for i in $(seq 1 90); do
 done
 curl -sf http://127.0.0.1:8002/api/health >/dev/null || { diag "health 超时"; exit 1; }
 
-echo "==== 4. 等双模型真下载就绪（≤450MB，给 25 分钟）===="
+echo "==== 4. 等运行期所需模型真下载就绪（主档 ASR+Kokoro ≈1.4GB，给 25 分钟）===="
+# v4.2 教训（run 34364440982 实红 25min 超时）：等值集合必须是「运行期 need」，
+# 不能是 lock 全清单——paraformer 已降兼容回落档，新装根本不会主动下载它，
+# all(models_ready.values()) 恒 false。改键/换默认主档时此 need 必须同步。
 for i in $(seq 1 300); do
     R=$(curl -sf --max-time 5 http://127.0.0.1:8002/api/health | python3 -c \
         'import json,sys
-j=json.load(sys.stdin); print("yes" if j.get("models_ready") and all(j["models_ready"].values()) else "")' \
+j=json.load(sys.stdin); m=j.get("models_ready") or {}
+need=["asr_sensevoice_small","tts_kokoro_multilang"]
+print("yes" if all(m.get(k) for k in need) else "")' \
         2>/dev/null | tr -d '\r' || true)
     [ "$R" = "yes" ] && break
     sleep 5

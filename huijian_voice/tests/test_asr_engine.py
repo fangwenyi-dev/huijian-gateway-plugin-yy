@@ -9,6 +9,7 @@
      且**无 _hj_kind 标记的替身默认走此路径**（test_concurrency_guards 兼容）。
 """
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -216,3 +217,17 @@ def test_settings_defaults_local_model_present_for_merge():
     from core.settings import DEFAULTS
     assert DEFAULTS["stt"]["local_model"] == "sensevoice"
     assert DEFAULTS["stt"]["provider"] == "local_paraformer", "provider 值空间兼容 pin 不得改"
+
+
+def test_e2e_scripts_wait_on_need_not_full_lock():
+    """v1.0.28 CI 实红（run 34364440982，E2E 25min 超时）：两 e2e 脚本的 models
+    就绪等待集必须是「运行期 need」（主档 ASR + Kokoro）——paraformer 降回落档后
+    新装根本不主动下载，等 lock 全清单 all() 恒假。换主档引擎时脚本 need 必须
+    同步，漂移由本钉先红。"""
+    root = Path(__file__).resolve().parents[1]
+    for rel in ("tests/e2e/run_e2e.sh", "tests/e2e/run_local.sh"):
+        src = (root / rel).read_text(encoding="utf-8")
+        m = re.search(r'need=\["([^"]+)",\s*"([^"]+)"\]', src)
+        assert m, f"{rel}: 找不到显式 need 等待集（改动疑似回退成 all(values) 旧式？）"
+        assert set(m.groups()) == {KEY_SV, "tts_kokoro_multilang"}, \
+            f"{rel}: need 集 {m.groups()} 与代码主档 {KEY_SV}/Kokoro 漂移"

@@ -29,7 +29,10 @@ for i in $(seq 1 600); do
     fi
     ready=$(curl -sf --max-time 5 http://127.0.0.1:8002/api/health 2>/dev/null \
         | "$PY" -c 'import json,sys
-try: j=json.load(sys.stdin); print("yes" if all(j.get("models_ready",{}).values()) else "")
+try:
+    j=json.load(sys.stdin); m=j.get("models_ready") or {}
+    need=["asr_sensevoice_small","tts_kokoro_multilang"]  # 运行期主档 need（回落档不主动下载），与 run_e2e.sh 同步维护
+    print("yes" if all(m.get(k) for k in need) else "")
 except Exception: print("")' | tr -d '\r' || true)
     [ "$ready" = "yes" ] && break
     sleep 2
