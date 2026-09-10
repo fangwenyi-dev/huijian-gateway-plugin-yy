@@ -569,8 +569,16 @@ class FastPath:
 
         trace.append(f"{source}:{matched_intent} rest={rest_text!r} extra={extra_args}")
         plan = self._build_plan(matched_intent, rest_text, extra_args, text, source, trace)
-        if plan is None and source != "t1" and self.settings.get(
-                "nlu.textcnn_enabled", True) and self.textcnn:
+        # v1.0.40 修复（A1 后半）：T0 命中了动作、但**目标提取质量不足**时，旧实现直接落空
+        # 进兜底话术——而 T1 往往判得对（实测「打开窗户」旧正则残留「户」时 T1 判
+        # ControlWindow 0.9+）。给 T1 一次接管机会。
+        # 但这道兜底**只许对"提取质量低"生效**：T0 的其它 miss 是刻意的语义拒绝
+        # （音乐泛词交音乐带、PlayMusic 不接管、复合残句拒猜、ControlWindow 无动作词…），
+        # 让 T1 接管会把"故意不接"变成"乱接"——CI 实测反例：`关掉音乐` 被兜底接成
+        # TurnDeviceOff 且设备名是整句残渣（test_music_generic_word_not_device 红）。
+        if (plan is None and source != "t1" and trace
+                and trace[-1].startswith("miss:提取质量低")
+                and self.settings.get("nlu.textcnn_enabled", True) and self.textcnn):
             # v1.0.40 修复（A1 后半）：T0 命中了动作、但**目标提取落空**（残留字/质量门/
             # 提取低分）时，旧实现直接落空进兜底话术——而 T1 往往判得对（实测「打开窗户」
             # 旧正则残留「户」时 T1 判 ControlWindow 0.9+、「打开窗帘」判 OpenCover）。

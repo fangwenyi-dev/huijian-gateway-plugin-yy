@@ -88,6 +88,17 @@ def test_a1_t1_retry_takes_over_when_t0_target_fails(settings):
     assert plan is not None and plan.source in ("t0", "t1")
 
 
+def test_a1_retry_must_not_override_semantic_refusals(settings):
+    """CI 实发反例（本钉即那次失败）：`关掉音乐` 是 T0 **刻意的语义拒绝**——音乐泛词
+    交音乐带处理，不是设备名。T1 兜底只许对"目标提取质量低"生效；若像初版那样无条件
+    兜底，真模型（CI 有 onnxruntime）会给 TurnDeviceOff 高置信，于是把"故意不接"
+    变成"乱接"，设备名还是整句残渣。"""
+    fp = _fp(settings, {"音乐": ("TurnDeviceOff", 0.99), "关": ("TurnDeviceOff", 0.99),
+                        "灯": ("TurnDeviceOn", 0.99)})
+    for t in ("关掉音乐", "关音乐"):
+        assert asyncio.run(fp.match(t)) is None, f"{t} 被 T1 兜底乱接了（语义拒绝被覆盖）"
+
+
 # ── D3：窗帘方向词纠正 ────────────────────────────────────────────
 @pytest.mark.parametrize("text,want", [
     ("拉上窗帘", "TurnDeviceOff"), ("合上窗帘", "TurnDeviceOff"),
