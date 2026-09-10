@@ -382,6 +382,65 @@ async def main():
         check("S8.2 全部意图名在契约表内", names <= KNOWN_INTENTS,
               str(sorted(names - KNOWN_INTENTS)))
 
+        # S9 语音创建（v1.0.30 零 LLM；契约表从集成源码派生 HassCreate* 自动放行）
+        print("\n─ S9 语音创建 ─")
+        n = len(ha.calls)
+        r = await llm_turn(sess, port, "当我说晚安就关闭客厅射灯")
+        cr = [c for c in ha.calls[n:] if c[0] == "intent"
+              and c[1] == "HassCreateVoiceScene"]
+        check("S9.1 场景入库结构正确", bool(cr) and
+              cr[0][2].get("trigger_phrase") == "晚安" and
+              cr[0][2]["actions"][0]["intent"] == "TurnDeviceOff", str(cr)[:200])
+        check("S9.2 回显确认含触发词", "晚安" in text_of(r), text_of(r))
+        if cr:
+            a = cr[0][2]["actions"][0]
+            ex = await ha.handle_intent(a["intent"], a["params"])
+            check("S9.3 入库动作按真集成语义可直接执行", ex.get("success") is True,
+                  str(ex)[:160])
+        else:
+            check("S9.3 入库动作按真集成语义可直接执行", False, "无入库动作")
+        n = len(ha.calls)
+        r = await llm_turn(sess, port, "当客厅温度超过28度就打开客厅窗帘")
+        au = [c for c in ha.calls[n:] if c[0] == "intent"
+              and c[1] == "HassCreateAutomation"]
+        check("S9.4 数值自动化入库 trigger 完整", bool(au) and
+              au[0][2]["trigger"].get("above") == 28.0 and
+              au[0][2]["trigger"].get("entity_id") == "客厅温度", str(au)[:200])
+        n = len(ha.calls)
+        await llm_turn(sess, port, "当我说出发就念一遍今日运势")
+        check("S9.5 听不懂子句整单拒绝（零半成品入库）",
+              not [c for c in ha.calls[n:]
+                   if c[0] == "intent" and c[1].startswith("HassCreate")],
+              str(ha.calls[n:])[:160])
+        n = len(ha.calls)
+        r = await llm_turn(sess, port, "每天早上7点帮我打开客厅窗帘")
+        au2 = [c for c in ha.calls[n:] if c[0] == "intent"
+               and c[1] == "HassCreateAutomation"]
+        check("S9.6 时间自动化 at 归一", bool(au2) and
+              au2[0][2]["trigger"] == {"at": "07:00"}, str(au2)[:160])
+        check("S9.7 时间回显说人话", "早上7点" in text_of(r), text_of(r))
+
+        # S10 场景模式（v1.0.30 SetMode 语料吸收：preset 英文规范名直发）
+        print("\n─ S10 场景模式 ─")
+        n = len(ha.calls)
+        await llm_turn(sess, port, "客厅空调设为睡眠模式")
+        sm = [c for c in ha.calls[n:] if c[0] == "intent"
+              and c[1] == "SetDeviceMode"]
+        check("S10.1 睡眠模式归一 sleep 送集成", bool(sm) and
+              sm[0][2].get("mode") == "sleep", str(sm)[:200])
+        n = len(ha.calls)
+        await llm_turn(sess, port, "客厅射灯调亮一点")
+        check("S10.2 泛化模式行不截胡亮度句",
+              not [c for c in ha.calls[n:]
+                   if c[0] == "intent" and c[1] == "SetDeviceMode"],
+              str(ha.calls[n:])[:160])
+        n = len(ha.calls)
+        await llm_turn(sess, port, "客厅空调设为浪漫模式")
+        check("S10.3 词表外模式不误发（宁缺勿错）",
+              not [c for c in ha.calls[n:]
+                   if c[0] == "intent" and c[1] == "SetDeviceMode"],
+              str(ha.calls[n:])[:160])
+
     await runner.cleanup()
     total = len(PASS) + len(FAIL)
     print(f"\n═══ 完成测试：{len(PASS)}/{total} 通过 ═══")

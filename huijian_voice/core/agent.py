@@ -63,17 +63,47 @@ TOOLS: list[dict] = [
         "name": "HassTriggerVoiceScene", "description": "触发已创建的语音场景", "parameters": {
             "type": "object", "properties": {"trigger_phrase": {"type": "string"}}, "required": ["trigger_phrase"]}}},
     {"type": "function", "function": {
-        "name": "HassCreateVoiceScene", "description": "创建语音场景（trigger_phrase + actions 列表）", "parameters": {
+        "name": "HassCreateVoiceScene", "description": (
+            "创建语音场景（「当我说X就Y」句式）。actions 每项固定 {intent, params}，"
+            "intent ∈ TurnDeviceOn/TurnDeviceOff/ControlWindow/AdjustDeviceAttribute/"
+            "SetDeviceMode，params 与该意图直接下令的槽位一致"), "parameters": {
             "type": "object", "properties": {
                 "trigger_phrase": {"type": "string"},
                 "actions": {"type": "array", "items": {"type": "object"},
-                            "description": "每动作 {domain,service,data}"}},
+                            "description": "每动作 {intent, params}"}},
             "required": ["trigger_phrase", "actions"]}}},
     {"type": "function", "function": {
         "name": "HassDeleteVoiceScene", "description": "删除语音场景", "parameters": {
             "type": "object", "properties": {"trigger_phrase": {"type": "string"}}, "required": ["trigger_phrase"]}}},
     {"type": "function", "function": {
         "name": "HassListVoiceScenes", "description": "列出语音场景", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
+        "name": "HassCreateAutomation", "description": (
+            "创建语音自动化（「当[事件]就[动作]」事件型触发，区别于「当我说X」的语音场景）。"
+            "传感器阈值 trigger={entity_id:客厅温度, above:28}（低于用 below）；"
+            "人体状态 trigger={entity_id:书房人体, to:'on'或'off'}；"
+            "每天定时 trigger={at:'07:30'}（24小时制 HH:MM）。"
+            "actions 每项 {intent, params}，intent 同设备控制五类"), "parameters": {
+            "type": "object", "properties": {
+                "trigger": {"type": "object", "properties": {
+                    "entity_id": {"type": "string"},
+                    "above": {"type": "number"}, "below": {"type": "number"},
+                    "to": {"type": "string"}, "at": {"type": "string"}}},
+                "actions": {"type": "array", "items": {"type": "object"},
+                            "description": "每动作 {intent, params}"}},
+            "required": ["trigger", "actions"]}}},
+    {"type": "function", "function": {
+        "name": "HassListAutomations", "description": "列出语音自动化（返回 automation_id 供删除/修改）",
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
+        "name": "HassDeleteAutomation", "description": "删除语音自动化", "parameters": {
+            "type": "object", "properties": {"automation_id": {"type": "string"}},
+            "required": ["automation_id"]}}},
+    {"type": "function", "function": {
+        "name": "HassUpdateAutomation", "description": "修改语音自动化（trigger 或 actions 给其一）", "parameters": {
+            "type": "object", "properties": {"automation_id": {"type": "string"},
+                "trigger": {"type": "object"}, "actions": {"type": "array", "items": {"type": "object"}}},
+            "required": ["automation_id"]}}},
 ]
 
 SYSTEM_PROMPT = (
@@ -81,6 +111,8 @@ SYSTEM_PROMPT = (
     "2) 设备状态问题先调用 huijianGetLiveContext 再回答；3) 最终回答是口播短句，"
     "不超过两句话，不要用列表和 Markdown；4) 没有对应设备或工具失败时如实告知。"
     "5) 用户报出的房间/设备若不在设备清单内，先反问确认，不要臆测执行。"
+    "6) 「当我说X就Y」用 HassCreateVoiceScene；「当传感器/温度/时间到条件就Y」用"
+    "HassCreateAutomation；两者的 actions 一律 {intent, params} 形态。"
 )
 
 
@@ -290,8 +322,10 @@ class Agent:
             result = await self.ha.handle_intent(name, {})
             raw = json.dumps(result.get("raw", result), ensure_ascii=False)[:2000]
             return bool(result.get("success")), raw
-        if name == "HassCreateVoiceScene" and not self.settings.get("llm.allow_scene_write", True):
-            return False, "场景创建未开启"
+        if (name in ("HassCreateVoiceScene", "HassCreateAutomation",
+                     "HassUpdateAutomation")
+                and not self.settings.get("llm.allow_scene_write", True)):
+            return False, "场景与自动化创建未开启"
         plan = Plan(intent=name, args=args, source="llm")
         return await self.executor.run(plan)
 

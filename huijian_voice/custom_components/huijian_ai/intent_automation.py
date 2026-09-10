@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -8,11 +9,13 @@ from homeassistant.const import EVENT_STATE_CHANGED
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import intent as ha_intent
+from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.storage import Store
 from homeassistant.util.json import JsonObjectType
 
 from .const import CONF_DEBOUNCE_MINUTES, DEFAULT_DEBOUNCE_MINUTES, DOMAIN
 from .intent_device_shared import split_actions_by_device
+from .trigger_eval import state_trigger_met, time_trigger_due
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -277,6 +280,15 @@ class AutomationStore:
             _LOGGER.info("Updated automation: %s", automation_id)
             return True, f"已更新自动化：{automation_id}"
 
+    async def set_last_triggered(self, automation_id: str, ts: str) -> None:
+        """时间触发 fire 后落库去重标记（v1.0.30）；不存在即静默。"""
+        async with self._lock:
+            data = await self._load_data()
+            automation = data.get("automations", {}).get(automation_id)
+            if automation is not None:
+                automation["last_triggered"] = ts
+                await self._save_data(data)
+
     async def delete_automation(self, automation_id: str) -> tuple[bool, str]:
         async with self._lock:
             data = await self._load_data()
@@ -307,6 +319,7 @@ class AutomationManager:
         self._hass = hass
         self._store = get_automation_store(hass)
         self._unsub = None
+        self._unsub_time = None
         self._tracked_entity_ids: set[str] = set()
         self._triggered_cache: dict[str, float] = {}
         self._trigger_logs: list[dict] = []
@@ -349,6 +362,9 @@ class AutomationManager:
             EVENT_STATE_CHANGED,
             self._async_state_changed,
         )
+        if self._unsub_time is None:
+            self._unsub_time = async_track_time_change(
+                self._hass, self._async_time_tick, second=0)
         _LOGGER.info(
             "AutomationManager started - monitoring %s entities",
             len(self._tracked_entity_ids),
@@ -371,6 +387,9 @@ class AutomationManager:
         if self._unsub:
             self._unsub()
             self._unsub = None
+        if self._unsub_time:
+            self._unsub_time()
+            self._unsub_time = None
         _LOGGER.info("AutomationManager stopped")
 
     @callback
@@ -405,28 +424,14 @@ class AutomationManager:
                     if trigger_entity != entity_id:
                         continue
 
-                    try:
-                        value = float(state_str)
-                    except (ValueError, TypeError):
-                        continue
-
-                    above = trigger.get("above")
-                    below = trigger.get("below")
-
-                    condition_met = True
-                    if above is not None:
-                        if value <= float(above):
-                            condition_met = False
-                    if below is not None:
-                        if value >= float(below):
-                            condition_met = False
-
-                    if not condition_met:
+                    # v1.0.30：判定收口 trigger_eval.state_trigger_met——修旧缺陷
+                    # 「有人/没人」二值状态 float 化失败恒不触发；数值穿越语义不变。
+                    if not state_trigger_met(trigger, state_str):
                         _LOGGER.debug(
                             "Condition not met for %s (%s=%s)",
                             automation.get("automation_id"),
                             entity_id,
-                            value,
+                            state_str,
                         )
                         continue
 
@@ -436,20 +441,20 @@ class AutomationManager:
                     if now - last < self._debounce_seconds:
                         _LOGGER.debug(
                             "Automation %s debounced (%s=%s)",
-                            automation_id, entity_id, value,
+                            automation_id, entity_id, state_str,
                         )
                         continue
 
                     self._triggered_cache[automation_id] = now
                     _LOGGER.info(
                         "Automation triggered: %s (%s=%s)",
-                        automation_id, entity_id, value,
+                        automation_id, entity_id, state_str,
                     )
                     self._add_trigger_log(
                         automation_id,
                         entity_id,
                         state_str,
-                        f"条件满足({above}/{below})",
+                        f"条件满足({state_str})",
                     )
                     await self._execute_actions(automation.get("actions", []))
                 except Exception as e:
@@ -459,6 +464,42 @@ class AutomationManager:
                     )
         except Exception as e:
             _LOGGER.error("Error in _async_check_automations: %s", e)
+
+    @callback
+    def _async_time_tick(self, now) -> None:
+        """v1.0.30 时间触发：每分钟 :00 回调（async_track_time_change），
+        判定与同分钟去重收口 trigger_eval.time_trigger_due。"""
+        self._hass.async_create_task(self._async_check_time_automations(now))
+
+    async def _async_check_time_automations(self, now) -> None:
+        try:
+            automations = await self._store.get_all_automations()
+            for automation in automations:
+                try:
+                    trigger = automation.get("trigger", {})
+                    if not trigger.get("at"):
+                        continue
+                    if not time_trigger_due(
+                            trigger, now, automation.get("last_triggered")):
+                        continue
+                    automation_id = automation.get("automation_id", "")
+                    _LOGGER.info("Time automation triggered: %s (at=%s)",
+                                 automation_id, trigger.get("at"))
+                    self._add_trigger_log(
+                        automation_id, "time",
+                        now.strftime("%H:%M"),
+                        f"时间触发({trigger.get('at')})",
+                    )
+                    await self._store.set_last_triggered(
+                        automation_id, now.isoformat())
+                    await self._execute_actions(automation.get("actions", []))
+                except Exception as e:
+                    _LOGGER.error(
+                        "Error checking time automation %s: %s",
+                        automation.get("automation_id", "unknown"), e,
+                    )
+        except Exception as e:
+            _LOGGER.error("Error in _async_check_time_automations: %s", e)
 
     async def _check_immediate(
         self, trigger: dict, actions: list[dict], automation_id: str
@@ -473,29 +514,10 @@ class AutomationManager:
             _LOGGER.debug("Immediate check: %s has no state", entity_id)
             return
 
-        try:
-            value = float(state.state)
-        except (ValueError, TypeError):
-            _LOGGER.debug(
-                "Immediate check: %s state not numeric (%s)", entity_id, state.state,
-            )
-            return
-
-        above = trigger.get("above")
-        below = trigger.get("below")
-
-        condition_met = True
-        if above is not None:
-            if value <= float(above):
-                condition_met = False
-        if below is not None:
-            if value >= float(below):
-                condition_met = False
-
-        if not condition_met:
+        if not state_trigger_met(trigger, state.state):
             _LOGGER.debug(
                 "Immediate check: condition not met for %s (%s=%s)",
-                automation_id, entity_id, value,
+                automation_id, entity_id, state.state,
             )
             return
 
@@ -503,10 +525,11 @@ class AutomationManager:
         self._triggered_cache[automation_id] = now
         _LOGGER.info(
             "Automation triggered (initial check): %s (%s=%s)",
-            automation_id, entity_id, value,
+            automation_id, entity_id, state.state,
         )
         self._add_trigger_log(
-            automation_id, entity_id, state.state, f"初始检查条件满足({above}/{below})"
+            automation_id, entity_id, state.state,
+            f"初始检查条件满足({state.state})",
         )
         await self._execute_actions(actions)
 
@@ -563,26 +586,30 @@ def reset_automation_globals():
 class HassCreateAutomationIntent(ha_intent.IntentHandler):
     intent_type = "HassCreateAutomation"
     description = (
-        "Creates a sensor-triggered automation that monitors a sensor and executes actions "
-        "when its value crosses a threshold. "
+        "Creates a voice automation: sensor threshold/state crossing or a daily "
+        "schedule that executes an action list. "
         "Use when user says things like '当温度大于30度就打开窗户', "
-        "'如果传感器检测到xxx就执行yyy', '灯检测到温度大于29度就开窗'. "
+        "'当书房检测到有人就开灯', '每天早上7点帮我打开客厅窗帘'. "
         "DO NOT use for voice-triggered scenes (use HassCreateVoiceScene for that). "
         "Parameters: "
-        "trigger (object with entity_id of sensor, and optionally above/below thresholds), "
-        "actions (array of intent action objects, same format as voice scene actions). "
+        "trigger (object): sensor={entity_id:中文名或实体, above/below:数值} 或 "
+        "{entity_id, to:'on'/'off'(有人/无人)} 或 时间={at:'HH:MM', days:[1-7]可选}; "
+        "actions (array of {intent, params} objects, same format as voice scene actions). "
         "Examples: "
-        "trigger={entity_id:'sensor.office_temperature', above:29}, "
-        "actions=[{name:'ControlWindow', parameters:{action:'open', target:[{area:'卧室', devices:[{name:'平推窗'}]}]}}]"
+        "trigger={entity_id:'客厅温度', above:29}, "
+        "actions=[{intent:'ControlWindow', params:{action:'open', target:[{area:'客厅', devices:[{domains:['button']}]}]}}]"
     )
 
     @property
     def slot_schema(self) -> dict | None:
         return {
             vol.Required("trigger"): {
-                vol.Required("entity_id"): cv.string,
+                vol.Optional("entity_id"): cv.string,
                 vol.Optional("above"): vol.Coerce(float),
                 vol.Optional("below"): vol.Coerce(float),
+                vol.Optional("to"): cv.string,
+                vol.Optional("at"): cv.string,
+                vol.Optional("days"): vol.All(cv.ensure_list, [vol.Coerce(int)]),
             },
             vol.Required("actions"): vol.All(cv.ensure_list, [dict]),
         }
@@ -596,20 +623,43 @@ class HassCreateAutomationIntent(ha_intent.IntentHandler):
 
         if not isinstance(trigger, dict):
             return {"success": False, "error": "trigger参数必须是对象"}
-        if not trigger.get("entity_id"):
-            return {"success": False, "error": "trigger.entity_id不能为空"}
         if not actions:
             return {"success": False, "error": "actions不能为空"}
-
-        resolved, warning = await _resolve_entity_id(intent_obj.hass, trigger)
-        if resolved is None:
-            return {
-                "success": False,
-                "error": warning or f"传感器 {trigger.get('entity_id', '')} 不存在",
-            }
-        if resolved != trigger.get("entity_id", "").lower():
-            _LOGGER.info("Entity auto-resolved: %s -> %s", trigger["entity_id"], resolved)
-            trigger["entity_id"] = resolved
+        warning = None
+        at = str(trigger.get("at") or "").strip()
+        is_time = False
+        if at:
+            # v1.0.30 时间触发："每天早上7点开窗帘"→at=HH:MM（每日一次，days 可限周几）
+            m = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", at)
+            if not m:
+                return {"success": False, "error": "trigger.at 需为 HH:MM（24小时制）"}
+            new_trigger: dict[str, Any] = {"at": f"{int(m.group(1)):02d}:{m.group(2)}"}
+            days = trigger.get("days")
+            if days:
+                try:
+                    days_norm = sorted({int(d) for d in days})
+                except Exception:
+                    return {"success": False, "error": "trigger.days 需为 1-7 的整数列表"}
+                if not all(1 <= d <= 7 for d in days_norm):
+                    return {"success": False, "error": "trigger.days 需为 1-7 的整数列表"}
+                new_trigger["days"] = days_norm
+            trigger = new_trigger
+            is_time = True
+        else:
+            if not trigger.get("entity_id"):
+                return {
+                    "success": False,
+                    "error": "trigger 需含 entity_id（传感器）或 at（每天时间）",
+                }
+            resolved, warning = await _resolve_entity_id(intent_obj.hass, trigger)
+            if resolved is None:
+                return {
+                    "success": False,
+                    "error": warning or f"传感器 {trigger.get('entity_id', '')} 不存在",
+                }
+            if resolved != trigger.get("entity_id", "").lower():
+                _LOGGER.info("Entity auto-resolved: %s -> %s", trigger["entity_id"], resolved)
+                trigger["entity_id"] = resolved
 
         split_actions = split_actions_by_device(actions)
         _LOGGER.info("HassCreateAutomation split_actions=%s", split_actions)
@@ -628,19 +678,21 @@ class HassCreateAutomationIntent(ha_intent.IntentHandler):
             except Exception as e:
                 _LOGGER.error("Immediate check failed: %s", e)
 
-            entity_id = trigger.get("entity_id", "")
-            above = trigger.get("above")
-            below = trigger.get("below")
-            condition_parts = []
-            if above is not None:
-                condition_parts.append(f"大于{above}度")
-            if below is not None:
-                condition_parts.append(f"小于{below}度")
-
+            if is_time:
+                cond = f"每天{trigger['at']}"
+            else:
+                cond = f"当{trigger.get('entity_id', '')}"
+                if trigger.get("above") is not None:
+                    cond += f"超过{trigger['above']:g}"
+                if trigger.get("below") is not None:
+                    cond += f"低于{trigger['below']:g}"
+                if trigger.get("to") is not None:
+                    cond += ("检测到有人" if str(trigger["to"]) == "on"
+                             else f"变为{trigger['to']}")
             return {
                 "success": True,
                 "automation_id": result,
-                "message": f"已创建自动化：当{entity_id}{'、'.join(condition_parts)}时执行操作",
+                "message": f"已创建自动化：{cond}时执行操作",
                 "warning": warning,
             }
         else:
@@ -727,6 +779,9 @@ class HassUpdateAutomationIntent(ha_intent.IntentHandler):
                 vol.Optional("entity_id"): cv.string,
                 vol.Optional("above"): vol.Coerce(float),
                 vol.Optional("below"): vol.Coerce(float),
+                vol.Optional("to"): cv.string,
+                vol.Optional("at"): cv.string,
+                vol.Optional("days"): vol.All(cv.ensure_list, [vol.Coerce(int)]),
             },
             vol.Optional("actions"): vol.All(cv.ensure_list, [dict]),
         }
@@ -751,9 +806,25 @@ class HassUpdateAutomationIntent(ha_intent.IntentHandler):
 
         trigger = None
         if trigger_raw:
-            if not trigger_raw.get("entity_id"):
-                return {"success": False, "error": "trigger.entity_id不能为空"}
-            trigger = trigger_raw
+            if not trigger_raw.get("entity_id") and not str(
+                    trigger_raw.get("at") or "").strip():
+                return {
+                    "success": False,
+                    "error": "trigger.entity_id 或 trigger.at 至少给一个",
+                }
+            if trigger_raw.get("at"):
+                m = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)",
+                                 str(trigger_raw["at"]).strip())
+                if not m:
+                    return {"success": False,
+                            "error": "trigger.at 需为 HH:MM（24小时制）"}
+                normalized = {"at": f"{int(m.group(1)):02d}:{m.group(2)}"}
+                if trigger_raw.get("days"):
+                    normalized["days"] = sorted(
+                        {int(d) for d in trigger_raw["days"]})
+                trigger = normalized
+            else:
+                trigger = trigger_raw
 
         actions = None
         if actions_raw:

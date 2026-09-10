@@ -21,7 +21,8 @@ ACT_CN = {"open": "打开", "close": "关闭", "pause": "暂停", "a": "内倒",
 ATTR_CN = {"brightness": "亮度", "colour_temperature": "色温", "color_temperature": "色温",
            "temperature": "温度", "fan_speed": "风量", "position": "开合度"}
 MODE_CN = {"heat": "制热", "cool": "制冷", "dry": "除湿", "fan_only": "送风", "auto": "自动",
-           "eco": "节能", "sleep": "睡眠", "offline": "关闭"}
+           "eco": "节能", "sleep": "睡眠", "offline": "关闭",
+           "comfort": "舒适", "silent": "静音", "boost": "强力", "normal": "标准"}
 _EN_ERR_MAP = [
     ("could not extract window name", "没找到要控制的窗户，试试说「客厅的窗户内倒」"),
     ("window control failed", "窗户控制没成功，可能窗户没在 HA 里配好"),
@@ -265,7 +266,8 @@ class Executor:
             name = getattr(plan, "scene_name", None) or args.get("trigger_phrase", "场景")
             return f"好的，{name}场景已执行"
         if intent == "HassCreateVoiceScene":
-            return "好的，场景已创建"
+            x = str(args.get("trigger_phrase") or "").strip()
+            return f"好的，场景已创建，说「{x}」就能触发" if x else "好的，场景已创建"
         if intent == "HassDeleteVoiceScene":
             return "好的，场景已删除"
         if intent == "HassListVoiceScenes":
@@ -274,6 +276,19 @@ class Executor:
                 return "你还没有创建过语音场景"
             names = "、".join((s.get("name") or s.get("trigger_phrase", "")) for s in scenes[:6])
             return f"目前有这些场景：{names}"
+        # 语音自动化（060401 集成引擎，v1.0.30 补 addon 话术；本地创建路径由
+        # pipeline 出富回显，这里兜 LLM 工具通道）
+        if intent == "HassCreateAutomation":
+            return "好的，自动化已创建，条件满足就会执行"
+        if intent == "HassDeleteAutomation":
+            return "好的，自动化已删除"
+        if intent == "HassUpdateAutomation":
+            return "好的，自动化已更新"
+        if intent == "HassListAutomations":
+            autos = result.get("automations") or []
+            if not autos:
+                return "你还没有创建过语音自动化"
+            return f"目前有 {len(autos)} 条语音自动化"
         # 空调温度直改（HA 内置意图改道）
         if intent == "HassClimateSetTemperature":
             t = args.get("temperature")

@@ -34,6 +34,7 @@ from . import const
 from .nlu.fast_path import FastPath, Plan, is_pronoun, split_compound
 from .nlu import targets as T
 from .nlu import music
+from .nlu import creation
 from .nlu.klar_client import KlarClient
 
 logger = logging.getLogger("huijian.pipeline")
@@ -175,6 +176,20 @@ def _target_areas(args: dict) -> list[str]:
 def _has_explicit_target(args: dict) -> bool:
     """target 已含区域或设备名 = 明示目标，不做继承/区域注入。"""
     return bool(_target_names(args) or _target_areas(args) or args.get("entity_id"))
+
+
+def _at_say(at: str) -> str:
+    """'07:00' → '早上7点'、'22:30' → '晚上10点半'（耳朵友好，不回显 ISO 格式）。"""
+    try:
+        h, m = int(at[:2]), at[3:5]
+    except (ValueError, IndexError):
+        return at
+    seg = ("凌晨" if h < 6 else "早上" if h < 11 else "中午" if h < 13
+           else "下午" if h < 18 else "晚上")
+    hh = h if 1 <= h <= 12 else (h - 12 if h >= 13 else 12)
+    if m == "30":
+        return f"{seg}{hh}点半"
+    return f"{seg}{hh}点" if m == "00" else f"{seg}{hh}点{int(m)}分"
 
 
 class Pipeline:
@@ -334,6 +349,12 @@ class Pipeline:
         if answered is not None:
             return answered
 
+        # v1.0.30 语音创建承接（零 LLM）：「当我说X就Y」/「当[事件]就Y」。
+        # 必须前置于复合切分——创建句内的"并/然后"属于 Y 子句内容，不能被链发。
+        created = await self._voice_creation(text, origin)
+        if created is not None:
+            return created
+
         # P2-12 复合句：分句全命中才链发，否则原样回退单发路径
         chain = await self._try_compound(text, origin)
         if chain is not None:
@@ -460,6 +481,96 @@ class Pipeline:
         reply = Reply("".join(parts), "llm", streamed=streamed)
         self._remember_turn(origin, text, reply.text)
         return reply
+
+    # ── 语音创建（v1.0.30 零 LLM，060401 收编优化）────────────────
+    # 旧架构这两句式的解析归 LLM function calling（custom_llm_api 时代）；
+    # 本地级联承接后，动作子句 Y 复用 fast_path 判定——「能执行的句子才能
+    # 进场景」，任一子句听不懂整单拒绝（不建半成品），全中才产
+    # HassCreateVoiceScene / HassCreateAutomation 走既有 handle_intent 入库。
+    async def _voice_creation(self, text: str, origin: str) -> Optional[Reply]:
+        if not self.settings.get("nlu.creation_enabled", True):
+            return None
+        c = creation.parse(text)
+        if c is None:
+            return None
+        actions: list[dict] = []
+        echo_parts: list[str] = []
+        for clause in creation.split_actions(c["y"]):
+            plan = await self._match_fp(clause)
+            if plan is None or plan.intent not in creation.ACTIONABLE_INTENTS:
+                plan = await self._retry_with_area(clause, c)
+            if plan is None or plan.intent not in creation.ACTIONABLE_INTENTS:
+                logger.info("[创建] 子句拒收 %r → 整单作废（原句 %r）", clause, text)
+                return Reply(self._creation_reject(c, clause), "creation",
+                             ok=False, trace=[f"创建拒收:{clause!r}"])
+            actions.append({"intent": plan.intent, "params": copy.deepcopy(plan.args)})
+            echo_parts.append(clause)
+        y_say = "，".join(echo_parts)
+        if c["kind"] == "scene":
+            x = c["trigger_phrase"]
+            if x in (self.scenes.triggers or []):
+                # 集成侧 create_scene 有权威 dup 闸，这里只是缓存命中的友好前置
+                return Reply(f"「{x}」这个场景已经有了，要改动作的话先到场景页删掉旧的再创建",
+                             "creation", ok=False, trace=[f"场景重名:{x}"])
+            plan = Plan(intent="HassCreateVoiceScene",
+                        args={"trigger_phrase": x, "actions": actions},
+                        source="creation", utterance=text,
+                        trace=[f"创建场景:{x}→{len(actions)}动作"])
+            ok, _ = await self.executor.run(plan)
+            if not ok:
+                return Reply("抱歉，场景没创建成功，稍后再试", "creation",
+                             ok=False, trace=plan.trace)
+            await self.scenes.refresh(force=True)   # 触发词即刻可用，不等 60s 缓存
+            say = f"好的，语音场景已创建，以后说「{x}」，就{y_say}"
+        else:
+            plan = Plan(intent="HassCreateAutomation",
+                        args={"trigger": c["trigger"], "actions": actions},
+                        source="creation", utterance=text,
+                        trace=[f"创建自动化:{c['trigger']}→{len(actions)}动作"])
+            ok, _ = await self.executor.run(plan)
+            if not ok:
+                return Reply("抱歉，自动化没创建成功，稍后再试", "creation",
+                             ok=False, trace=plan.trace)
+            say = f"好的，语音自动化已创建：{self._cond_say(c)}，就{y_say}"
+        self._remember_turn(origin, text, say)
+        return Reply(say, "creation", True, plan.trace)
+
+    async def _retry_with_area(self, clause: str, c: dict):
+        """Y 子句无目标而事件描述带区域（"当客厅温度超28度就打开空调"）→
+        区域继承重试一次；仍听不懂照旧拒绝。"""
+        desc = str(c.get("desc") or "")
+        if not desc:
+            return None
+        area, rest = T.extract_prefix(desc)
+        if not area:
+            return None
+        merged = await self._match_fp(f"{area}{clause}")
+        if merged is None or merged.intent not in creation.ACTIONABLE_INTENTS:
+            return None
+        merged.trace = (merged.trace or []) + [f"区域继承:{area}"]
+        return merged
+
+    def _cond_say(self, c: dict) -> str:
+        """trigger 结构 → 自含播报短语（每分支带"的时候"，不回显 JSON）。"""
+        trig = c["trigger"]
+        if trig.get("at"):
+            return f"每天{_at_say(trig['at'])}的时候"
+        d = str(c.get("desc") or trig.get("entity_id") or "")
+        if trig.get("to") is not None:
+            return f"{d}检测到人的时候" if trig["to"] == "on" else f"{d}没人的时候"
+        if "above" in trig:
+            u = "度" if "温度" in d else ""
+            return f"{d}超过{trig['above']:g}{u}的时候"
+        if "below" in trig:
+            u = "度" if "温度" in d else ""
+            return f"{d}低于{trig['below']:g}{u}的时候"
+        return f"{d}变化的时候"
+
+    def _creation_reject(self, c: dict, clause: str) -> str:
+        demo = ("可以这样说：当我说晚安，就关闭卧室灯"
+                if c["kind"] == "scene" else
+                "可以这样说：当客厅温度超过28度，就打开空调")
+        return f"抱歉，「{clause}」这句我没听懂具体要做什么，先不创建了。{demo}"
 
     # ── P2-12 复合句 ───────────────────────────────────────────
     async def _try_compound(self, text: str, origin: str) -> Optional[Reply]:

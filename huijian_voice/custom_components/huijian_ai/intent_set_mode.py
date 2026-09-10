@@ -68,13 +68,42 @@ def set_climate_mode(ctx: OperationContext, target: OperationTarget):
         raise intent.IntentHandleError("Unsupported set mode")
 
     if ctx.mode not in avail_modes:
+        # v1.0.30 场景模式双通道：hvac_mode 不中再看 preset 档（sleep/eco/
+        # boost/silent… 在真实空调实体上是 set_preset_mode，060401 五拆永远
+        # 够不着的半张能力表）。两表皆不中才报真错。
+        presets = (ctx.entity.capabilities or {}).get("preset_modes") or \
+            ctx.state.attributes.get("preset_modes") or []
+        if ctx.mode in presets:
+            target.service = "set_preset_mode"      # 字面名：SERVICE_* 常量坑规避
+            target.service_data["preset_mode"] = ctx.mode
+            target.avail_modes = list(avail_modes) + [
+                p for p in presets if p not in avail_modes
+            ]
+            return
         raise intent.IntentHandleError(
-            f"Invalid mode, not in [{','.join(avail_modes)}]"
+            f"Invalid mode, not in [{','.join(list(avail_modes) + list(presets))}]"
         )
 
     target.service = climate.const.SERVICE_SET_HVAC_MODE
     target.service_data[climate.const.ATTR_HVAC_MODE] = ctx.mode
     target.avail_modes = avail_modes
+
+
+@register_handler("fan", "mode")
+def set_fan_mode(ctx: OperationContext, target: OperationTarget):
+    """v1.0.30：风扇「睡眠/静音/正常」等= preset 档（不是风速）。加载项
+    mode 词表已归一为英文规范名，此处仅按实体能力校验。"""
+    presets = (ctx.entity.capabilities or {}).get("preset_modes") or \
+        ctx.state.attributes.get("preset_modes") or []
+    if not presets:
+        raise intent.IntentHandleError("Unsupported set mode")
+    if ctx.mode not in presets:
+        raise intent.IntentHandleError(
+            f"Invalid mode, not in [{','.join(presets)}]"
+        )
+    target.service = "set_preset_mode"
+    target.service_data["preset_mode"] = ctx.mode
+    target.avail_modes = list(presets)
 
 
 @register_handler("humidifier", "mode")
@@ -99,11 +128,13 @@ class SetDeviceModeIntent(intent.IntentHandler):
     intent_type = "SetDeviceMode"
     description = (
         "Set the operation mode of a device. "
-        "Supported devices: climate(heat/cool/auto/dry/fan_only), humidifier. "
+        "Supported devices: climate(heat/cool/auto/dry/fan_only; preset: "
+        "sleep/eco/comfort/silent/boost/normal), fan(preset modes), humidifier. "
         "Examples: '把空调设为制热模式' -> mode=heat, target=空调. "
+        "'空调设为睡眠模式' -> mode=sleep (走 preset 通道). "
         "'把空调设为26度制冷' -> use AdjustDeviceAttribute with attribute=temperature instead."
     )
-    platforms = {Platform.CLIMATE, Platform.HUMIDIFIER}
+    platforms = {Platform.CLIMATE, Platform.HUMIDIFIER, Platform.FAN}
 
     @property
     def slot_schema(self) -> dict | None:
