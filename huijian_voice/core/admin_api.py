@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 
 from aiohttp import web
@@ -59,6 +60,9 @@ async def _health(request):
         "asr_loaded": bool(ctx.asr.ready()) if ctx.asr else False,
         "tts_loaded": bool(ctx.tts.ready()) if ctx.tts else False,
         "llm_enabled": bool(s.get("llm.enabled")),
+        # 本地理解总开关（首页状态位数据源）：关掉后场景触发词/本地建・改・删/
+        # 查询族/音乐带全停，必须一眼可见，不能静默降级
+        "nlu_enabled": bool(s.get("nlu.enabled", True)),
     })
 
 
@@ -313,6 +317,24 @@ def _op_response(j) -> web.Response:
     return web.json_response({"ok": ok, "error": err})
 
 
+# v1.0.34（审查 M3）：scene_id（voice_scene_<14位>）/automation_id（uuid 带-）
+# 要插进 REST URL 路径，yarl 会归一化点段——`../states/x` 一类输入可携加载项
+# 令牌打到核心任意写路径。白名单不放**任何点**（真 id 形态本就没有），从根
+# 上封死穿越；不合规一律拒（永不抛纪律不受影响，返回的还是 {ok:False}）。
+_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
+# 触发词字符集与语音侧同一纪律（creation 正则全部排除这些字符）——网页改名
+# 出去含空格/标点的触发词，语音既触发不了也永远删不到（审查 L4）。
+_PHRASE_RE = re.compile(r"[^「」\"』，。;；\s]{1,12}")
+
+
+def _bad_id(v: str) -> bool:
+    return not _ID_RE.fullmatch(v or "")
+
+
+def _bad_phrase(v: str) -> bool:
+    return not _PHRASE_RE.fullmatch(v or "")
+
+
 async def _scene_delete(request):
     """页内删场景：走 intent（trigger_phrase 精准），删后强刷缓存。"""
     ctx = request.app[CTX_KEY]
@@ -335,8 +357,10 @@ async def _scene_rename(request):
     body = await _json_body(request)
     sid = str(body.get("scene_id") or "").strip()
     new = str(body.get("new_phrase") or "").strip()
-    if not sid or not (1 <= len(new) <= 12):
-        return web.json_response({"ok": False, "error": "新触发词需 1~12 字"})
+    if _bad_id(sid):
+        return web.json_response({"ok": False, "error": "场景ID形态不合规"})
+    if not sid or _bad_phrase(new):
+        return web.json_response({"ok": False, "error": "新触发词需 1~12 字且不含标点空格"})
     j = await _safe_rest(
         ctx, "PUT", f"/api/huijian-ai/voice-scenes/{sid}",
         {"trigger_phrase": new})
@@ -390,6 +414,8 @@ async def _auto_edit(request):
     aid = str(body.get("automation_id") or "").strip()
     trig = body.get("trigger") if isinstance(body.get("trigger"), dict) else {}
     ent = str(trig.get("entity_id") or "").strip()
+    if _bad_id(aid):
+        return web.json_response({"ok": False, "error": "自动化ID形态不合规"})
     if not aid or not ent:
         return web.json_response({"ok": False, "error": "缺自动化ID或传感器"})
     new_trig: dict = {"entity_id": ent}
@@ -397,9 +423,13 @@ async def _auto_edit(request):
         v = trig.get(k)
         if v is not None and str(v).strip() != "":
             try:
-                new_trig[k] = float(v)
+                f = float(v)
             except (TypeError, ValueError):
                 return web.json_response({"ok": False, "error": f"{k} 不是数值"})
+            if f != f or f in (float("inf"), float("-inf")):
+                # 审查 L6：NaN/inf 过闸后进 JSON 体在集成侧炸不透明错误。
+                return web.json_response({"ok": False, "error": f"{k} 不是有效数值"})
+            new_trig[k] = f
     if "above" in new_trig and "below" in new_trig and \
             new_trig["above"] >= new_trig["below"]:
         return web.json_response({"ok": False, "error": "高于值必须小于低于值（区间）"})

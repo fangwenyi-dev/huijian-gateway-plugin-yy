@@ -48,7 +48,11 @@ def zh_error(raw: str, klar: bool = False) -> str:
                 return ("抱歉，和 Home Assistant 的连接没有走通，这次没有执行。"
                         "请检查 HA 核心是否正常运行、加载项 API 地址配置是否正确")
             return f"抱歉，{zh}"
-    return f"抱歉，这一步没有执行成功（{raw[:30]}），可以换个说法再试"
+    detail = (raw or "").strip()[:30]
+    if not detail:
+        # v1.0.34（审查 L5）：无原因可给时别播空括号「（）」
+        return "抱歉，这一步没有执行成功，可以换个说法再试"
+    return f"抱歉，这一步没有执行成功（{detail}），可以换个说法再试"
 
 
 # ── klar 直调路径：目标词回显（2026-09-14 用户拍板）────────────────
@@ -101,10 +105,27 @@ def echo_target(utterance: str, area: str = "") -> str:
         return ""
 
 
+_INDETERMINATE_HINTS = (
+    "timeout", "timed out", "超时", "connect", "connection", "连接",
+    "network", "网络", "502", "503", "504", "500",
+)
+
+
+def is_indeterminate(err: str) -> bool:
+    """失败原因是否"结果不确定"：超时/连接断开/5xx——HA 侧可能已经执行，只是
+    回执在路上丢了。这类失败**绝不能**让 LLM 拿原句复议重做（相对量动作会叠加
+    第二遍），是"LLM 只做兜底、不与本地执行冲突"的关键判据。"""
+    low = (err or "").lower()
+    return any(h in low for h in _INDETERMINATE_HINTS)
+
+
 class Executor:
     def __init__(self, ha, settings=None):
         self.ha = ha
         self.settings = settings
+        # 最近一次 run 的执行状态（pipeline 复议安全闸读它；永不作为业务返回值，
+        # 免得动 run 的 (ok, speech) 契约把既有调用点/测试全推翻）。
+        self.last_run: dict = {"steps": 0, "applied": 0, "indeterminate": False}
 
     async def run_raw(self, plan: Plan) -> tuple[bool, dict]:
         """单步意图执行，返回 (success, 原始 result dict)——供列表类意图
@@ -113,16 +134,24 @@ class Executor:
             result = await self.ha.handle_intent(plan.intent, plan.args)
         except Exception as e:
             logger.info("[执行raw] %s 异常: %s", plan.intent, e)
+            self.last_run = {"steps": 1, "applied": 0,
+                             "indeterminate": is_indeterminate(str(e))}
             return False, {"success": False, "error": str(e)[:120]}
         if not isinstance(result, dict):
+            self.last_run = {"steps": 1, "applied": 0, "indeterminate": False}
             return False, {"success": False, "error": "bad response"}
-        return bool(result.get("success")), result
+        ok = bool(result.get("success"))
+        self.last_run = {"steps": 1, "applied": 1 if ok else 0,
+                         "indeterminate": False if ok else is_indeterminate(
+                             str(result.get("error") or result.get("message") or ""))}
+        return ok, result
 
     async def run(self, plan: Plan) -> tuple[bool, str]:
         """执行 Plan（klar 多分句/复合链逐步顺序执行）。返回 (success, 中文播报)。永不抛。"""
         steps = [(plan.intent, plan.args)] + [
             (st.get("name"), st.get("args") or {})
             for st in (getattr(plan, "extra_steps", None) or [])]
+        self.last_run = {"steps": len(steps), "applied": 0, "indeterminate": False}
         results = []
         for idx, (name, args) in enumerate(steps):
             direct = self._klar_direct(name, args) if plan.source == "klar" else None
@@ -132,8 +161,10 @@ class Executor:
             else:
                 result = await self.ha.handle_intent(name, args)
             if not result.get("success"):
-                reply = zh_error(str(result.get("error") or result.get("message") or ""),
-                               klar=plan.source == "klar")
+                raw_err = str(result.get("error") or result.get("message") or "")
+                self.last_run = {"steps": len(steps), "applied": len(results),
+                                 "indeterminate": is_indeterminate(raw_err)}
+                reply = zh_error(raw_err, klar=plan.source == "klar")
                 # P2-12 链失败定位：部分执行已成事实，如实说清第几步、还剩几步
                 # （保留"抱歉"字头——话术层诚实失败纪律被测试钉死）
                 detail = reply[3:] if reply.startswith("抱歉，") else reply
@@ -172,6 +203,8 @@ class Executor:
             except Exception:
                 reply = "好的，都办妥了"
         tag = f"(+%d步)" % (len(steps) - 1) if len(steps) > 1 else ""
+        self.last_run = {"steps": len(steps), "applied": len(steps),
+                         "indeterminate": False}
         logger.info("[执行] %s %s%s → 成功 | %s", plan.intent, plan.args, tag, reply)
         return True, reply
 

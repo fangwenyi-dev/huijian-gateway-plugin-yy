@@ -64,6 +64,13 @@ async def async_convert_audio(
             and to_sample_bytes in (None, 2)
         ):
             pcm = b"".join([chunk async for chunk in audio_bytes_gen])
+            if not pcm:
+                # v1.0.34（审查 M2）：空合成必须在此截住——44 字节纯头是"非空
+                # bytes"，能骗过出口 `if not audio` 闸写进 HA TTS 缓存，同一句
+                # 永久静音+日志死寂（2026-09-09 病灶复发入口）。不产出 → 出口
+                # fail-loud 报 (None,None)，HA 跳缓存、错误当场可见。
+                _LOGGER.error("[TTS] 直封收到空 PCM（加载项未回音频），不产出（出口走 fail-loud）")
+                return
             wav = wrap_pcm_as_wav(pcm, rate, channels, 2)
             _LOGGER.info(
                 "[TTS] s16le→wav 直封：%d 帧 %.2fs（%dHz/%dch/16bit，%d 字节）",

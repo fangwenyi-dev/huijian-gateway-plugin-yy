@@ -59,8 +59,9 @@ def test_zh_error_unknown_intent_maps_to_install_hint():
 
 
 def test_zh_error_never_empty_parens_from_pipeline():
-    """上游保证 raw 非空；函数层空括号模板仍在（兜底行为不变）。"""
-    assert zh_error("") == "抱歉，这一步没有执行成功（），可以换个说法再试"
+    """上游保证 raw 非空；v1.0.34（审查 L5）起函数层兜底也不再播空括号。"""
+    assert zh_error("") == "抱歉，这一步没有执行成功，可以换个说法再试"
+    assert "（）" not in zh_error("   ")
 
 
 # ── ③ handler 无裸 assert ──────────────────────────────────────

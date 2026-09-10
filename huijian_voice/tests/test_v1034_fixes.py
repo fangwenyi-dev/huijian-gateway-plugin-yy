@@ -8,7 +8,6 @@
 ④registry DeferredMapping 以映射用被 HA 现网点名（2027.9 硬失效）。
 每个修复各钉一条，改坏即红。
 """
-import ast
 import json
 import pathlib
 
@@ -89,7 +88,7 @@ def test_states_family_generic_speech_kept():
     assert ex.speech(plan, result) == "好的，灯已处理"
 
 
-# ── ③④ 集成侧源码钉（真行为钉见 yyjicheng/tests/test_tts_wav_direct.py）──
+# ── ③④ 集成侧源码钉 ──────────────────────────────────────────────
 
 def test_integration_adjust_returns_success_key():
     src = (CC / "intent_adjust_attribute.py").read_text(encoding="utf-8")
@@ -97,11 +96,22 @@ def test_integration_adjust_returns_success_key():
         "AdjustDeviceAttribute 返回形态须对齐 turn 族（顶层 success）"
 
 
-def test_tts_wav_passthrough_wired():
+def test_tts_empty_pcm_fail_loud_wired():
+    """审查 M2：空合成必须在 audio.py 直封支截住——44 字节纯头能骗过出口
+    `if not audio` 闸写进 HA 缓存=同句永久静音（2026-09-09 病灶）。"""
+    audio = (CC / "huijian" / "audio.py").read_text(encoding="utf-8")
+    i = audio.index("if not pcm:")
+    j = audio.index("wav = wrap_pcm_as_wav(")
+    assert i < j, "空 PCM 闸必须在 wrap 之前"
+    assert "return" in audio[i:j]
+
+
+def test_tts_no_raw_opus_injection():
+    """审查 L9：解码失败不得把原始 opus 包当 PCM yield（卫星播噪声）。"""
     src = (CC / "tts.py").read_text(encoding="utf-8")
-    assert "def _wav_passthrough(" in src
-    assert 'return "wav", buf.getvalue()' in src
-    assert "async_convert_audio(" in src, "非 wav 客户（media_player 等）的转码路径必须保留"
+    assert "frame dropped" in src and "continue" in src
+    k = src.index("Decode opus failed")
+    assert "continue" in src[k:k + 200], "except 支序必须是 continue"
 
 
 def test_registry_devices_fixed_entities_untouched():
@@ -116,21 +126,34 @@ def test_registry_devices_fixed_entities_untouched():
     assert "ent_registry.entities.values()" in scene
 
 
-def test_wav_passthrough_pure_function_matrix():
-    """AST 抽出 canonical _wav_passthrough 真执行（全链行为钉，不依赖 HA 栈）。"""
-    tree = ast.parse((CC / "tts.py").read_text(encoding="utf-8"))
-    fn = next(n for n in ast.walk(tree)
-              if isinstance(n, ast.FunctionDef) and n.name == "_wav_passthrough")
-    ns: dict = {}
-    exec(compile(ast.Module(body=[fn], type_ignores=[]), "<pin>", "exec"), ns)
-    f = ns["_wav_passthrough"]
-    assert f({"preferred_format": "wav", "preferred_sample_rate": 16000,
-              "preferred_sample_channels": 1}, 16000, 1)          # 卫星三件套直通
-    assert not f({"audio_format": "mp3", "preferred_format": "wav"}, 16000, 1)
-    assert not f({"preferred_format": "wav", "preferred_sample_rate": 22050}, 16000, 1)
-    assert not f({"preferred_format": "wav", "preferred_sample_channels": 2}, 16000, 1)
-    assert not f({}, 16000, 1)
-    assert not f(None, 16000, 1)
-    assert not f({"preferred_format": "wav", "preferred_sample_rate": "x"}, 16000, 1)
-    assert f({"preferred_format": "wav", "preferred_sample_channels": None}, 16000, 1)
-    assert f({"preferred_format": "WAV"}, 16000, 1)
+# ── M3/L4：admin 写路由 id/触发词闸门（真函数行为钉）───────────────
+
+def test_admin_id_and_phrase_gates():
+    from core.admin_api import _bad_id, _bad_phrase
+    assert not _bad_id("voice_scene_20260910143642")
+    assert not _bad_id("3f9c2a1e-5b6d-4a11-9c8e-7d2f0a1b4c5d")   # HA uuid
+    assert _bad_id("../../states/light.on")                        # yarl 点段穿越
+    assert _bad_id("a.b")                                          # 一切点形拒
+    assert _bad_id("") and _bad_id(None) and _bad_id("x y")
+    assert not _bad_phrase("晚安好梦")
+    assert _bad_phrase("晚安 好梦")                                 # 空格→语音删不掉
+    assert _bad_phrase("晚安，好梦")                                # 标点同拒
+    assert _bad_phrase("一二三四五六七八九十一二三四五")             # >12 字
+
+
+def test_zh_error_no_empty_parens():
+    from core.executor import zh_error
+    assert zh_error("") == "抱歉，这一步没有执行成功，可以换个说法再试"
+    assert "（unmapped-weird-err）" in zh_error("unmapped-weird-err")
+
+
+def test_models_readiness_renders_inner_layer():
+    """v1.0.35：首页模型就绪度必须迭代 {updated, models} 外壳的**内层**——
+    直接 entries(外壳) 把 updated/models 渲染成两行红问号（用户实锤截图）。"""
+    root = pathlib.Path(__file__).resolve().parents[1]
+    html = (root / "www" / "index.html").read_text(encoding="utf-8")
+    assert "ms.models" in html, "就绪度卡未取内层 models"
+    assert "o.state" in html and "o.pct" in html, "内层字段须用 state/pct（写者协议）"
+    assert "状态更新于" in html
+    w = (root / "core" / "model_store.py").read_text(encoding="utf-8")
+    assert '"updated": time.time(), "models": snap' in w, "写者外壳形态变了要同步前端"

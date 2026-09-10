@@ -14,8 +14,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#030712">
 <title>慧尖HA语音插件</title>
-<link rel="stylesheet" href="css/huijian.css?v=1.0.34">
-<link rel="stylesheet" href="css/voice.css?v=1.0.34">
+<link rel="stylesheet" href="css/huijian.css?v=1.0.35">
+<link rel="stylesheet" href="css/voice.css?v=1.0.35">
 </head>
 <body>
 <!-- 「星辰大海」背景层（与网关加载项同一设计标准/同一固定种子＝同一片天）：
@@ -112,9 +112,16 @@
 
   <div class="card"><h3>理解与执行（NLU）</h3>
     <div class="hj-row">
-      <div><label><input id="nlu_enabled" type="checkbox" style="width:auto"> 启用快速通道（正则+分类器，推荐）</label></div>
+      <div><label><input id="nlu_enabled" type="checkbox" style="width:auto"> 启用本地理解（正则+分类器+查询族+场景/自动化本地承接；关掉后只剩大模型兜底）</label></div>
       <div><label><input id="nlu_textcnn" type="checkbox" style="width:auto"> 启用 TextCNN 意图分类（T1）</label></div>
       <div><label><input id="nlu_query" type="checkbox" style="width:auto"> 启用本地查询（时间/温度/状态）</label></div>
+    </div>
+    <div id="nluOffWarn" class="hint" style="display:none;color:#c0392b">
+      ⚠ 本地理解已关闭：语音场景触发词、场景/自动化本地建・改・删、本地查询、音乐带全部停止工作，
+      所有话都改由大模型处理；大模型也没启用时，助手只会回一句固定兜底。
+    </div>
+    <div class="hj-row">
+      <div><label><input id="nlu_creation" type="checkbox" style="width:auto"> 场景/自动化本地承接（说「当我说X就Y」零大模型可用；关掉后只能靠大模型创建）</label></div>
     </div>
     <div class="hj-row">
       <div><label><input id="dlg_context" type="checkbox" style="width:auto"> 上下文继承（"把它打开"跟随上一轮目标）</label></div>
@@ -133,8 +140,12 @@
 
   <div class="card"><h3>大模型兜底（LLM，默认关闭）</h3>
     <div class="hj-row">
-      <div><label><input id="llm_enabled" type="checkbox" style="width:auto"> 启用（快速通道未命中时交给大模型；需填端点）</label></div>
+      <div><label><input id="llm_enabled" type="checkbox" style="width:auto"> 启用（只做兜底：本地理解命中就不经过大模型；场景/自动化本地句无需大模型）</label></div>
       <div><label><input id="llm_stream" type="checkbox" style="width:auto"> 流式回答（SSE 逐句播报；平台不支持自动整包回退）</label></div>
+    </div>
+    <div class="hj-row">
+      <div><label><input id="llm_scene_write" type="checkbox" style="width:auto"> 允许大模型创建/删除语音场景（本地句零大模型已覆盖，默认开）</label></div>
+      <div><label><input id="llm_auto_write" type="checkbox" style="width:auto"> 允许大模型创建/修改/删除语音自动化（默认关，建议留给本地句式）</label></div>
     </div>
     <div class="hj-row"><div style="flex:1 1 100%"><label class="hj-field">平台预设（选完只需粘贴 API Key）</label><select id="llm_preset"></select></div></div>
     <div id="llm_preset_hint" class="hint" style="display:none"></div>
@@ -252,7 +263,7 @@
 
 <script>
 "use strict";
-const CURRENT_VERSION = "1.0.34";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
+const CURRENT_VERSION = "1.0.35";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
 // 音色表 = kokoro-multi-lang-v1_1 官方 103 sid 全表（k2-fsa docs sid 表实证；
 // 标注=对用户上传试听样本的 CAM++ 声纹溯源榜：v1_1 不含晓晓/云扬，
 // sid18=zf_026 女声最似晓晓(0.454 全场最近)，sid81=zm_055 最似云扬）
@@ -330,17 +341,31 @@ async function refreshStatus(){
       statRow("STT 引擎", st.stt_loaded?pill("已加载","ok"):pill("未就绪","warn")),
       statRow("TTS 引擎", st.tts_loaded?pill("已加载","ok"):pill("未就绪","warn")),
       statRow("意图分类", st.textcnn?pill("可用","ok"):pill("缺资产","warn")),
+      statRow("本地理解", st.nlu_enabled!==false?pill("已启用","ok")
+        :pill("已关闭（只剩大模型）","bad")),
       statRow("LLM 兜底", st.llm_enabled?pill("已启用","ok"):pill("关闭","warn")),
       statRow("活动会话", `<span class="pill ${st.sessions>0?'ok':'warn'}">${st.sessions}</span>`),
     ].join("");
   } catch(e) { $("#haver").textContent = "核心未就绪"; }
   try {
     const ms = await api("/models_status.json", {});
-    $("#modelPills").innerHTML = Object.entries(ms).map(([k,v])=>{
-      const s = typeof v==="string" ? v : (v.status||v.state||"?");
-      const cls = (s==="ready"||s==="ok")?"ok":(s==="downloading"?"warn":"bad");
-      return statRow(MODEL_NAMES[k]||k, `${pill(s,cls)}${(v&&v.progress!=null)?` <span class="mut">${Math.round(v.progress*100)}%</span>`:""}`);
+    // v1.0.35 修复三连：①事实文件外壳是 {updated, models}（model_store 双写者
+    // 协议），此前直接 entries(外壳) 把 updated/models 渲染成两行红问号，真实
+    // 模型状态永远不可见；②内层字段是 state/pct/detail，旧代码找 status/
+    // progress 全落空；③pending/checking/extracting 被兜底成红色"坏"。
+    const mm = (ms && typeof ms === "object" && ms.models && typeof ms.models === "object") ? ms.models : (ms || {});
+    $("#modelPills").innerHTML = Object.entries(mm).map(([k,v])=>{
+      const o = (v && typeof v === "object") ? v : {state:String(v||"?")};
+      const s = o.state || o.status || "?";
+      const cls = (s==="ready"||s==="ok") ? "ok" : (s==="failed" ? "bad" : "warn");
+      const pct = (o.pct!=null) ? Math.round(o.pct) : (o.progress!=null ? Math.round(o.progress*100) : null);
+      const extra = (pct!=null && s!=="ready" ? ` <span class="mut">${pct}%</span>` : "")
+                  + (o.detail ? ` <span class="hint">${String(o.detail).slice(0,42)}</span>` : "");
+      return statRow(MODEL_NAMES[k]||k, pill(s,cls)+extra);
     }).join("") || '<span class="mut">暂无状态</span>';
+    if (mm !== ms && ms && ms.updated) {
+      $("#modelPills").innerHTML += `<div class="hint" style="grid-column:1/-1">状态更新于 ${new Date(ms.updated*1000).toLocaleTimeString()}</div>`;
+    }
   } catch(e){ $("#modelPills").textContent = "models_status.json 未生成"; }
 }
 setInterval(refreshStatus, 4000); refreshStatus();
@@ -407,6 +432,7 @@ async function loadSettings(){
   $("#stt_cloud_key").value = ""; $("#stt_cloud_key").placeholder = S.stt.cloud?.api_key||"";
   $("#tts_cloud_key").value = ""; $("#tts_cloud_key").placeholder = S.tts.cloud?.api_key||"";
   $("#nlu_enabled").checked = S.nlu.enabled !== false;
+  $("#nlu_creation").checked = S.nlu.creation_enabled !== false;
   $("#nlu_textcnn").checked = S.nlu.textcnn_enabled !== false;
   $("#nlu_query").checked = S.nlu.query_local !== false;
   try { $("#nlu_corr").value = JSON.stringify(S.nlu.corrections_extra||{},null,0); } catch(e){}
@@ -417,26 +443,32 @@ async function loadSettings(){
   $("#music_player").value = S.music?.player_entity || "";
   $("#llm_enabled").checked = !!S.llm.enabled;
   $("#llm_stream").checked = S.llm.stream !== false;
+  $("#llm_scene_write").checked = S.llm.allow_scene_write !== false;
+  $("#llm_auto_write").checked = S.llm.allow_automation_write === true;
   $("#llm_base").value = S.llm.base_url||""; $("#llm_model").value = S.llm.model||"";
   $("#llm_key").value = ""; $("#llm_key").placeholder = S.llm.api_key||"";
   $("#req_token").checked = !!S.security.require_token;
   $("#unload").value = S.power?.unload_when_idle_min ?? 0;
   $("#fallback").value = S.dialog?.fallback_text||"";
-  syncBoxes();
+  syncBoxes(); syncNluWarn();
 }
 function syncBoxes(){
   $("#sttCloudBox").style.display = $("#stt_provider").value==="cloud"?"":"none";
   $("#ttsCloudBox").style.display = $("#tts_provider").value==="cloud"?"":"none";
 }
 $("#stt_provider").onchange=syncBoxes; $("#tts_provider").onchange=syncBoxes;
+function syncNluWarn(){ $("#nluOffWarn").style.display = $("#nlu_enabled").checked ? "none" : ""; }
+$("#nlu_enabled").onchange = syncNluWarn;
+// 关掉本地理解 = 场景触发词/本地建改删/查询族/音乐带一起停（防手滑：保存前显式确认）
+function llmReady(){ return $("#llm_enabled").checked && !!$("#llm_base").value.trim(); }
 wirePresets();
 $("#saveBtn").onclick = async ()=>{
   const body = {
     stt:{ provider:$("#stt_provider").value, cloud:{ base_url:$("#stt_cloud_base").value, model:$("#stt_cloud_model").value, ...( $("#stt_cloud_key").value?{api_key:$("#stt_cloud_key").value}:{}) } },
     tts:{ provider:$("#tts_provider").value, sid:parseInt($("#tts_sid").value,10), speed:parseFloat($("#tts_speed").value)||1,
           cloud:{ base_url:$("#tts_cloud_base").value, model:$("#tts_cloud_model").value, voice:$("#tts_cloud_voice").value, ...(ttsFmt?{response_format:ttsFmt}:{}), ...(ttsRate?{sample_rate:ttsRate}:{}), ...( $("#tts_cloud_key").value?{api_key:$("#tts_cloud_key").value}:{}) } },
-    nlu:{ enabled:$("#nlu_enabled").checked, textcnn_enabled:$("#nlu_textcnn").checked, query_local:$("#nlu_query").checked, corrections_extra: safeJson($("#nlu_corr").value, {}) },
-    llm:{ enabled:$("#llm_enabled").checked, base_url:$("#llm_base").value, model:$("#llm_model").value, stream:$("#llm_stream").checked, ...( $("#llm_key").value?{api_key:$("#llm_key").value}:{}) },
+    nlu:{ enabled:$("#nlu_enabled").checked, textcnn_enabled:$("#nlu_textcnn").checked, query_local:$("#nlu_query").checked, creation_enabled:$("#nlu_creation").checked, corrections_extra: safeJson($("#nlu_corr").value, {}) },
+    llm:{ enabled:$("#llm_enabled").checked, base_url:$("#llm_base").value, model:$("#llm_model").value, stream:$("#llm_stream").checked, allow_scene_write:$("#llm_scene_write").checked, allow_automation_write:$("#llm_auto_write").checked, ...( $("#llm_key").value?{api_key:$("#llm_key").value}:{}) },
     security:{ require_token:$("#req_token").checked },
     power:{ unload_when_idle_min: parseInt($("#unload").value,10)||0 },
     dialog:{ fallback_text: $("#fallback").value, context_enabled:$("#dlg_context").checked,
@@ -446,6 +478,15 @@ $("#saveBtn").onclick = async ()=>{
   };
   if($("#nlu_corr").value.trim() && typeof body.nlu.corrections_extra!=="object"){ toast("纠错词条不是合法 JSON"); return; }
   if($("#sat_areas").value.trim() && typeof body.spatial.satellite_areas!=="object"){ toast("卫星区域映射不是合法 JSON"); return; }
+  if(!$("#nlu_enabled").checked){
+    const msg = llmReady()
+      ? "关掉本地理解后：语音场景触发词、场景/自动化本地建・改・删、本地查询、音乐带全部停止，所有话改由大模型处理。确定保存？"
+      : "本地理解关闭，大模型也没配好——保存后助手只会回一句固定兜底。确定保存？";
+    if(!confirm(msg)) return;
+  }
+  if(!$("#nlu_creation").checked && !llmReady()){
+    if(!confirm("大模型未启用，关掉本地承接后「当我说X就Y」将无法创建任何场景/自动化。确定保存？")) return;
+  }
   try { await post("/api/settings", body); toast("已保存并即时生效"); $("#saveMsg").textContent="✓ "+new Date().toLocaleTimeString(); }
   catch(e){ toast("保存失败："+e.message); }
 };
@@ -478,6 +519,7 @@ $("#dbgBtn").onclick = async ()=>{
     const r = await post("/api/nlu/test",{text:t, execute:$("#dbgExec").checked});
     const c = r.cascade||{}; let out = "";
     out += `输入：${r.input}\nT1 分类器：${r.textcnn?.available?"可用":"缺资产（上传 nlu_data 后重启）"}\n`;
+    if (c.nlu_enabled === false) out += "本地理解已在设置里关闭：不跑正则/分类器/查询族/场景自动化本地承接。\n";
     if (c.plan) out += `命中快速通道 → ${c.plan.intent}\n参数：${JSON.stringify(c.plan.args)}\n来源：${c.plan.source}\n级联轨迹：\n  ${(c.plan.trace||[]).join("\n  ")}\n`;
     else {
       out += "快速通道未命中。\n";
@@ -607,6 +649,6 @@ $("#regenBtn").onclick = async ()=>{
   try { await post("/api/token/regenerate",{}); toast("已重置"); loadEndpoints(); } catch(e){ toast(e.message); }
 };
 </script>
-<script src="js/starsky.js?v=1.0.34"></script>
+<script src="js/starsky.js?v=1.0.35"></script>
 </body>
 </html>

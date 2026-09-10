@@ -1,6 +1,4 @@
-import io
 import logging
-import wave
 
 import opuslib_next as opuslib
 from homeassistant.components.tts import TextToSpeechEntity as BaseEntity
@@ -15,25 +13,6 @@ from .huijian import tts_transport
 from .huijian.audio import async_convert_audio
 
 _LOGGER = logging.getLogger(__name__)
-
-
-def _wav_passthrough(options: dict, sample_rate: int, channels: int) -> bool:
-    """v1.0.34 纯函数判据：目标容器=wav 且采样率/声道与原生一致 → 直通零转码。
-
-    preferred_* 走 options 字面量取值——从 core 导入 ATTR_* 常量若跨版本缺失
-    = 整集成加载失败（三端契约铁律）。显式 audio_format 永远优先于 preferred；
-    脏值（非 int）一律 False 走原 ffmpeg 路径。
-    """
-    options = options or {}
-    req_fmt = str(options.get("audio_format") or "").lower()
-    pref_fmt = str(options.get("preferred_format") or "").lower()
-    target = req_fmt or pref_fmt or "mp3"
-    try:
-        rate = int(options.get("preferred_sample_rate") or sample_rate)
-        chans = int(options.get("preferred_sample_channels") or channels)
-    except (TypeError, ValueError):
-        return False
-    return target == "wav" and rate == sample_rate and chans == channels
 
 
 async def async_setup_entry(
@@ -102,11 +81,7 @@ class HuijianTtsEntity(BaseEntity):
         # 只认 wav——此前只读 "audio_format" 键（core 从不传）恒回 mp3，播报在
         # 卫星端必「Only WAV」早退，台架×固件协议审计实锤）。无 preferred 时
         # 保持旧行为 mp3。
-        # v1.0.34：目标格式=原格式（wav/16k/mono）时不再喂 ffmpeg——opus 解码后
-        # 套 wav 头直通。卫星每次播报省一道 ffmpeg（spawn+转码是 detect→下发
-        # 1.56s 实测里的固定开销），非 wav 客户（media_player 等）路径原样保留。
         fmt = options.get("preferred_format") or options.get("audio_format") or "mp3"
-        wav_direct = _wav_passthrough(options, self.opus_sample_rate, self.opus_channels)
         await transport.send_message(
             {
                 "type": "tts",
@@ -122,23 +97,16 @@ class HuijianTtsEntity(BaseEntity):
                     try:
                         resp = decoder.decode(resp, self.opus_frame_samples)
                     except Exception as e:
-                        _LOGGER.error("Decode opus failed: %s", e)
+                        # v1.0.34（审查 L9）：解码失败绝不 yield 原始 opus 包——
+                        # 此前混流让卫星播噪声；丢帧保静音，日志留痕。
+                        _LOGGER.error("Decode opus failed, frame dropped: %s", e)
+                        continue
                     _LOGGER.info("Received bytes: %s %s", len(resp), resp.hex()[0:64])
                     yield resp
                 else:
                     if getattr(resp, "error", None):
                         raise RuntimeError(resp.error)
                     _LOGGER.info("Received response: %s", resp)
-
-        if wav_direct:
-            pcm = b"".join([chunk async for chunk in data_gen()])
-            buf = io.BytesIO()
-            with wave.open(buf, "wb") as wf:
-                wf.setnchannels(self.opus_channels)
-                wf.setsampwidth(2)
-                wf.setframerate(self.opus_sample_rate)
-                wf.writeframes(pcm)
-            return "wav", buf.getvalue()
 
         audio = b""
         converting = async_convert_audio(
