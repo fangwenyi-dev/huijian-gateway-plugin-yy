@@ -176,10 +176,15 @@ class HAClient:
             # 顶层 success（只有 success_count/states）→ 此前被当"非载荷"整体
             # 折进 raw，话术层全空、只剩裸「好的」。无 success 键也认载荷，
             # 成败按 success_count/states 实体判定折算，不掩盖失败。
-            if "success_count" in obj or "states" in obj:
+            # v1.0.39（2026-09-10 跨版本 sweep 实锤）：SetDeviceMode 同型——只回
+            # {"results":[逐实体 success]}（intent_set_mode:208），此前整单失败也会
+            # 被折成 success=True（假成功）。同一折算口径覆盖三族。
+            if "success_count" in obj or "states" in obj or "results" in obj:
                 ok = obj.get("success_count")
                 if ok is None:
-                    ok = any(s.get("success", True) for s in obj.get("states") or [])
+                    items = [x for x in (obj.get("states") or obj.get("results") or [])
+                             if isinstance(x, dict)]
+                    ok = any(x.get("success", True) for x in items) if items else False
                 return {"success": bool(ok), **obj, "raw": obj}
             for key in ("response", "data", "result"):
                 inner = obj.get(key)

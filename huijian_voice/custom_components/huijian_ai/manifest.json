@@ -38,6 +38,6 @@
     "opuslib_next>=1.0.0",
     "edge-tts>=6.1.0"
   ],
-  "version": "1.0.38",
+  "version": "1.0.39",
   "zeroconf": []
 }

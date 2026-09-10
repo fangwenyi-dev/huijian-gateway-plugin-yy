@@ -99,6 +99,16 @@ class SimHA:
                     out.add(eid)
         return sorted(out)
 
+    @staticmethod
+    def _fold(name, payload):
+        """真链路上插件侧还要过一层 HAClient._normalize_result（HTTP 响应 → 执行
+        结论折算）；e2e 直调 handle_intent 会整层跳过——那样 e2e 验的是"handler 返回值"
+        而不是"执行器看到的结论"。新增三族按真集成 handler 形态返回后再过折算，
+        让折算规则（含 results 族）第一次进入 e2e；其余分支既有语义不动。"""
+        from core.ha_client import HAClient
+        return HAClient._normalize_result(200, json.dumps(payload, ensure_ascii=False),
+                                          name)
+
     async def handle_intent(self, name, data, timeout=10.0):
         self.calls.append(("intent", name, data))
         if name not in KNOWN_INTENTS:
@@ -224,6 +234,69 @@ class SimHA:
             return {"success": True, "control_targets": [
                 {"name": self._friendly(e), "area": self._entity_area.get(e, "")}
                 for e in ents]}
+        if name == "AdjustDeviceAttribute":
+            # 真集成形态：{"success","success_count","states":[{name,success}]}
+            # （intent_adjust_attribute.py:690）。此前落到尾部裸 {"success":True}
+            # ——属性调节失败在 e2e 会被判成功，v1.0.34 公告的整句播报
+            # （「射灯的亮度已设为10%」）在 e2e 层也不可证（只能靠喂假 result 的单测）。
+            ents = self._match(data.get("target"))
+            if not ents:
+                return self._fold(name, {"success": False, "success_count": 0,
+                                       "error": "No available device"})
+            attr = str(data.get("attribute") or "")
+            delta = data.get("delta")
+            svc_map = {"brightness": ("turn_on", "brightness_pct"),
+                       "color_temp": ("turn_on", "color_temp"),
+                       "position": ("set_cover_position", "position"),
+                       "temperature": ("set_temperature", "temperature"),
+                       "fan_speed": ("set_percentage", "percentage")}
+            svc, vkey = svc_map.get(attr, ("turn_on", attr or "value"))
+            states = []
+            for e in ents:
+                dom = e.split(".", 1)[0]
+                if dom not in ("light", "cover", "climate", "fan",
+                               "media_player", "switch"):
+                    states.append({"name": self._friendly(e), "success": False,
+                                   "error": f"{dom} 不支持属性调节"})
+                    continue
+                await self.call_service(dom, svc, {"entity_id": [e], vkey: delta})
+                states.append({"name": self._friendly(e), "success": True})
+            n_ok = sum(1 for s in states if s.get("success"))
+            return self._fold(name, {"success": n_ok > 0, "success_count": n_ok,
+                                   "states": states})
+        if name == "SetDeviceMode":
+            # 真集成形态：{"results":[{success,name,area,supported_modes[,error]}]}
+            # （intent_set_mode.py:207）——注意**没有**顶层 success，插件侧折算靠
+            # ha_client 认 results（本次一并修）。只有空调/风扇有模式，指错设备必须
+            # 如实失败，不能像旧替身那样恒成功。
+            mode = str(data.get("mode") or "")
+            results = []
+            for e in self._match(data.get("target")):
+                dom = e.split(".", 1)[0]
+                ok = dom in ("climate", "fan")
+                item = {"success": ok, "name": self._friendly(e),
+                        "area": self._entity_area.get(e, ""),
+                        "supported_modes": (["auto", "eco", "sleep", "boost"]
+                                            if ok else [])}
+                if not ok:
+                    item["error"] = f"{dom} 不支持模式 {mode}"
+                else:
+                    # 成功就得真下一条服务令，否则 e2e 验不出"设备真的被设了模式"
+                    await self.call_service(dom, "set_preset_mode",
+                                            {"entity_id": [e], "preset_mode": mode})
+                results.append(item)
+            if not results:
+                return self._fold(name, {"success": False, "error": "No available device",
+                                       "results": []})
+            return self._fold(name, {"results": results})
+        if name == "huijianGetLiveContext":
+            # 真集成形态：{"success","speaker","result"}（intent_live_context.py:209）
+            # ——core/agent.py:331 把 result/raw 当设备清单喂大模型，旧替身回空载
+            # 等于让 e2e 永远看不到"上下文真的取到了什么"。
+            lines = [f"- {self._friendly(e)}: {self._states[e]['state']}"
+                     f"（{self._entity_area.get(e, '')}）" for e in self._states]
+            return self._fold(name, {"success": True, "speaker": {},
+                             "result": "\n".join(lines)})
         return {"success": True}
 
     async def call_service(self, domain, service, data=None):
@@ -874,6 +947,55 @@ async def main():
               bool([c for c in ha.calls[n:] if c[0] == "intent"
                     and c[1] == "HassTriggerVoiceScene"]), str(ha.calls[n:])[:200])
         await llm_turn(sess, port, "删除场景关闭客厅射灯打开书房灯")
+
+        # S12 跨版本 sweep 补口（2026-09-10）：F1 触发词撞上全屋闸 / F2 场景清单
+        # 播报无编号（公告却写着"编号即删除锚点"）/ F3 三族意图替身返回裸 success
+        # 让执行失败在 e2e 被判成功。三处此前在 e2e 层全是盲区。
+        print("\n─ S12 场景契约优先 × 清单编号 × 意图真形态 ─")
+        # 触发词刻意含「所有」字样：修复前这句先被 _wholehouse_plan 做成关窗帘、
+        # 场景永不触发（静默做错动作）。与 S9.34 的「打开所有灯」异文——同句 2s 内
+        # 重说会命中去重重放旧回复，本例就看不见真实调用了（历史踩过两次）。
+        await llm_turn(sess, port, "当我说关闭所有窗帘就打开书房灯")
+        n = len(ha.calls)
+        await llm_turn(sess, port, "关闭所有窗帘")
+        got = json.dumps(ha.calls[n:], ensure_ascii=False)
+        check("S12.1 含「所有」的触发词跑场景，不被全屋闸做掉（F1）",
+              "HassTriggerVoiceScene" in got and "ControlWindow" not in got
+              and "light.书房灯" in got, got[:170])
+        await llm_turn(sess, port, "删除场景关闭所有窗帘")
+        await llm_turn(sess, port, "当我说午休就关闭书房灯")
+        r = await llm_turn(sess, port, "列出我的语音场景")
+        say = text_of(r)
+        body = [x for x in re.split(r"[：；]", say)[1:] if x]
+        check("S12.2 场景清单播报带编号（1.0.34/1.0.36 公告口径）",
+              len(body) >= 2 and body[0].startswith("1，")
+              and body[1].startswith("2，"), say[:90])
+        first_tp = re.sub(r"^\d+，", "", body[0]).split("就")[0]
+        await asyncio.sleep(2.2)              # 与 S6 的「删第1条」隔出去重窗口
+        n = len(ha.calls)
+        await llm_turn(sess, port, "删第1条")
+        dele = [c[2].get("trigger_phrase") for c in ha.calls[n:]
+                if c[0] == "intent" and c[1] == "HassDeleteVoiceScene"]
+        check("S12.3 编号即删除锚点：实删项与播报第 1 项同源",
+              bool(first_tp) and dele == [first_tp], f"{dele} vs {first_tp!r}")
+        n = len(ha.calls)
+        r = await llm_turn(sess, port, "客厅射灯亮度调到百分之十")
+        say, got = text_of(r), json.dumps(ha.calls[n:], ensure_ascii=False)
+        check("S12.4 属性调节播报含设备名+数值（1.0.34 公告，此前 e2e 不可证）",
+              "亮度" in say and "10%" in say and "brightness_pct" in got,
+              f"{say} | {got[:110]}")
+        r = await llm_turn(sess, port, "客厅射灯设为睡眠模式")
+        check("S12.5 灯不支持模式→如实报失败，不再假称成功（F3 恒成功洞）",
+              "没有执行成功" in text_of(r), text_of(r)[:40])
+        await asyncio.sleep(2.2)              # 与 S10.1 同句，隔开去重窗口
+        n = len(ha.calls)
+        r = await llm_turn(sess, port, "客厅空调设为睡眠模式")
+        svc = json.dumps([c for c in ha.calls[n:] if c[0] == "service"],
+                         ensure_ascii=False)
+        check("S12.6 空调设模式成功并真下 set_preset_mode 服务令",
+              "set_preset_mode" in svc and "climate" in svc
+              and "抱歉" not in text_of(r), svc[:110])
+        await llm_turn(sess, port, "删除场景午休")
 
     await runner.cleanup()
     total = len(PASS) + len(FAIL)

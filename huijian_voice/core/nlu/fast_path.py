@@ -371,20 +371,29 @@ class FastPath:
         if not text or len(text.strip()) < 2:
             return None
         trace.append(f"纠错→{text}")
+        # 场景缓存：稳态后台刷新零等待；仅冷启动未加载过时同步兜一次（P0-2）
+        if self.scenes.needs_blocking():
+            await self.scenes.refresh()
+        else:
+            self.scenes.refresh_soon()
+
+        # 场景契约恒最高优先（模块头裁决①）：等值触发词判定必须在**一切闸之前**，
+        # 尤其先于 _wholehouse_plan。2026-09-10 跨版本 sweep 实锤：触发词写成「打开
+        # 所有灯」这类含"所有/全部"字样的，会被全屋分支先做成"开两盏灯"并播报成功
+        # ——静默做错动作，比 fallback 更糟（用户被明确告知"以后说 X 就 Y"）。
+        # 只认等值（同复杂查询分支纪律）：防短触发词「开灯」吞掉「开灯亮度50」。
+        phrase = self.scenes.check(text)
+        if phrase and phrase == text:
+            return await self._scene_plan(phrase, text, trace)
+
         # 显式全屋命令先于复杂查询守卫裁决（守卫会吞掉"打开所有灯"，见方法注释）
         wh = self._wholehouse_plan(text, trace)
         if wh is not None:
             return wh
         if _is_complex_query(text):
             trace.append("复杂查询守卫→交上层")
-            plan_src = None
-            # 场景触发词是「当我说X」创建后的短语，仍允许短等值命中
-            phrase = self.scenes.check(text)
-            if phrase and phrase == text:
-                plan_src = phrase
-            if not plan_src:
-                return self._miss(trace)
-            return await self._scene_plan(plan_src, text, trace)
+            # 等值触发词已在最前面裁决过（同 text 同 check），此处不再重复判定
+            return self._miss(trace)
 
         # 体验批 E2E 补洞：SOV 语序锁令「大门开锁/把门锁上(门+锁上)」动作前置归一。
         # 否定/疑问字（没不别谁哪）不参与——「还没上锁」是陈述不是命令。
@@ -395,18 +404,12 @@ class FastPath:
             trace.append(f"语序→{mapped}")
             text = mapped
 
-        # 场景缓存：稳态后台刷新零等待；仅冷启动未加载过时同步兜一次（P0-2）
-        if self.scenes.needs_blocking():
-            await self.scenes.refresh()
-        else:
-            self.scenes.refresh_soon()
-
-        # 场景契约恒最高优先（模块头裁决①；2026-09-10 真机实锤补）：触发词是用户
-        # 点名创建的契约，必须**先于** T0 动作正则判定——「打开空调」这类"看着像
-        # 设备指令"的触发词会被 ① 的 ^打开 吃掉、再被空调区域守卫判 miss，整句
-        # 直接落兜底（真机：创建成功、复述触发词却 fallback）；能构造成功的形态
-        # 更糟——会去开关那台设备，场景永不触发。与复杂查询分支同纪律：**只认等值**，
-        # 防短触发词（"开灯"）把「开灯亮度50」这类长指令整句吞成场景。
+        # 场景契约第二道等值判定（缓存就绪已在最前做过）：上一步 SOV 语序归一会改写
+        # text，触发词若写作锁令倒装形（「大门开锁」）只有归一后才与缓存等值。
+        # 「打开空调」这类"看着像设备指令"的触发词同样由此拦下：不先判场景就会被
+        # 下面 ① 的 ^打开 吃掉、再被空调区域守卫判 miss，整句落兜底（2026-09-10
+        # 真机：创建成功、复述触发词却 fallback）；能构造成功的形态更糟——会去开关
+        # 那台设备，场景永不触发。**只认等值**：防短触发词（"开灯"）吞掉「开灯亮度50」。
         phrase = self.scenes.check(text)
         if phrase and phrase == text:
             return await self._scene_plan(phrase, text, trace)

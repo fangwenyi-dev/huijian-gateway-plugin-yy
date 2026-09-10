@@ -272,3 +272,21 @@ def test_window_pause_survives_music_lookahead(fp):
     # 让位面向：后接音乐补语的播控令不产窗户计划
     assert asyncio.run(fp.match("停止播放")) is None
     assert asyncio.run(fp.match("暂停音乐")) is None
+
+
+def test_scene_trigger_beats_wholehouse_plan(tc, settings):
+    """F1（2026-09-10 跨版本 sweep 实锤）：用户点名创建的触发词若含「所有/全部」
+    字样，场景契约必须先于**显式全屋闸**裁决。旧顺序先跑 _wholehouse_plan，把
+    「打开所有灯」直接做成"开两盏灯"并播报成功——静默做错动作，比 fallback 糟
+    （用户被明确告知"以后说 X 就 Y"，实际做了 Z）。
+    """
+    fp = FastPath(FakeScenes(triggers=("打开所有灯", "关闭全部窗帘")), tc, settings)
+    for trig in ("打开所有灯", "关闭全部窗帘"):
+        plan = asyncio.run(fp.match(trig))
+        assert plan is not None and plan.intent == "HassTriggerVoiceScene", (trig, plan)
+        assert not getattr(plan, "whole_house", False), (trig, plan)
+    # 反例：不是触发词的显式全屋命令仍归全屋分支，不得被场景判定误吞
+    plan = asyncio.run(fp.match("打开所有设备"))
+    assert plan is None or plan.intent != "HassTriggerVoiceScene", plan
+    plan = asyncio.run(fp.match("打开所有灯太亮了"))      # 长命令≠等值触发词
+    assert plan is None or plan.intent != "HassTriggerVoiceScene", plan

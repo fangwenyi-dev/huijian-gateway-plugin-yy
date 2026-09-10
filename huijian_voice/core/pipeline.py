@@ -755,13 +755,17 @@ class Pipeline:
             else:
                 from .admin_api import _hv_action_cn
                 parts = []
-                for s in rows[:5]:
+                # 编号必须用**行位置**（enumerate 从 1 起），与 _index_delete 的
+                # rows[n-1] 同一套序号；否则「删第N条」会指向另一条场景。
+                # 1.0.34/1.0.36 公告与 _scene_delete 引导都写着"带编号"，播报此前漏了。
+                for i, s in enumerate(rows[:5], 1):
                     if not isinstance(s, dict):
                         continue
                     acts = "、".join(filter(None, (_hv_action_cn(a)
                                               for a in (s.get("actions") or [])[:2])))
                     tp = str(s.get("trigger_phrase") or s.get("name") or "")
-                    parts.append(f"{tp}就{acts}" if acts else tp)
+                    body = f"{tp}就{acts}" if acts else tp
+                    parts.append(f"{i}，{body}")
                 more = f"；其余{len(rows)-5}个在管理页看" if len(rows) > 5 else ""
                 say = f"目前有{len(rows)}个语音场景：{'；'.join(parts)}{more}"
                 self._last_list = "scene"

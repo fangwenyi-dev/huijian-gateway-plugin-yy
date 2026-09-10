@@ -225,6 +225,9 @@ def test_index_delete_scene_anaphora():
     pipe = _pipe(scenes=FakeScenes(triggers=("晚安", "午休")), executor=ex)
     r = _casc(pipe, "有哪些场景")
     assert r.ok and "2个语音场景" in r.text and "晚安就" in r.text
+    # 编号=删除锚点（1.0.34/1.0.36 公告口径；此前只有自动化侧有编号，场景侧漏了，
+    # 用户听着无编号的清单没法说「删第N条」）。编号必须按 rows 位置从 1 起。
+    assert "1，晚安" in r.text and "2，午休" in r.text, r.text
     assert pipe._last_list == "scene"
     r = _casc(pipe, "删第2条")
     assert r.ok and "午休" in r.text
