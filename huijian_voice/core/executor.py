@@ -10,9 +10,10 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Optional
 
-from .nlu.fast_path import Plan
+from .nlu.fast_path import Plan, is_pronoun, normalize_polite
 
 logger = logging.getLogger("huijian.executor")
 
@@ -49,6 +50,56 @@ def zh_error(raw: str, klar: bool = False) -> str:
     return f"抱歉，这一步没有执行成功（{raw[:30]}），可以换个说法再试"
 
 
+# ── klar 直调路径：目标词回显（2026-09-14 用户拍板）────────────────
+# 引擎 zh_cn 语料把「灯」写成拼音占位（speech.rs:45 area_light="deng {loc}"），
+# 出口清洗只能删引导词、补不出主语（klar_client.fix_zh_pinyin）→ 播报成
+# 「办公室开了」这种缺主语病句。标准开关族从此不采信引擎泛化话术，改为回显
+# **用户自己说的那个词** + 方向动词：说「打开办公室射灯」→ 播「射灯开了」。
+# 词来自原话，一定听得懂；不依赖引擎 speech、不查 entity_registry、不带拼音。
+# 带数值的意图（亮度/温度/开合度/风量）仍用引擎话术——数值只在那里。
+_KLAR_ECHO_VERB = {
+    "HassTurnOn": "开了", "HassTurnOff": "关了", "HassToggle": "切换了",
+    "HassLock": "上锁了", "HassUnlock": "解锁了",
+}
+# D7 锁语义反转（与 _klar_direct 同向）：目标是 lock 域时"打开"=上锁
+_KLAR_ECHO_LOCK = {"HassTurnOn": "上锁了", "HassTurnOff": "解锁了"}
+# 动作/语气词**只剥首尾（锚定）**，不吃句中——防「关灯助手」这类设备名被咬掉；
+# 裸「开/关」再加邻字护栏，防「开关面板 → 关面板」「灯开关 → 灯」把名词啃残
+# （长形态 打开/关闭/关掉/开了 排在交替式前，天然优先）。
+_ECHO_PREP = re.compile(r"^(?:把|将|给|帮我把|帮我将)")
+_ECHO_HEAD = re.compile(
+    r"^(?:打开来|打开|关闭|关掉|开了|关了|开一下|关一下|开启|关上|启动|停止|切换(?!器)|开(?!关)|关|换)")
+_ECHO_TAIL = re.compile(
+    r"(?:打开来|打开|关闭|关掉|开一下|关一下|开启|关上|起来|启动|停止|(?<!开)关|开)+$")
+_ECHO_TONE = re.compile(r"(?:了吧|啦|咯|了|吧|呢|呀|啊|哦|嘛|都|全部|全)+$")
+# 复合/连接残留：多目标回显会错指，交回原路径（多分句另有链话术）
+_ECHO_MULTI = re.compile(r"[和与跟]|还有|然后|接着|顺便|并且|同时")
+
+
+def echo_target(utterance: str, area: str = "") -> str:
+    """用户原话 → 目标词。「打开办公室射灯」→「射灯」；拿不准返回 ""。永不抛。"""
+    try:
+        t = re.sub(r"[\s。，,！!？?~～]+", "", normalize_polite((utterance or "").strip()))
+        for _ in range(3):
+            prev = t
+            t = _ECHO_TONE.sub("", _ECHO_TAIL.sub("", _ECHO_HEAD.sub(
+                "", _ECHO_PREP.sub("", t, count=1), count=1)))
+            if t == prev:
+                break
+        area = (area or "").strip()
+        if area and area in t:
+            t = t.replace(area, "", 1)
+        t = re.sub(r"^(?:里面的?|里|内的?|的)+", "", t)
+        t = _ECHO_TONE.sub("", t)
+        if not (1 <= len(t) <= 8) or is_pronoun(t) or _ECHO_MULTI.search(t):
+            return ""
+        # 必须是实义名词（含汉字/字母/数字），且没被剥成动词残片
+        return t if re.search(r"[\u4e00-\u9fffA-Za-z0-9]", t) else ""
+    except Exception:  # noqa: BLE001 —— 话术层任何意外都不该伤语音链
+        logger.exception("[执行] 目标词回显解析异常 → 沿用原话术")
+        return ""
+
+
 class Executor:
     def __init__(self, ha, settings=None):
         self.ha = ha
@@ -81,6 +132,9 @@ class Executor:
                 return False, reply
             results.append(result)
         klar_speech = (getattr(plan, "speech", "") or "").strip()
+        if plan.source == "klar" and len(results) == 1:
+            # 标准开关族：引擎那句缺主语的话术让位给「原话目标词 + 方向动词」
+            klar_speech = self._klar_echo(plan) or klar_speech
         if klar_speech:
             # klar 引擎自带的中文播报（zh_cn pack 产出）优于话术层泛化模板
             reply = klar_speech
@@ -180,6 +234,26 @@ class Executor:
             return None
 
     # ── 话术生成 ────────────────────────────────────────────────
+    def _klar_echo(self, plan: Plan) -> str:
+        """klar 单步标准开关族 → 「原话目标词 + 方向动词」。不适用返回 ""（沿用
+        引擎话术）：①意图不在开关族（亮度/温度/开合度等带数值的留引擎那句）；
+        ②目标词拿不准（代词、复合残留、空）。永不抛。"""
+        try:
+            verb = _KLAR_ECHO_VERB.get(plan.intent)
+            if not verb:
+                return ""
+            args = plan.args or {}
+            raw = args.get("entity_id")
+            eids = ([raw] if isinstance(raw, str) else
+                    [e for e in (raw or []) if isinstance(e, str)])
+            if eids and eids[0].split(".", 1)[0] == "lock":
+                verb = _KLAR_ECHO_LOCK.get(plan.intent, verb)   # D7 锁语义反转
+            word = echo_target(plan.utterance or "", str(args.get("area") or ""))
+            return f"{word}{verb}" if word else ""
+        except Exception:  # noqa: BLE001
+            logger.exception("[执行] 目标词回显异常 → 沿用引擎话术")
+            return ""
+
     def speech(self, plan: Plan, result: dict) -> str:
         args = plan.args
         intent = plan.intent

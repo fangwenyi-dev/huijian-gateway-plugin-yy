@@ -610,3 +610,102 @@ def test_fix_zh_pinyin_shapes():
     assert f("deng alone") == "灯 alone"
     assert f("我没听清。") == "我没听清。"
     assert f("好的，办公室射灯打开了") == "好的，办公室射灯打开了"
+
+
+# ── 标准开关族话术回显（2026-09-14 用户拍板）────────────────────────
+# 引擎 zh_cn 语料的 area_light="deng {loc}" 经出口清洗只能删拼音引导词，补不出
+# 主语 →「办公室开了」病句。HassTurnOn/Off/Toggle/Lock/Unlock 单步改播
+# 「用户原话目标词 + 方向动词」；带数值的意图（亮度/温度/…）仍用引擎那句。
+def _echo_plan(intent, args, utterance, speech="办公室开了。"):
+    return Plan(intent=intent, args=args, source="klar", utterance=utterance,
+                speech=speech)
+
+
+def test_klar_turn_on_echoes_user_device_word():
+    ha = FakeHA([{"success": True}])
+    ok, reply = arun(Executor(ha).run(_echo_plan(
+        "HassTurnOn", {"area": "办公室", "domain": "light"}, "打开办公室射灯")))
+    assert ok and reply == "射灯开了"          # 不再是缺主语的「办公室开了」
+
+
+def test_klar_turn_off_keeps_direction():
+    """开/关必须能听出方向——通用「已执行」把方向抹掉，故分动词。"""
+    ha = FakeHA([{"success": True}, {"success": True}])
+    ex = Executor(ha)
+    assert arun(ex.run(_echo_plan(
+        "HassTurnOff", {"area": "办公室"}, "关闭办公室射灯")))[1] == "射灯关了"
+    assert arun(ex.run(_echo_plan(
+        "HassToggle", {"area": "办公室"}, "切换办公室射灯")))[1] == "射灯切换了"
+
+
+def test_klar_numeric_intents_keep_engine_speech():
+    """亮度/温度类数值只在引擎话术里，回显层不得吞掉。"""
+    ha = FakeHA([{"success": True}, {"success": True}])
+    ex = Executor(ha)
+    assert arun(ex.run(_echo_plan(
+        "HassLightSet", {"area": "办公室"}, "办公室射灯调到60%",
+        speech="射灯 60%")))[1] == "射灯 60%"
+    assert arun(ex.run(_echo_plan(
+        "HassClimateSetTemperature", {"area": "客厅"}, "客厅空调26度",
+        speech="空调 客厅 26")))[1] == "空调 客厅 26"
+
+
+def test_klar_echo_gives_way_when_target_uncertain():
+    """目标词拿不准（复合连接残留/无词）→ 沿用引擎那句，不硬编。"""
+    ha = FakeHA([{"success": True}, {"success": True}])
+    ex = Executor(ha)
+    assert arun(ex.run(_echo_plan(
+        "HassTurnOn", {"area": "办公室"},
+        "打开办公室射灯和客厅台灯")))[1] == "办公室开了。"
+    assert arun(ex.run(_echo_plan(
+        "HassTurnOn", {"area": "办公室"}, "打开办公室")))[1] == "办公室开了。"
+
+
+def test_klar_lock_semantics_reversed_per_d7():
+    """lock 域 + HassTurnOn = 上锁（与 _klar_direct 同向，不得播「开了」）。"""
+    ha = SpyHA()
+    ok, reply = arun(Executor(ha).run(_echo_plan(
+        "HassTurnOn", {"entity_id": "lock.men_suo"}, "打开门锁", speech="门锁开了。")))
+    assert ok and reply == "门锁上锁了"
+
+
+def test_klar_grounded_step_without_area_slot():
+    """引擎已解析 entity_id、args 无 area → 房间名留在回显里（信息更足，不是病句）。"""
+    ha = SpyHA()
+    ok, reply = arun(Executor(ha).run(_echo_plan(
+        "HassTurnOn", {"entity_id": "light.she_deng"}, "打开办公室射灯")))
+    assert ok and reply == "办公室射灯开了"
+
+
+def test_klar_chain_and_other_sources_untouched():
+    """多分句链仍是「都办妥了」口径；非 klar 来源仍走慧尖 control_targets 真话术。"""
+    ha = FakeHA([{"success": True}, {"success": True}])
+    p = Plan(intent="HassTurnOn", args={"area": "办公室"}, source="klar",
+             utterance="打开办公室射灯",
+             extra_steps=[{"name": "HassTurnOff", "args": {"area": "办公室"}}])
+    ok, reply = arun(Executor(ha).run(p))
+    assert ok and reply == "好的，都办妥了"     # 单步回显不侵入链分支
+    ha2 = FakeHA([{"success": True, "control_targets": [{"name": "射灯", "area": "办公室"}]}])
+    assert "办公室的射灯打开了" in arun(Executor(ha2).run(
+        Plan(intent="TurnDeviceOn", args={}, source="t1", utterance="打开办公室射灯")))[1]
+
+
+def test_echo_target_shapes():
+    from core.executor import echo_target as f
+    assert f("打开办公室射灯", "办公室") == "射灯"
+    assert f("关闭办公室射灯", "办公室") == "射灯"        # 方向由 intent 定，词同形
+    assert f("办公室射灯打开", "办公室") == "射灯"        # SOV 尾置动作
+    assert f("把射灯开一下") == "射灯"                    # 把字句 + 语气词
+    assert f("帮我把办公室的射灯打开", "办公室") == "射灯"
+    assert f("射灯全部打开") == "射灯"
+    assert f("开灯") == "灯" and f("关灯") == "灯"
+    assert f("开一下主卧的床头灯", "主卧") == "床头灯"
+    assert f("打开rgb灯带") == "rgb灯带"
+    # 设备名自身含动作字：不得被剥残（实发风险：灯开关 → 灯 / 开关面板 → 关面板）
+    assert f("打开办公室的灯开关", "办公室") == "灯开关"
+    assert f("打开开关面板") == "开关面板"
+    assert f("关闭空气开关") == "空气开关"
+    # 拿不准一律空（宁漏勿错，交回引擎话术）
+    assert f("打开办公室射灯和客厅台灯", "办公室") == ""
+    assert f("打开它") == "" and f("打开办公室", "办公室") == ""
+    assert f("", "办公室") == ""
