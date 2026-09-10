@@ -5,7 +5,7 @@
 # 产品边界五理由）。本文件键序与注释风格沿用慧尖网关加载项模板。
 # ═══════════════════════════════════════════════════════════════════
 name: 慧尖HA语音插件
-version: "1.0.32"
+version: "1.0.33"
 slug: huijian_voice
 description: 慧尖局域网语音助手服务器——本地 STT/TTS/NLU，零必填配置即用，执行走 HA 意图 REST
 url: 'https://github.com/fangwenyi-dev/huijian-gateway-plugin-yy'

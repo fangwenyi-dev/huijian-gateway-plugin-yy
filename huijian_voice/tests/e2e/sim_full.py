@@ -64,6 +64,7 @@ class SimHA:
         self.calls = []
         self.ok = True
         self.reachable = True
+        self.vscenes = []           # 语音场景状态库（create/delete 真实增删）
         self._states = {eid: {"entity_id": eid, "state": s,
                               "attributes": {"friendly_name": fn}}
                         for eid, (s, fn, _a) in STATES.items()}
@@ -100,7 +101,44 @@ class SimHA:
         if name not in KNOWN_INTENTS:
             return {"success": False, "message": f"Unknown intent {name}"}
         if name == "HassListVoiceScenes":
-            return {"success": True, "scenes": []}
+            return {"success": True, "scenes": [dict(s) for s in self.vscenes]}
+        if name == "HassCreateVoiceScene":
+            # 真集成语义：白名单（core.nlu.creation 派生，非手抄）+ 状态增删
+            from core.nlu import creation as _cr
+            tp = str(data.get("trigger_phrase") or "").strip()
+            acts = data.get("actions")
+            if not tp or not isinstance(acts, list) or not acts:
+                return {"success": False, "error": "参数缺失"}
+            bad = [a for a in acts if not isinstance(a, dict)
+                   or a.get("intent") not in _cr.ACTIONABLE_INTENTS]
+            if bad:
+                return {"success": False, "error": f"动作不可执行:{bad}"}
+            if any(s["trigger_phrase"] == tp for s in self.vscenes):
+                return {"success": False, "error": f"场景「{tp}」已存在"}
+            self.vscenes.append({"scene_id": f"vs_{len(self.vscenes)+1}",
+                                 "trigger_phrase": tp, "actions": acts})
+            return {"success": True, "scene_id": f"vs_{len(self.vscenes)}"}
+        if name == "HassDeleteVoiceScene":
+            tp = str(data.get("trigger_phrase") or "").strip()
+            hit = [s for s in self.vscenes if s["trigger_phrase"] == tp]
+            if not hit:
+                return {"success": False, "error": f"未找到场景:{tp}"}
+            self.vscenes.remove(hit[0])
+            return {"success": True, "message": "deleted"}
+        if name == "HassCreateAutomation":
+            from core.nlu import creation as _cr
+            trig = data.get("trigger") or {}
+            acts = data.get("actions")
+            if not isinstance(trig, dict) or not (
+                    str(trig.get("entity_id") or "").strip()
+                    or str(trig.get("at") or "").strip()):
+                return {"success": False, "error": "trigger 缺 entity_id/at"}
+            if not isinstance(acts, list) or not acts or [
+                    a for a in acts if not isinstance(a, dict)
+                    or a.get("intent") not in _cr.ACTIONABLE_INTENTS]:
+                return {"success": False, "error": "动作不可执行"}
+            return {"success": True,
+                    "automation_id": f"automation_{len(self.calls)}"}
         if name in LOCK_INTENTS:
             ents = [e for e in self._match(data.get("target"))
                     if e.split(".", 1)[0] == "lock"]
@@ -419,6 +457,19 @@ async def main():
         check("S9.6 时间自动化 at 归一", bool(au2) and
               au2[0][2]["trigger"] == {"at": "07:00"}, str(au2)[:160])
         check("S9.7 时间回显说人话", "早上7点" in text_of(r), text_of(r))
+        n = len(ha.calls)
+        r = await llm_turn(sess, port, "删除场景晚安")
+        dl = [c for c in ha.calls[n:] if c[0] == "intent"
+              and c[1] == "HassDeleteVoiceScene"]
+        check("S9.8 语音删场景按名精准删除", bool(dl) and
+              dl[0][2] == {"trigger_phrase": "晚安"} and
+              not any(s["trigger_phrase"] == "晚安" for s in ha.vscenes)
+              and "已删除" in text_of(r), str(dl)[:160] + " | " + text_of(r))
+        n = len(ha.calls)
+        r = await llm_turn(sess, port, "删除场景没创建过的词")
+        check("S9.9 查无此名不瞎删（如实报+零调用）",
+              not [c for c in ha.calls[n:] if c[0] == "intent"]
+              and "没有找到" in text_of(r), text_of(r))
 
         # S10 场景模式（v1.0.30 SetMode 语料吸收：preset 英文规范名直发）
         print("\n─ S10 场景模式 ─")

@@ -49,6 +49,14 @@ _SCENE_RE2 = re.compile(
     r"^当我说(?P<x>[^，,。;；]{1,12}?)(?:的)?(?:时候|时|后)?"
     r"[，,、\s]*(?P<y>打开|关闭|关掉|开了|关了|开|关|调|拉|锁|解|启动|停止|播放)(?P<y2>.+)$")
 
+# ①c 场景删除（v1.0.33 本地句）：删除/删掉/移除 + 场景X；把场景X删掉。
+# 只认带名字的精准删除——裸"删除场景"不接（回原流程，LLM 通道列清单）。
+_SCENE_DEL_RE = re.compile(
+    r"^(?:(?:帮我|请|我要)\s*)?(?:删除|删掉|移除|删)\s*(?:语音)?场景\s*"
+    r"[「\"『]?(?P<x>[^「」\"』，。;；\s]{1,12})[」\"』]?$"
+    r"|^把\s*(?:语音)?场景\s*[「\"『]?(?P<x2>[^「」\"』，。;；\s]{1,12})"
+    r"[」\"』]?\s*(?:给我)?删(?:掉|了|除)$")
+
 # ② 自动化·数值阈值：当<设备/区域+属性> 超过/低于 <数值>[度|%]（时）就Y
 _AUTO_NUM_RE = re.compile(
     r"^(?:当|如果|要是|假如)(?P<d>[^，,。;；就]{2,14}?)"
@@ -165,14 +173,21 @@ def split_actions(y_text: str) -> list[str]:
 
 
 def parse(text: str) -> Optional[dict[str, Any]]:
-    """解析创建句式。返回：
+    """解析创建/删除句式。返回：
       {kind:"scene", trigger_phrase, y}                     语音场景
       {kind:"automation", trigger:{...}, desc, y}           语音自动化
+      {kind:"delete_scene", trigger_phrase}                 删除语音场景
     trigger 形态：{entity_id:str descriptor, above|below:float}
                 / {entity_id, to:"on"|"off"} / {at:"HH:MM"}
     不匹配任何句式 → None（交回级联，行为零变化）。永不抛。
     """
     t = (text or "").strip()
+    m = _SCENE_DEL_RE.match(t)                    # 删除句先过闸（不含"当"系字）
+    if m:
+        x = (m.group("x") or m.group("x2") or "").strip()
+        if 1 <= len(x) <= 12:
+            return {"kind": "delete_scene", "trigger_phrase": x}
+        return None
     if len(t) < 5 or not any(k in t for k in ("当", "每天", "如果", "要是", "假如")):
         return None
     t = _META_PREFIX.sub("", t, count=1).strip()

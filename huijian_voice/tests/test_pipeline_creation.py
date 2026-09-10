@@ -166,3 +166,28 @@ def test_agent_tools_cover_automation():
               "HassListAutomations", "HassUpdateAutomation",
               "HassCreateVoiceScene", "HassTriggerVoiceScene"):
         assert n in src, f"{n} 不在 pipeline 级联白名单，LLM 调用会被拒"
+
+
+# ── v1.0.33 语音删场景（本地链路，零 LLM）───────────────────────
+def test_voice_delete_scene_hit():
+    sc, ex = FakeScenes(["晚安"]), Recorder()
+    r = _casc(_pipe(executor=ex, scenes=sc), "删除场景晚安")
+    assert r.ok and "已删除" in r.text and "晚安" in r.text
+    p = ex.calls[0]
+    assert p.intent == "HassDeleteVoiceScene" and p.args == {"trigger_phrase": "晚安"}
+    assert p.source == "creation"
+    assert sc.refreshed == 1                      # 删后缓存强制刷新，触发词即刻失效
+
+
+def test_voice_delete_scene_miss_no_exec():
+    sc, ex = FakeScenes([]), Recorder()
+    r = _casc(_pipe(executor=ex, scenes=sc), "删除场景没建过的")
+    assert not r.ok and "没有找到" in r.text
+    assert ex.calls == []                         # 查无此名零执行（不瞎删）
+
+
+def test_voice_delete_kill_switch():
+    sc, ex = FakeScenes(["晚安"]), Recorder()
+    _casc(_pipe(executor=ex, scenes=sc,
+                **{"nlu.creation_enabled": False}), "删除场景晚安")
+    assert ex.calls == []                          # 关闸后句式回落级联（旧行为）

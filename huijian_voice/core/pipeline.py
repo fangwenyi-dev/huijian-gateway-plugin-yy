@@ -493,6 +493,8 @@ class Pipeline:
         c = creation.parse(text)
         if c is None:
             return None
+        if c["kind"] == "delete_scene":
+            return await self._scene_delete(c, text, origin)
         actions: list[dict] = []
         echo_parts: list[str] = []
         for clause in creation.split_actions(c["y"]):
@@ -532,6 +534,25 @@ class Pipeline:
                 return Reply("抱歉，自动化没创建成功，稍后再试", "creation",
                              ok=False, trace=plan.trace)
             say = f"好的，语音自动化已创建：{self._cond_say(c)}，就{y_say}"
+        self._remember_turn(origin, text, say)
+        return Reply(say, "creation", True, plan.trace)
+
+    async def _scene_delete(self, c: dict, text: str, origin: str) -> Reply:
+        """语音删场景（v1.0.33 本地句，零 LLM）：只认带名字的精准删除；
+        触发词表在缓存里查无 → 如实报不瞎删。"""
+        x = c["trigger_phrase"]
+        if x not in (self.scenes.triggers or []):
+            return Reply(f"没有找到叫「{x}」的语音场景；全部场景可在管理页"
+                         f"「场景/自动化」查看。", "creation", ok=False,
+                         trace=[f"删除未命中:{x}"])
+        plan = Plan(intent="HassDeleteVoiceScene", args={"trigger_phrase": x},
+                    source="creation", utterance=text, trace=[f"删除场景:{x}"])
+        ok, _ = await self.executor.run(plan)
+        if not ok:
+            return Reply(f"抱歉，场景「{x}」没删除成功，稍后再试。", "creation",
+                         ok=False, trace=plan.trace)
+        await self.scenes.refresh(force=True)
+        say = f"好的，语音场景「{x}」已删除"
         self._remember_turn(origin, text, say)
         return Reply(say, "creation", True, plan.trace)
 

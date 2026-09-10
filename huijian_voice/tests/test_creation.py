@@ -111,3 +111,19 @@ def test_actionable_whitelist_alignment():
     seg = src.split("async def _execute_intent", 1)[1][:1200]
     for name in cr.ACTIONABLE_INTENTS:
         assert name in seg, f"集成侧白名单缺 {name}，本地 ACTIONABLE 需同步收缩"
+
+
+# ── v1.0.33 场景删除本地句 ─────────────────────────────────────
+def test_scene_delete_phrases():
+    cases = {"删除场景晚安": "晚安", "删掉场景 我回来了": "我回来了",
+             "把场景晚安删了": "晚安", "帮我删除场景「早安」": "早安",
+             "移除语音场景午休": "午休", "把场景「我回家了」删除": "我回家了"}
+    for s, want in cases.items():
+        p = cr.parse(s)
+        assert p and p["kind"] == "delete_scene" and p["trigger_phrase"] == want, s
+
+
+def test_scene_delete_requires_explicit_name():
+    for s in ("删除场景", "把场景删了", "删除所有场景", "删了"):
+        p = cr.parse(s)
+        assert p is None or p.get("kind") != "delete_scene", s

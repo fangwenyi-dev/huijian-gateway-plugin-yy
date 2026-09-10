@@ -14,8 +14,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#030712">
 <title>慧尖HA语音插件</title>
-<link rel="stylesheet" href="css/huijian.css?v=1.0.32">
-<link rel="stylesheet" href="css/voice.css?v=1.0.32">
+<link rel="stylesheet" href="css/huijian.css?v=1.0.33">
+<link rel="stylesheet" href="css/voice.css?v=1.0.33">
 </head>
 <body>
 <!-- 「星辰大海」背景层（与网关加载项同一设计标准/同一固定种子＝同一片天）：
@@ -44,7 +44,7 @@
   <button data-tab="status" class="on">状态</button>
   <button data-tab="settings">设置</button>
   <button data-tab="models">模型</button>
-  <button data-tab="scenes">场景</button>
+  <button data-tab="scenes">场景/自动化</button>
   <button data-tab="debug">调试</button>
   <button data-tab="pair">设备配对</button>
 </nav>
@@ -183,7 +183,26 @@
     <table><thead><tr><th>触发条件 / 别名</th><th>状态</th><th>最近触发</th><th>执行动作 / 说明</th></tr></thead><tbody id="autoBody"></tbody></table>
     <div id="autoMsg" class="hint"></div>
     <button class="act gray" id="autoBtn">刷新</button>
-    <div class="hint">「语音引擎」= 说「当客厅温度超过28度就打开空调」这类话创建的自动化（增删改与测试在 HA 集成配置页）；「无实体」多为 YAML 定义未重载。</div>
+    <div class="hint">「语音引擎」= 说「当客厅温度超过28度就打开空调」这类话创建的自动化（修改与测试在 HA 集成配置页）；「无实体」多为 YAML 定义未重载。</div>
+  </div>
+  <div class="card"><h3>场景和自动化怎么使用</h3>
+    <div class="hint" style="line-height:2.0">
+      <b>① 语音场景——一句话当开关</b>：对语音助手说「<b>当我说晚安，就关闭客厅灯</b>」；
+      创建成功后，任何时候说「晚安」就执行。一条场景最多带 3 个动作：
+      「当我说我回来了，就打开玄关灯并打开客厅窗帘」。<br>
+      <b>② 语音自动化——条件到了自动执行</b>，三种条件：<br>
+      　数值阈值：「当客厅温度超过28度，就打开空调」（也认中文数字与小数：「超过二十六点五度」）<br>
+      　人体感应：「当书房检测到有人，就开灯」「客厅没人就把灯关了」<br>
+      　每日定时：「每天早上7点帮我打开客厅窗帘」「每天晚上10点半关闭卧室灯」<br>
+      <b>③ 即刻生效</b>：创建成功的播报里会复述触发词和条件，说完马上就能用，无需刷新。<br>
+      <b>④ 只保存听得懂的</b>：句子里任一动作不明确，会当场取消并示范正确说法——
+      不会保存半知半解的设置。场景后悔了说「删除场景晚安」（按名字精准删）；
+      自动化的删除与修改在管理页（HA → 设置 → 设备与服务 → 慧尖AI → 管理）。<br>
+      <b>⑤ 可创建的动作范围</b>：设备开关、窗帘/窗户开合、亮度/色温/风量/开合度调节、
+      空调与风扇模式（睡眠/节能/舒适/静音/强力/标准等）。<br>
+      <b>⑥ 改与测</b>：要改动作——场景说「删除场景X」再创建一句新的（等价重建）；
+      逐条查看、测试执行在 <b>HA → 设置 → 设备与服务 → 慧尖AI → 管理</b>。
+    </div>
   </div>
 </section>
 
@@ -230,7 +249,7 @@
 
 <script>
 "use strict";
-const CURRENT_VERSION = "1.0.32";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
+const CURRENT_VERSION = "1.0.33";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
 // 音色表 = kokoro-multi-lang-v1_1 官方 103 sid 全表（k2-fsa docs sid 表实证；
 // 标注=对用户上传试听样本的 CAM++ 声纹溯源榜：v1_1 不含晓晓/云扬，
 // sid18=zf_026 女声最似晓晓(0.454 全场最近)，sid81=zm_055 最似云扬）
@@ -526,6 +545,6 @@ $("#regenBtn").onclick = async ()=>{
   try { await post("/api/token/regenerate",{}); toast("已重置"); loadEndpoints(); } catch(e){ toast(e.message); }
 };
 </script>
-<script src="js/starsky.js?v=1.0.32"></script>
+<script src="js/starsky.js?v=1.0.33"></script>
 </body>
 </html>
