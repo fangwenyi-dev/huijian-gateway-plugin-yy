@@ -388,7 +388,9 @@ async def match_intent_entities(
 
         name_lower = requested_name.lower().strip()
         matched_device_ids: set[str] = set()
-        for device_entry in dev_reg.devices.values():
+        # v1.0.34: devices 以映射用已弃用（2027.9 硬失效，HA 现网警告点名本
+        # 集成）；DeferredMapping 直接迭代即得 entries。
+        for device_entry in dev_reg.devices:
             device_display = (
                 device_entry.name_by_user or device_entry.name or ""
             ).lower()

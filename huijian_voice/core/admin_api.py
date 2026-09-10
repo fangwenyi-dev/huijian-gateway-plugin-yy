@@ -34,6 +34,13 @@ def make_admin_app(ctx) -> web.Application:
     app.router.add_post("/api/tts/test", _tts_test)
     app.router.add_get("/api/scenes", _scenes)
     app.router.add_get("/api/automations", _automations)
+    # v1.0.34 场景/自动化页内生命周期（不引流去 HA 集成页）
+    app.router.add_post("/api/scenes/delete", _scene_delete)
+    app.router.add_post("/api/scenes/rename", _scene_rename)
+    app.router.add_post("/api/scenes/test", _scene_test)
+    app.router.add_post("/api/automations/delete", _auto_delete)
+    app.router.add_post("/api/automations/test", _auto_test)
+    app.router.add_post("/api/automations/edit", _auto_edit)
     app.router.add_post("/api/system/reload_models", _reload_models)
     return app
 
@@ -250,6 +257,8 @@ async def _automations(request):
                 "kind": "huijian",
                 "id": str(a.get("automation_id") or ""),
                 "alias": _hv_trigger_cn(a.get("trigger") or {}),
+                "trigger_raw": a.get("trigger") if isinstance(a.get("trigger"),
+                                                              dict) else {},
                 "description": "；".join(
                     x for x in (_hv_action_cn(act)
                                 for act in (a.get("actions") or [])[:3]) if x),
@@ -278,6 +287,125 @@ async def _automations(request):
                                           or attrs.get("last_triggered") or ""),
                     "state": str(st.get("state") or "")})
     return web.json_response({"automations": out, "error": note})
+
+
+async def _safe_intent(ctx, name, data) -> dict:
+    try:
+        j = await ctx.ha.handle_intent(name, data)
+        return j if isinstance(j, dict) else {"success": False,
+                                              "error": "bad response"}
+    except Exception as e:
+        return {"success": False, "error": str(e)[:120]}
+
+
+async def _safe_rest(ctx, method, path, body) -> dict:
+    try:
+        return await ctx.ha.rest_write(method, path, body)
+    except Exception as e:
+        return {"success": False, "error": str(e)[:120]}
+
+
+def _op_response(j) -> web.Response:
+    """集成/意图操作结果 → 页面统一信封 {ok, error}。"""
+    ok = bool(isinstance(j, dict) and j.get("success"))
+    err = "" if ok else str((j or {}).get("error")
+                            or (j or {}).get("message") or "操作未成功")
+    return web.json_response({"ok": ok, "error": err})
+
+
+async def _scene_delete(request):
+    """页内删场景：走 intent（trigger_phrase 精准），删后强刷缓存。"""
+    ctx = request.app[CTX_KEY]
+    body = await _json_body(request)
+    tp = str(body.get("trigger_phrase") or "").strip()
+    if not tp:
+        return web.json_response({"ok": False, "error": "缺场景名"})
+    j = await _safe_intent(ctx, "HassDeleteVoiceScene", {"trigger_phrase": tp})
+    if isinstance(j, dict) and j.get("success"):
+        try:
+            await ctx.scenes.refresh(force=True)
+        except Exception:
+            pass
+    return _op_response(j)
+
+
+async def _scene_rename(request):
+    """页内改触发词：PUT 集成场景视图（actions 不动）。"""
+    ctx = request.app[CTX_KEY]
+    body = await _json_body(request)
+    sid = str(body.get("scene_id") or "").strip()
+    new = str(body.get("new_phrase") or "").strip()
+    if not sid or not (1 <= len(new) <= 12):
+        return web.json_response({"ok": False, "error": "新触发词需 1~12 字"})
+    j = await _safe_rest(
+        ctx, "PUT", f"/api/huijian-ai/voice-scenes/{sid}",
+        {"trigger_phrase": new})
+    if isinstance(j, dict) and j.get("success"):
+        try:
+            await ctx.scenes.refresh(force=True)
+        except Exception:
+            pass
+    return _op_response(j)
+
+
+async def _scene_test(request):
+    """页内测试触发：集成 test-scene 端点真执行动作。"""
+    ctx = request.app[CTX_KEY]
+    body = await _json_body(request)
+    tp = str(body.get("trigger_phrase") or "").strip()
+    if not tp:
+        return web.json_response({"ok": False, "error": "缺场景名"})
+    j = await _safe_rest(ctx, "POST", "/api/huijian-ai/test-scene",
+                         {"trigger_phrase": tp})
+    return _op_response(j)
+
+
+async def _auto_delete(request):
+    ctx = request.app[CTX_KEY]
+    body = await _json_body(request)
+    aid = str(body.get("automation_id") or "").strip()
+    if not aid:
+        return web.json_response({"ok": False, "error": "缺自动化ID"})
+    j = await _safe_intent(ctx, "HassDeleteAutomation", {"automation_id": aid})
+    return _op_response(j)
+
+
+async def _auto_test(request):
+    """页内测试触发：立即执行该自动化的动作（集成记录 test 日志）。"""
+    ctx = request.app[CTX_KEY]
+    body = await _json_body(request)
+    aid = str(body.get("automation_id") or "").strip()
+    if not aid:
+        return web.json_response({"ok": False, "error": "缺自动化ID"})
+    j = await _safe_rest(ctx, "POST", "/api/huijian-ai/test-automation",
+                         {"automation_id": aid})
+    return _op_response(j)
+
+
+async def _auto_edit(request):
+    """页内编辑数值阈值（表单只给数值形态行）。PUT 集成端 trigger 全量替换，
+    entity_id 原样带回；非数值形态（at/to）拒绝——与语音侧边界一致。"""
+    ctx = request.app[CTX_KEY]
+    body = await _json_body(request)
+    aid = str(body.get("automation_id") or "").strip()
+    trig = body.get("trigger") if isinstance(body.get("trigger"), dict) else {}
+    ent = str(trig.get("entity_id") or "").strip()
+    if not aid or not ent:
+        return web.json_response({"ok": False, "error": "缺自动化ID或传感器"})
+    new_trig: dict = {"entity_id": ent}
+    for k in ("above", "below"):
+        v = trig.get(k)
+        if v is not None and str(v).strip() != "":
+            try:
+                new_trig[k] = float(v)
+            except (TypeError, ValueError):
+                return web.json_response({"ok": False, "error": f"{k} 不是数值"})
+    if "above" in new_trig and "below" in new_trig and \
+            new_trig["above"] >= new_trig["below"]:
+        return web.json_response({"ok": False, "error": "高于值必须小于低于值（区间）"})
+    j = await _safe_rest(ctx, "PUT", f"/api/huijian-ai/automations/{aid}",
+                         {"trigger": new_trig})
+    return _op_response(j)
 
 
 async def _reload_models(request):

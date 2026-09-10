@@ -127,3 +127,71 @@ def test_scene_delete_requires_explicit_name():
     for s in ("删除场景", "把场景删了", "删除所有场景", "删了"):
         p = cr.parse(s)
         assert p is None or p.get("kind") != "delete_scene", s
+
+
+# ── v1.0.34 生命周期句式（列出/删自动化/改场景）─────────────────
+def test_list_phrases():
+    for s in ("列出场景", "有哪些场景", "我有什么自动化", "查看语音场景",
+              "场景都有哪些", "查下自动化", "有多少个场景"):
+        p = cr.parse(s)
+        assert p is not None, s
+        want = "list_automations" if "自动化" in s else "list_scenes"
+        assert p["kind"] == want, s
+    assert cr.parse("场景") is None                    # 裸名词不接
+    assert cr.parse("我的场景") is None
+    assert cr.parse("打开场景灯") is None              # 非查询句不误伤
+
+
+def test_delete_automation_phrases():
+    p = cr.parse("删除自动化2");      assert p["kind"] == "delete_automation" and cr.auto_target(p["target"]) == 2
+    p = cr.parse("删掉自动化一");     assert cr.auto_target(p["target"]) == 1
+    p = cr.parse("删除自动化第一个"); assert cr.auto_target(p["target"]) == 1
+    p = cr.parse("删除自动化温度");   assert cr.auto_target(p["target"]) == "温度"
+    p = cr.parse("把自动化2删了");    assert cr.auto_target(p["target"]) == 2
+    p = cr.parse("删除自动化「窗帘」"); assert cr.auto_target(p["target"]) == "窗帘"
+    p = cr.parse("删除自动化");       assert p["kind"] == "delete_automation" and cr.auto_target(p["target"]) is None
+
+
+def test_modify_scene_phrases():
+    p = cr.parse("把场景晚安改成关闭所有灯")
+    assert p["kind"] == "modify_scene" and p["trigger_phrase"] == "晚安" and p["y"] == "关闭所有灯"
+    p = cr.parse("删除场景晚安改成开窗帘")   # 删除正则在前：删字头但"改成"尾巴 → 删除组 x 吃掉整串失败回退
+    p2 = cr.parse("场景「早安」换成播放音乐")
+    assert p2["kind"] == "modify_scene" and p2["trigger_phrase"] == "早安"
+    assert cr.parse("把场景晚安改成") is None          # 没给新动作
+
+
+def test_delete_index_phrases():
+    for s, n in (("删第2条", 2), ("删除第三条", 3), ("把第2个删了", 2),
+                 ("删掉第1条", 1), ("删除第十一号", 11)):
+        p = cr.parse(s)
+        assert p is not None and p["kind"] == "delete_index" and p["n"] == n, s
+    assert cr.parse("第二件事") is None
+    assert cr.parse("打开第2个灯") is None          # 非删字头不接（fp 设备控制）
+    assert cr.parse("删第999条")["n"] == 999        # 越界由 pipeline 层如实报
+
+
+# ── v1.0.34 动词连排切分（真机原句驱动）──────────────────────────
+def test_serial_split_real_case():
+    # 真机日志原句：两动作间零标点
+    assert cr.split_actions("同时打开办公室的空调关闭办公室的平台窗") == \
+        ["打开办公室的空调", "关闭办公室的平台窗"]
+    assert cr.split_actions("帮我同时打开办公室的空调关闭办公室的平台窗") == \
+        ["打开办公室的空调", "关闭办公室的平台窗"]
+    assert cr.split_actions("打开客厅的射灯关闭客厅的窗帘") == \
+        ["打开客厅的射灯", "关闭客厅的窗帘"]
+    assert cr.split_actions("打开空调调到26度") == ["打开空调", "调到26度"]
+    assert cr.split_actions("关闭书房的灯并把空调设定为制冷") == \
+        ["关闭书房的灯", "把空调设定为制冷"]
+
+
+def test_serial_split_no_overcut():
+    # 反例：单动作/含动形名词/把字句/超3段嫌疑 → 不切碎（回退整句）
+    for keep in ("关闭所有灯", "把窗帘拉上", "把卧室灯亮度调到百分之三十",
+                 "调亮客厅灯", "关闭电视打开音响暂停播放器"):
+        got = cr.split_actions(keep)
+        assert got == [keep], f"{keep} 被切碎: {got}"
+    p = cr.parse("当我说打开办公室空调的时候就帮我同时打开办公室的空调"
+                 "关闭办公室的平台窗")
+    assert p["kind"] == "scene" and p["y"] == \
+        "同时打开办公室的空调关闭办公室的平台窗"

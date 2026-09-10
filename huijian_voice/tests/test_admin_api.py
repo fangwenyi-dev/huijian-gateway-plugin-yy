@@ -7,6 +7,7 @@ import asyncio
 import json
 import threading
 import time
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -274,3 +275,133 @@ def test_automations_no_bridge():
     resp = asyncio.run(_automations(SimpleNamespace(app={CTX_KEY: ctx})))
     j = json.loads(resp.body)
     assert j["automations"] == [] and "不可达" in j["error"]
+
+
+# ── v1.0.34 页内生命周期操作 ─────────────────────────────────────
+def _op_ctx(ha=None, scenes=None):
+    from core.admin_api import CTX_KEY
+    ctx = SimpleNamespace(
+        ha=ha or FakeHAClient(),
+        scenes=scenes or SimpleNamespace(refresh=None),
+        settings=SettingsFake())
+    return ctx, CTX_KEY
+
+
+def _op_req(ctx, CTX_KEY, body):
+    async def json():
+        return body
+
+    async def refresh(force=False):
+        pass
+    ctx.scenes.refresh = refresh
+    return SimpleNamespace(app={CTX_KEY: ctx}, json=json)
+
+
+def _resp_json(resp):
+    return json.loads(resp.body)
+
+
+def test_scene_delete_via_intent():
+    import asyncio
+    from core.admin_api import _scene_delete
+    ctx, K = _op_ctx()
+    req = _op_req(ctx, K, {"trigger_phrase": "晚安"})
+    r = _resp_json(asyncio.run(_scene_delete(req)))
+    assert r["ok"] is True
+    assert ctx.ha.calls[-1] == ("HassDeleteVoiceScene", {"trigger_phrase": "晚安"})
+    # 无名 → 直接拒，不触后端
+    r2 = _resp_json(asyncio.run(_scene_delete(_op_req(ctx, K, {}))))
+    assert r2["ok"] is False and "缺场景名" in r2["error"]
+    assert len(ctx.ha.calls) == 1
+
+
+def test_scene_rename_and_test_rest():
+    import asyncio
+    from core.admin_api import _scene_rename, _scene_test
+    ha = FakeHAClient(writes={
+        ("PUT", "/api/huijian-ai/voice-scenes/s9"): {"success": True},
+        ("POST", "/api/huijian-ai/test-scene"): {"success": False,
+                                                 "error": "未找到触发词"}})
+    ctx, K = _op_ctx(ha=ha)
+    r = _resp_json(asyncio.run(
+        _scene_rename(_op_req(ctx, K, {"scene_id": "s9", "new_phrase": "午安"}))))
+    assert r["ok"] is True
+    assert ha.written[-1][:2] == ("PUT", "/api/huijian-ai/voice-scenes/s9")
+    r2 = _resp_json(asyncio.run(
+        _scene_test(_op_req(ctx, K, {"trigger_phrase": "晚安"}))))
+    assert r2["ok"] is False and "未找到触发词" in r2["error"]
+    # 超长新名拒（1~12 字与语音侧同界）
+    r3 = _resp_json(asyncio.run(_scene_rename(
+        _op_req(ctx, K, {"scene_id": "s9", "new_phrase": "一" * 13}))))
+    assert r3["ok"] is False
+
+
+def test_automation_ops():
+    import asyncio
+    from core.admin_api import _auto_delete, _auto_test, _auto_edit
+    ha = FakeHAClient(writes={
+        ("POST", "/api/huijian-ai/test-automation"): {"success": True},
+        ("PUT", "/api/huijian-ai/automations/a1"): {"success": True}})
+    ctx, K = _op_ctx(ha=ha)
+    assert _resp_json(asyncio.run(_auto_delete(
+        _op_req(ctx, K, {"automation_id": "a1"}))))["ok"] is True
+    assert ctx.ha.calls[-1] == ("HassDeleteAutomation", {"automation_id": "a1"})
+    assert _resp_json(asyncio.run(_auto_test(
+        _op_req(ctx, K, {"automation_id": "a1"}))))["ok"] is True
+    # 区间编辑：高于必须小于低于（否则永不触发）
+    bad = _resp_json(asyncio.run(_auto_edit(_op_req(ctx, K, {
+        "automation_id": "a1",
+        "trigger": {"entity_id": "sensor.t", "above": 30, "below": 20}}))))
+    assert bad["ok"] is False and "区间" in bad["error"]
+    ok = _resp_json(asyncio.run(_auto_edit(_op_req(ctx, K, {
+        "automation_id": "a1",
+        "trigger": {"entity_id": "sensor.t", "above": 28, "below": ""}}))))
+    assert ok["ok"] is True
+    body = ha.written[-1][2]
+    assert body["trigger"] == {"entity_id": "sensor.t", "above": 28.0}
+
+
+def test_ops_never_500_when_ha_down():
+    import asyncio
+    from core.admin_api import _auto_test, _scene_delete
+
+    class Dead:
+        async def handle_intent(self, n, d, timeout=10.0):
+            raise RuntimeError("bridge down")
+        async def rest_write(self, m, p, b=None, timeout=8.0):
+            raise RuntimeError("bridge down")
+        calls = []
+    ctx, K = _op_ctx(ha=Dead())
+    async def refresh(force=False):
+        raise RuntimeError("no")
+    ctx.scenes.refresh = refresh
+    r1 = _resp_json(asyncio.run(_scene_delete(_op_req(ctx, K, {"trigger_phrase": "x"}))))
+    # handle_intent 抛 → admin handler 由 aiohttp 兜 500？不允许：路由级必须折叠
+    assert r1["ok"] is False
+
+
+def test_scene_page_lifecycle_pins():
+    """v1.0.34 页内操作承诺钉：入口齐全 + 引流文案清零 + 非数值不给编辑按钮
+    （页面承诺=可实现承诺纪律的 web 侧延伸）。"""
+    www = (Path(__file__).resolve().parents[1] / "www" / "index.html"
+           ).read_text(encoding="utf-8")
+    for promise in ("scTest", "scRename", "scDel", "auTest", "auDel", "auEdit",
+                    "sceneMsg", "/api/scenes/test", "/api/automations/edit"):
+        assert promise in www, f"页面缺页内操作入口：{promise}"
+    for stale in ("删除/编辑在 HA 集成配置页", "修改与测试在 HA 集成配置页",
+                  "HA → 设置 → 设备与服务 → 慧尖AI → 管理"):
+        assert stale not in www, f"引流去外部页的旧文案未清除：{stale}"
+    assert "t.at==null" in www, "非数值形态行不给改阈值按钮"
+
+
+def test_scene_ops_routes_registered():
+    ctx = AppContext(settings=SettingsFake(), ha=FakeHAClient(), asr=None,
+                     tts=TtsFake(), pipeline=PipelineFake(),
+                     scenes=ScenesFake(), textcnn=None, store=StoreSnap(),
+                     started_at=time.time())
+    app = make_admin_app(ctx)
+    paths = {r.resource.canonical for r in app.router.routes()
+             if getattr(r, "resource", None) is not None}
+    assert {"/api/scenes/delete", "/api/scenes/rename", "/api/scenes/test",
+            "/api/automations/delete", "/api/automations/test",
+            "/api/automations/edit"} <= paths

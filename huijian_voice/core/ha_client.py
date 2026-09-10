@@ -172,6 +172,15 @@ class HAClient:
         if isinstance(obj, dict):
             if "success" in obj:
                 return {**obj, "raw": obj}
+            # v1.0.34（2026-09-10 实发）：旧版集成 AdjustDeviceAttribute 返回无
+            # 顶层 success（只有 success_count/states）→ 此前被当"非载荷"整体
+            # 折进 raw，话术层全空、只剩裸「好的」。无 success 键也认载荷，
+            # 成败按 success_count/states 实体判定折算，不掩盖失败。
+            if "success_count" in obj or "states" in obj:
+                ok = obj.get("success_count")
+                if ok is None:
+                    ok = any(s.get("success", True) for s in obj.get("states") or [])
+                return {"success": bool(ok), **obj, "raw": obj}
             for key in ("response", "data", "result"):
                 inner = obj.get(key)
                 if isinstance(inner, dict) and ("success" in inner or "message" in inner):
@@ -291,6 +300,32 @@ class HAClient:
         except Exception as e:
             logger.debug("[HA] GET %s 失败: %s", path, e)
         return None
+
+    async def rest_write(self, method: str, path: str, body: dict | None = None,
+                         timeout: float = 8.0) -> dict:
+        """带鉴权写通道（v1.0.34 场景/自动化页内操作：测试/改名/编辑）。
+        恒返回结构化 dict（失败折叠 {"success": False, "error": …}），永不抛。"""
+        if not self.ok or self._session is None:
+            return {"success": False, "error": "HA 连接不可用"}
+        try:
+            async with self._session.request(
+                    method, self._url(path), json=body or {},
+                    timeout=aiohttp.ClientTimeout(total=timeout)) as r:
+                try:
+                    j = await r.json(content_type=None)
+                except Exception:
+                    j = None
+                if isinstance(j, dict):
+                    if r.status >= 400 and "success" not in j:
+                        j["success"] = False
+                    j.setdefault("success", r.status < 400)
+                    return j
+                if r.status < 400:
+                    return {"success": True}
+                return {"success": False, "error": f"HTTP {r.status}"}
+        except Exception as e:
+            logger.debug("[HA] %s %s 失败: %s", method, path, e)
+            return {"success": False, "error": str(e)[:120]}
 
     # ── 事件旁路（v4 §2 旁路：回合留痕）──────────────────────────
     async def fire_event(self, event_type: str, data: dict) -> None:

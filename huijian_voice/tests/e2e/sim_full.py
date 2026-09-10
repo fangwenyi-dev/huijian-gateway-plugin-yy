@@ -65,6 +65,7 @@ class SimHA:
         self.ok = True
         self.reachable = True
         self.vscenes = []           # 语音场景状态库（create/delete 真实增删）
+        self.vautomations = []      # 语音自动化状态库（create/list/delete 真增删）
         self._states = {eid: {"entity_id": eid, "state": s,
                               "attributes": {"friendly_name": fn}}
                         for eid, (s, fn, _a) in STATES.items()}
@@ -137,8 +138,21 @@ class SimHA:
                     a for a in acts if not isinstance(a, dict)
                     or a.get("intent") not in _cr.ACTIONABLE_INTENTS]:
                 return {"success": False, "error": "动作不可执行"}
+            aid = f"automation_{len(self.vautomations)+1:04d}"
+            self.vautomations.append({
+                "automation_id": aid, "trigger": trig, "actions": acts,
+                "created_at": "2026-09-14T00:00:00", "last_triggered": None})
+            return {"success": True, "automation_id": aid}
+        if name == "HassListAutomations":
             return {"success": True,
-                    "automation_id": f"automation_{len(self.calls)}"}
+                    "automations": [dict(a) for a in self.vautomations]}
+        if name == "HassDeleteAutomation":
+            aid = str(data.get("automation_id") or "")
+            hit = [a for a in self.vautomations if a["automation_id"] == aid]
+            if not hit:
+                return {"success": False, "error": f"未找到自动化:{aid}"}
+            self.vautomations.remove(hit[0])
+            return {"success": True, "message": "deleted"}
         if name in LOCK_INTENTS:
             ents = [e for e in self._match(data.get("target"))
                     if e.split(".", 1)[0] == "lock"]
@@ -190,6 +204,50 @@ class SimHA:
 
     async def rest_get(self, path, timeout=6.0):
         return None
+
+    async def rest_write(self, method, path, body=None, timeout=8.0):
+        """页内操作写通道：test/rename/edit 真语义（动作经 handle_intent 真执行）。"""
+        body = body or {}
+        if (method, path) == ("POST", "/api/huijian-ai/test-scene"):
+            tp = str(body.get("trigger_phrase") or "")
+            hit = [s for s in self.vscenes if s["trigger_phrase"] == tp]
+            if not hit:
+                return {"success": False, "error": f"未找到场景:{tp}"}
+            for a in hit[0]["actions"]:
+                r = await self.handle_intent(a["intent"], a.get("params") or {})
+                if not r.get("success"):
+                    return {"success": False, "error": "动作执行失败"}
+            return {"success": True}
+        if (method, path) == ("POST", "/api/huijian-ai/test-automation"):
+            aid = str(body.get("automation_id") or "")
+            hit = [a for a in self.vautomations if a["automation_id"] == aid]
+            if not hit:
+                return {"success": False, "error": f"未找到自动化:{aid}"}
+            for a in hit[0]["actions"]:
+                r = await self.handle_intent(a["intent"], a.get("params") or {})
+                if not r.get("success"):
+                    return {"success": False, "error": "动作执行失败"}
+            hit[0]["last_triggered"] = "2026-09-14T12:00:00"
+            return {"success": True}
+        if method == "PUT" and path.startswith("/api/huijian-ai/voice-scenes/"):
+            sid = path.rsplit("/", 1)[-1]
+            new = str(body.get("trigger_phrase") or "").strip()
+            hit = [s for s in self.vscenes if s["scene_id"] == sid]
+            if not hit or not new:
+                return {"success": False, "error": "场景不存在或新名空"}
+            if any(s["trigger_phrase"] == new for s in self.vscenes):
+                return {"success": False, "error": f"触发词「{new}」已占用"}
+            hit[0]["trigger_phrase"] = new
+            return {"success": True}
+        if method == "PUT" and path.startswith("/api/huijian-ai/automations/"):
+            aid = path.rsplit("/", 1)[-1]
+            hit = [a for a in self.vautomations if a["automation_id"] == aid]
+            trig = body.get("trigger")
+            if not hit or not isinstance(trig, dict):
+                return {"success": False, "error": "自动化不存在或 trigger 缺失"}
+            hit[0]["trigger"] = trig
+            return {"success": True}
+        return {"success": False, "error": f"无此写路由 {method} {path}"}
 
     async def fire_event(self, t, d):
         pass
@@ -470,6 +528,72 @@ async def main():
         check("S9.9 查无此名不瞎删（如实报+零调用）",
               not [c for c in ha.calls[n:] if c[0] == "intent"]
               and "没有找到" in text_of(r), text_of(r))
+
+        # S9b v1.0.34 生命周期语音句（列出/编号删/关键词删/裸删引导/改场景）
+        print("\n─ S9b 生命周期句式 ─")
+        r = await llm_turn(sess, port, "我有哪些自动化")
+        t = text_of(r)
+        check("S9.10 列自动化带编号与条数", "2条" in t and "1，" in t and "2，" in t, t)
+        n = len(ha.calls)
+        r = await llm_turn(sess, port, "删除自动化温度")
+        check("S9.11 关键词删自动化命中", len(ha.vautomations) == 1 and
+              [c for c in ha.calls[n:] if c[1] == "HassDeleteAutomation"]
+              and "已删除" in text_of(r), text_of(r))
+        n = len(ha.calls)
+        r = await llm_turn(sess, port, "删除自动化")
+        check("S9.12 裸删列编号引导（零执行）", "要删哪一条" in text_of(r) and
+              not [c for c in ha.calls[n:] if c[1] == "HassDeleteAutomation"],
+              text_of(r))
+        r = await llm_turn(sess, port, "删除自动化1")
+        check("S9.13 序号删自动化", len(ha.vautomations) == 0 and
+              "已删除" in text_of(r), text_of(r))
+        r = await llm_turn(sess, port, "有哪些场景")
+        check("S9.14 空场景如实报+句式示范", "还没有" in text_of(r), text_of(r))
+        n = len(ha.calls)
+        r = await llm_turn(sess, port, "当我说午休就打开客厅射灯")
+        check("S9.15 建场景「午休」", len(ha.vscenes) == 1 and "已创建" in text_of(r),
+              text_of(r))
+        n = len(ha.calls)
+        r = await llm_turn(sess, port, "把场景午休改成关闭客厅射灯")
+        cur = ha.vscenes[0] if ha.vscenes else {}
+        check("S9.16 改场景整句替换动作（触发词不变）",
+              "已改成" in text_of(r) and len(ha.vscenes) == 1 and
+              cur.get("trigger_phrase") == "午休" and
+              cur.get("actions", [{}])[0].get("intent") == "TurnDeviceOff",
+              text_of(r) + " | " + str(cur)[:120])
+        n = len(ha.calls)
+        r = await llm_turn(sess, port, "把场景不存在改成开灯")
+        check("S9.17 改无此名如实报（零调用）",
+              "没有找到" in text_of(r) and
+              not [c for c in ha.calls[n:] if c[0] == "intent"], text_of(r))
+
+        # 「删第N条」回指链（CHANGELOG 承诺句的实证位）
+        r = await llm_turn(sess, port, "每天早上8点关闭客厅窗帘")
+        check("S9.18a 时间自动化入库（回指前提）", len(ha.vautomations) == 1,
+              text_of(r))
+        r = await llm_turn(sess, port, "有哪些自动化")
+        check("S9.18 清单播报建立回指锚", "1条" in text_of(r), text_of(r))
+        r = await llm_turn(sess, port, "删第1条")
+        check("S9.19 删第N条命中上次清单", len(ha.vautomations) == 0 and
+              "已删除" in text_of(r), text_of(r))
+        n = len(ha.calls)
+        r = await llm_turn(sess, port, "删除第1条")   # 异文绕开重放缓存（防重复句设计）
+        check("S9.20 删后清锚防旧编号误删（反问零执行）",
+              "先说" in text_of(r) and
+              not [c for c in ha.calls[n:] if c[0] == "intent"], text_of(r))
+        r = await llm_turn(sess, port, "列出场景")   # 异文（S9.14 用过"有哪些场景"，防重放）
+        check("S9.21a 场景清单播报", "1个语音场景" in text_of(r)
+              and "午休就关闭客厅射灯" in text_of(r), text_of(r))
+        r = await llm_turn(sess, port, "删掉第1个")
+        check("S9.21 场景清单回指删除", len(ha.vscenes) == 0 and
+              "已删除" in text_of(r), text_of(r))
+        # 真机实证句式：多动作无标点连排（v1.0.34 补丁锚）
+        r = await llm_turn(sess, port,
+                           "当我说我回来了就帮我同时打开客厅射灯关闭客厅窗帘")
+        sc = ha.vscenes[-1] if ha.vscenes else {}
+        check("S9.22 多动作连排句入库两步（真机原句式）",
+              len(sc.get("actions", [])) == 2 and "已创建" in text_of(r),
+              text_of(r)[:60])
 
         # S10 场景模式（v1.0.30 SetMode 语料吸收：preset 英文规范名直发）
         print("\n─ S10 场景模式 ─")

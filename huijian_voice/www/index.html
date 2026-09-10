@@ -14,8 +14,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#030712">
 <title>慧尖HA语音插件</title>
-<link rel="stylesheet" href="css/huijian.css?v=1.0.33">
-<link rel="stylesheet" href="css/voice.css?v=1.0.33">
+<link rel="stylesheet" href="css/huijian.css?v=1.0.34">
+<link rel="stylesheet" href="css/voice.css?v=1.0.34">
 </head>
 <body>
 <!-- 「星辰大海」背景层（与网关加载项同一设计标准/同一固定种子＝同一片天）：
@@ -176,32 +176,35 @@
 <section id="tab-scenes">
   <div class="card"><h3>语音场景（来自慧尖 AI 集成）</h3>
     <div id="sceneList" class="hint">–</div>
+    <div id="sceneMsg" class="hint"></div>
     <button class="act gray" id="sceneBtn">刷新</button>
-    <div class="hint">说「把现在这样保存为观影模式」即可现场建场景；删除/编辑在 HA 集成配置页。</div>
+    <div class="hint">说「当我说晚安，就关闭客厅灯」创建；测试/改名/删除在下方操作列，改动作说「把场景晚安改成……」。</div>
   </div>
   <div class="card"><h3>自动化（语音创建 + HA 核心，双引擎合并）</h3>
-    <table><thead><tr><th>触发条件 / 别名</th><th>状态</th><th>最近触发</th><th>执行动作 / 说明</th></tr></thead><tbody id="autoBody"></tbody></table>
+    <table><thead><tr><th>触发条件 / 别名</th><th>状态</th><th>最近触发</th><th>执行动作 / 说明</th><th>操作</th></tr></thead><tbody id="autoBody"></tbody></table>
     <div id="autoMsg" class="hint"></div>
     <button class="act gray" id="autoBtn">刷新</button>
-    <div class="hint">「语音引擎」= 说「当客厅温度超过28度就打开空调」这类话创建的自动化（修改与测试在 HA 集成配置页）；「无实体」多为 YAML 定义未重载。</div>
+    <div class="hint">「语音引擎」= 说「当客厅温度超过28度就打开空调」这类话创建的自动化（测试/删除/改阈值就在操作列）；「无实体」多为 YAML 定义未重载。</div>
   </div>
   <div class="card"><h3>场景和自动化怎么使用</h3>
     <div class="hint" style="line-height:2.0">
       <b>① 语音场景——一句话当开关</b>：对语音助手说「<b>当我说晚安，就关闭客厅灯</b>」；
       创建成功后，任何时候说「晚安」就执行。一条场景最多带 3 个动作：
-      「当我说我回来了，就打开玄关灯并打开客厅窗帘」。<br>
+      「当我说我回来了，就打开玄关灯并打开客厅窗帘」；
+      动作直接连着说也行（不用带"并/然后"）：「…就打开玄关灯关闭客厅窗帘」。<br>
       <b>② 语音自动化——条件到了自动执行</b>，三种条件：<br>
       　数值阈值：「当客厅温度超过28度，就打开空调」（也认中文数字与小数：「超过二十六点五度」）<br>
       　人体感应：「当书房检测到有人，就开灯」「客厅没人就把灯关了」<br>
       　每日定时：「每天早上7点帮我打开客厅窗帘」「每天晚上10点半关闭卧室灯」<br>
       <b>③ 即刻生效</b>：创建成功的播报里会复述触发词和条件，说完马上就能用，无需刷新。<br>
       <b>④ 只保存听得懂的</b>：句子里任一动作不明确，会当场取消并示范正确说法——
-      不会保存半知半解的设置。场景后悔了说「删除场景晚安」（按名字精准删）；
-      自动化的删除与修改在管理页（HA → 设置 → 设备与服务 → 慧尖AI → 管理）。<br>
+      不会保存半知半解的设置。撤销：场景说「删除场景晚安」，自动化说「删除自动化1」；说了「有哪些自动化」
+      之后紧接一句「删第2条」即删清单第 2 项；也可用上方操作列删除。<br>
       <b>⑤ 可创建的动作范围</b>：设备开关、窗帘/窗户开合、亮度/色温/风量/开合度调节、
       空调与风扇模式（睡眠/节能/舒适/静音/强力/标准等）。<br>
-      <b>⑥ 改与测</b>：要改动作——场景说「删除场景X」再创建一句新的（等价重建）；
-      逐条查看、测试执行在 <b>HA → 设置 → 设备与服务 → 慧尖AI → 管理</b>。
+      <b>⑥ 改与测，全在本页</b>：场景——操作列可<b>测试执行</b>、<b>改名</b>、<b>删除</b>，
+      换动作说「把场景晚安改成关闭所有灯」；自动化——操作列可<b>测试执行</b>、<b>删除</b>、
+      数值条件<b>改阈值</b>；要改触发条件本身，删掉再说一句新的（语音/web 均可）。
     </div>
   </div>
 </section>
@@ -249,7 +252,7 @@
 
 <script>
 "use strict";
-const CURRENT_VERSION = "1.0.33";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
+const CURRENT_VERSION = "1.0.34";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
 // 音色表 = kokoro-multi-lang-v1_1 官方 103 sid 全表（k2-fsa docs sid 表实证；
 // 标注=对用户上传试听样本的 CAM++ 声纹溯源榜：v1_1 不含晓晓/云扬，
 // sid18=zf_026 女声最似晓晓(0.454 全场最近)，sid81=zm_055 最似云扬）
@@ -296,6 +299,7 @@ async function api(path, opt) {
   return j;
 }
 const post = (p,b) => api(p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b||{})});
+let _sc = [], _au = [];      // 场景/页与自动化页的行数据缓存（操作列按下标取行）
 function pill(txt, cls){ return `<span class="pill ${cls}">${txt}</span>`; }
 function statRow(label, valHtml){ return `<div class="stat-row"><span class="stat-label">${label}</span><span class="stat-val">${valHtml}</span></div>`; }
 function fmtBytes(n){ if(!n) return "–"; const u=["B","KB","MB","GB"]; let i=0; while(n>=1024&&i<3){n/=1024;i++;} return n.toFixed(i?1:0)+u[i]; }
@@ -498,30 +502,88 @@ $("#ttsBtn").onclick = async ()=>{
 async function loadScenes(){
   try { const r = await api("/api/scenes");
     const esc = s => String(s??"").replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-    const rows = (r.scenes||[]).map(s=>`<tr><td><b>${esc(s.trigger)}</b></td><td>${esc(s.name)}</td>`+
+    _sc = r.scenes||[];
+    const rows = _sc.map((s,i)=>`<tr><td><b>${esc(s.trigger)}</b></td>`+
       `<td>${esc((s.actions||[]).join("；") || (s.action_count+" 步"))}</td>`+
-      `<td class="mut">${esc(s.created_at||"–")}</td></tr>`).join("");
+      `<td class="mut">${esc((s.created_at||"").replace("T"," ").slice(0,16)||"–")}</td>`+
+      `<td style="white-space:nowrap"><span class="copy" data-op="scTest:${i}">测试</span> `+
+      `<span class="copy" data-op="scRename:${i}">改名</span> `+
+      `<span class="copy" data-op="scDel:${i}">删除</span></td></tr>`).join("");
     $("#sceneList").innerHTML =
       (r.error? `<div class="pill warn" style="margin-bottom:6px">${esc(r.error)}</div>`:"") +
-      (rows? `<table><thead><tr><th>触发口令</th><th>名称</th><th>动作</th><th>创建</th></tr></thead><tbody>${rows}</tbody></table>`
-           : (r.error? "" : "（HA 中暂无语音场景，或集成未就绪）"));
+      (rows? `<table><thead><tr><th>触发口令</th><th>动作</th><th>创建</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table>`
+           : (r.error? "" : "（暂无语音场景——说「当我说晚安，就关闭客厅灯」即可创建）"));
   } catch(e){ $("#sceneList").textContent = "读取失败："+e.message; }
 }
 $("#sceneBtn").onclick = loadScenes;
+$("#sceneList").addEventListener("click", ev=>{
+  const op=(ev.target.dataset||{}).op; if(!op) return;
+  const [k,i]=op.split(":"); const s=_sc[+i]; if(!s) return;
+  if(k==="scTest") sceneOp("/api/scenes/test",{trigger_phrase:s.trigger});
+  if(k==="scDel" && confirm(`删除语音场景「${s.trigger}」？`))
+    sceneOp("/api/scenes/delete",{trigger_phrase:s.trigger});
+  if(k==="scRename"){
+    const nw = prompt(`把触发词「${s.trigger}」改成：`, s.trigger);
+    if(nw && nw.trim() && nw.trim()!==s.trigger)
+      sceneOp("/api/scenes/rename",{scene_id:s.scene_id, new_phrase:nw.trim()});
+  }
+});
+async function sceneOp(path, body){
+  try{ const j = await post(path, body);
+    if(!j.ok) throw new Error(j.error||"操作失败");
+    await loadScenes(); $("#sceneMsg").textContent = "✓ 完成";
+  }catch(e){ $("#sceneMsg").textContent = "✗ "+e.message; }
+}
 
+function autoRowOps(a,i,esc){
+  if(a.kind!=="huijian") return "–";
+  const t=a.trigger_raw||{};
+  let ops = `<span class="copy" data-op="auTest:${i}">测试</span> `+
+            `<span class="copy" data-op="auDel:${i}">删除</span>`;
+  if(t.entity_id && t.at==null && t.to==null)
+    ops += ` <span class="copy" data-op="auEdit:${i}">改阈值</span>`;
+  return ops;
+}
 async function loadAutomations(){
   const esc = s => String(s??"").replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
   try { const r = await api("/api/automations");
-    $("#autoBody").innerHTML = (r.automations||[]).map(a=>`<tr><td>${esc(a.alias)}</td><td>`+
+    _au = r.automations||[];
+    $("#autoBody").innerHTML = _au.map((a,i)=>`<tr><td>${esc(a.alias)}</td><td>`+
       (a.kind==="huijian"? pill("语音引擎","ok") : a.state==="on"? pill("已启用","ok")
        : a.state==="off"? pill("已禁用","warn") : pill("无实体","mut"))+
       `</td><td class="mut">${esc(a.last_triggered?String(a.last_triggered).replace("T"," ").slice(0,16):"待触发")}</td>`+
-      `<td class="mut">${esc(a.description||"")}</td></tr>`).join("")
-      || `<tr><td colspan="4" class="mut">暂无自动化</td></tr>`;
+      `<td class="mut">${esc(a.description||"")}</td>`+
+      `<td style="white-space:nowrap">${autoRowOps(a,i,esc)}</td></tr>`).join("")
+      || `<tr><td colspan="5" class="mut">暂无自动化</td></tr>`;
     $("#autoMsg").textContent = r.error||"";
   } catch(e){ $("#autoMsg").textContent = "读取失败："+e.message; }
 }
 $("#autoBtn").onclick = loadAutomations;
+$("#autoBody").addEventListener("click", ev=>{
+  const op=(ev.target.dataset||{}).op; if(!op) return;
+  const [k,i]=op.split(":"); const a=_au[+i]; if(!a) return;
+  if(k==="auTest") autoOp("/api/automations/test",{automation_id:a.id},"已触发执行，看设备动作");
+  if(k==="auDel" && confirm(`删除自动化「${a.alias}」？`))
+    autoOp("/api/automations/delete",{automation_id:a.id});
+  if(k==="auEdit"){
+    const t=a.trigger_raw||{};
+    const inp = prompt(`改「${a.alias}」阈值：输入高于值（如 28），或 高于,低于（如 20,28 表示区间）`,
+                       t.above!=null?String(t.above):"");
+    if(inp==null) return;
+    const ps = String(inp).split(/[,，]/).map(x=>x.trim()).filter(x=>x!=="");
+    if(!ps.length) return;
+    const nt = {entity_id:t.entity_id};
+    if(ps.length===1){ nt.above=ps[0]; if(t.below!=null) nt.below=t.below; }
+    else { nt.above=ps[0]; nt.below=ps[1]; }
+    autoOp("/api/automations/edit",{automation_id:a.id, trigger:nt});
+  }
+});
+async function autoOp(path, body, msg){
+  try{ const j = await post(path, body);
+    if(!j.ok) throw new Error(j.error||"操作失败");
+    await loadAutomations(); $("#autoMsg").textContent = "✓ "+(msg||"完成");
+  }catch(e){ $("#autoMsg").textContent = "✗ "+e.message; }
+}
 
 /* ── 配对 ── */
 async function loadEndpoints(){
@@ -545,6 +607,6 @@ $("#regenBtn").onclick = async ()=>{
   try { await post("/api/token/regenerate",{}); toast("已重置"); loadEndpoints(); } catch(e){ toast(e.message); }
 };
 </script>
-<script src="js/starsky.js?v=1.0.33"></script>
+<script src="js/starsky.js?v=1.0.34"></script>
 </body>
 </html>

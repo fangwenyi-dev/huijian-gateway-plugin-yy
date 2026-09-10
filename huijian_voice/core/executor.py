@@ -106,6 +106,18 @@ class Executor:
         self.ha = ha
         self.settings = settings
 
+    async def run_raw(self, plan: Plan) -> tuple[bool, dict]:
+        """单步意图执行，返回 (success, 原始 result dict)——供列表类意图
+        （HassListAutomations 等）读结构化数据。永不抛，失败也带回 error dict。"""
+        try:
+            result = await self.ha.handle_intent(plan.intent, plan.args)
+        except Exception as e:
+            logger.info("[执行raw] %s 异常: %s", plan.intent, e)
+            return False, {"success": False, "error": str(e)[:120]}
+        if not isinstance(result, dict):
+            return False, {"success": False, "error": "bad response"}
+        return bool(result.get("success")), result
+
     async def run(self, plan: Plan) -> tuple[bool, str]:
         """执行 Plan（klar 多分句/复合链逐步顺序执行）。返回 (success, 中文播报)。永不抛。"""
         steps = [(plan.intent, plan.args)] + [
@@ -313,6 +325,11 @@ class Executor:
             return msg if any("\u4e00" <= c <= "\u9fff" for c in msg) else zh_error(msg)
         if result.get("states"):
             names = [s.get("name", "") for s in result["states"] if s.get("success")]
+            if plan.intent == "AdjustDeviceAttribute" and names:
+                # v1.0.34：属性调节族不回 control_targets，旧话术只剩"已处理"
+                # 丢数值（甚至因 raw 折叠只剩裸「好的」）——借 control_targets
+                # 族同一模板按 state 名+slots 拼整句（如"射灯的亮度已设为10%"）。
+                return self._targets_speech(plan, [{"name": n} for n in names])
             return f"好的，{'、'.join(names) if names else '设备'}已处理"
         if "success_count" in result:
             return "好的，已执行"

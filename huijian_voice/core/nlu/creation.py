@@ -57,6 +57,65 @@ _SCENE_DEL_RE = re.compile(
     r"|^把\s*(?:语音)?场景\s*[「\"『]?(?P<x2>[^「」\"』，。;；\s]{1,12})"
     r"[」\"』]?\s*(?:给我)?删(?:掉|了|除)$")
 
+# ①d 列表查询（v1.0.34 本地句）：列出场景 / 我有哪些自动化 / 场景都有什么 /
+# 多少个场景。裸名词（"场景"俩字）不收——guard 在 parse。
+_LIST_RE = re.compile(
+    r"^(?:(?:帮我|请)\s*)?(?:列出|查看|查一下|查下|看看|读一下|说一下|告诉我|报一下|查)?\s*"
+    r"(?:我)?(?:的)?(?:都)?(?:有(?:哪些|什么|几个|多少))?个?\s*(?:所有|全部)?\s*"
+    r"(?P<what>语音场景|场景|语音自动化|自动化)\s*"
+    r"(?:列表)?(?:都?(?:有哪些|有什么|是什么|有多少|有几个))?(?:呢|吗)?[？?。]?$")
+
+# ①e 自动化删除（v1.0.34）：删除自动化[序号|关键词]；把自动化N删了。
+# target 可空=裸删（pipeline 列编号让用户点选，不猜）。
+_AUTO_DEL_RE = re.compile(
+    r"^(?:(?:帮我|请)\s*)?(?:删除|删掉|移除|删)\s*(?:语音)?自动化\s*"
+    r"(?:第)?\s*(?P<t>[\d一二三四五六七八九十]{1,3}[号]?"
+    r"|[「\"『][^」\"』]{1,14}[」\"』]?|[^「」\"』，。;；\s]{1,14}[号条个]?)?\s*$"
+    r"|^把\s*(?:语音)?自动化\s*(?:第)?\s*"
+    r"(?P<t2>[\d一二三四五六七八九十]{1,3}|[^，。;；\s]{1,14})\s*"
+    r"(?:号|个)?\s*(?:给我)?删(?:掉|了|除)\s*[。！!？?～~]?$")
+
+# ①f 场景修改（v1.0.34）：把场景X改成/换成/修改为 + 新动作整句。
+# Y 全量替换旧动作（预检白名单通过才动旧数据）。
+_SCENE_MOD_RE = re.compile(
+    r"^(?:(?:帮我|请|我要)\s*)?(?:把|将)?\s*(?:修改|更改|调整)?\s*"
+    r"(?:语音)?场景\s*[「\"『]?(?P<x>[^」\"』，。;；\s]{1,12})[」\"『]?\s*"
+    r"[，,、]?\s*(?:的?动作|的内容)?\s*"
+    r"(?:改成|改为|换成|换做|修改为|修改成|变为|变成)\s*"
+    r"(?:(?:就|帮我|请|要|给我)\s*)?(?P<y>\S(?:.*\S)?)$")
+
+_CN_IDX = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+           "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+
+
+# ①g 编号回指删除（v1.0.34）：删第2条 / 删除第三条 / 把第2个删了。
+# 语义 = 上一次清单播报（场景或自动化）里的第 N 项，上下文由 pipeline 记。
+_DEL_IDX_RE = re.compile(
+    r"^(?:删除|删掉|移除|删)\s*第\s*(?P<n>[\d一二三四五六七八九十]{1,3})\s*(?:条|个|号)$"
+    r"|^把\s*第\s*(?P<n2>[\d一二三四五六七八九十]{1,3})\s*(?:条|个|号)\s*"
+    r"(?:给我)?删(?:掉|了|除)$")
+
+
+def auto_target(raw: str):
+    """自动化删除目标归一：None=裸删；int=序号；str=关键词。永不抛。"""
+    s = (raw or "").strip().strip("「」『』\"'").strip()
+    for suf in ("号", "条", "个"):
+        if s.endswith(suf) and len(s) > 1:
+            s = s[:-1]
+    s = s[1:] if s.startswith("第") else s
+    if not s:
+        return None
+    if s.isdigit():
+        try:
+            return max(1, int(s))
+        except ValueError:
+            return s
+    if s in _CN_IDX:
+        return _CN_IDX[s]
+    if len(s) == 2 and s[0] == "十" and s[1] in _CN_IDX:
+        return 10 + _CN_IDX[s[1]]          # 十一~十九
+    return s
+
 # ② 自动化·数值阈值：当<设备/区域+属性> 超过/低于 <数值>[度|%]（时）就Y
 _AUTO_NUM_RE = re.compile(
     r"^(?:当|如果|要是|假如)(?P<d>[^，,。;；就]{2,14}?)"
@@ -158,13 +217,60 @@ def _hour_minute(h_raw: str, am: str, m_raw: str) -> Optional[str]:
     return f"{h:02d}:{m:02d}"
 
 
+# 动词连排切分（v1.0.34 真机句式「…就帮我同时打开办公室的空调关闭办公室的
+# 平台窗」——两动作间零标点）。只在**多字动词/客套词**前下刀：单字
+# 开/关/调 可能落在「办公室/空调」等名词里，绝不作切点。
+_SERIAL_CUT = re.compile(
+    r"(?=帮我把|帮我|麻烦你|麻烦|请你|请|顺便|把|将|打开|关闭|关掉|关上|开启|"
+    r"开一下|调到|调成|调节|调整|设为|设成|设定|设置|播放|停止|暂停|锁上|解锁|"
+    r"拉上|拉下|全开|全关)")
+_SERIAL_LEAD = re.compile(
+    r"^(?:同时|另外|并且|而且|然后|接着|之后|一并|再|就)+")
+# 真动词表（段有效性判定用）：切点组里的构式/客套词（把/将/请/帮我）不算
+# 动词——否则把字句 "把空调设定为制冷" 会被拦腰误切。
+_SERIAL_VERB = re.compile(
+    r"打开|关闭|关掉|关上|开启|开一下|调到|调成|调节|调整|设为|设成|设定|"
+    r"设置|播放|停止|暂停|锁上|解锁|拉上|拉下|全开|全关")
+# 段头单字动词（名词内单字不作切点，但独立段以动词开头是合法动作）
+_SERIAL_HEAD_V = re.compile(r"^[开关调设拉锁停]")
+
+
+def _serial_expand(parts: list[str]) -> list[str]:
+    """对每段做动词连排细分：['开A关B'] → ['开A','关B']。
+    回退律（宁欠勿过）：任一子段剥去连接词/客套后**不含动词**（如
+    把字句拦腰的 '空调'、'播放器' 名词碎段）→ 整段保原形交级联。"""
+    out: list[str] = []
+    for p in parts:
+        subs = [x.strip(" 。") for x in _SERIAL_CUT.split(p) if x.strip(" 。")]
+        fixed: list[str] = []
+        broken = False
+        for x in subs:
+            x2 = _SERIAL_LEAD.sub("", _Y_POLITE.sub("", x))
+            if not x2:
+                continue                       # 纯客套/连接词残片（'帮我'）丢弃
+            if len(x2) < 2:
+                broken = True
+                break
+            if not (_SERIAL_VERB.search(x2) or _SERIAL_HEAD_V.match(x2)):
+                broken = True                  # 名词碎段（无动词）→ 段无效
+                break
+            fixed.append(x2)
+        if not broken and len(fixed) >= 2:
+            out.extend(fixed)
+        elif p and (fixed or len(_Y_POLITE.sub("", _SERIAL_LEAD.sub("", p))) >= 2):
+            out.append(p)            # 纯客套残段（'帮我'）直接丢弃
+    return out
+
+
 def split_actions(y_text: str) -> list[str]:
-    """动作子句切分（2~3 段封顶；任何子句 <2 字判非复合）。"""
+    """动作子句切分（2~3 段封顶；任何子句 <2 字判非复合）。
+    标点分句与无标点动词连排都支持。"""
     y_text = (y_text or "").strip().strip("。！？!?")
     if len(y_text) < 6:
         return [y_text] if y_text else []
     parts = [p.strip(" 。！？!?，,、") for p in _Y_SPLIT.split(y_text)]
     parts = [p for p in parts if p]
+    parts = _serial_expand(parts)
     if len(parts) < 2:
         return [y_text]
     if len(parts) > 3 or any(len(p) < 2 for p in parts):
@@ -173,10 +279,14 @@ def split_actions(y_text: str) -> list[str]:
 
 
 def parse(text: str) -> Optional[dict[str, Any]]:
-    """解析创建/删除句式。返回：
-      {kind:"scene", trigger_phrase, y}                     语音场景
-      {kind:"automation", trigger:{...}, desc, y}           语音自动化
+    """解析场景/自动化生命周期句式。返回 kind：
+      {kind:"scene", trigger_phrase, y}                     创建语音场景
+      {kind:"automation", trigger:{...}, desc, y}           创建语音自动化
       {kind:"delete_scene", trigger_phrase}                 删除语音场景
+      {kind:"modify_scene", trigger_phrase, y}              改语音场景动作
+      {kind:"list_scenes"|"list_automations"}               列出
+      {kind:"delete_automation", target:raw}                删自动化(序号/关键词/裸)
+      {kind:"delete_index", n:int}                          「删第N条」回指上次清单
     trigger 形态：{entity_id:str descriptor, above|below:float}
                 / {entity_id, to:"on"|"off"} / {at:"HH:MM"}
     不匹配任何句式 → None（交回级联，行为零变化）。永不抛。
@@ -187,6 +297,31 @@ def parse(text: str) -> Optional[dict[str, Any]]:
         x = (m.group("x") or m.group("x2") or "").strip()
         if 1 <= len(x) <= 12:
             return {"kind": "delete_scene", "trigger_phrase": x}
+        return None
+    m = _SCENE_MOD_RE.match(t)                    # 改场景（v1.0.34）
+    if m:
+        x, y = m.group("x").strip(), _clean_y(m.group("y"))
+        if 1 <= len(x) <= 12 and len(y) >= 2:
+            return {"kind": "modify_scene", "trigger_phrase": x, "y": y}
+        return None
+    m = _AUTO_DEL_RE.match(t)                     # 删自动化（v1.0.34）
+    if m:
+        raw = (m.group("t") or m.group("t2") or "").strip()
+        if auto_target(raw) is None and not raw:
+            return {"kind": "delete_automation", "target": ""}   # 裸删→列编号
+        return {"kind": "delete_automation", "target": raw}
+    m = _LIST_RE.match(t)                         # 列出（v1.0.34）
+    if m:
+        what = m.group("what")
+        core = t.strip().strip("。？?！!").lstrip("我").lstrip("的")
+        if core in (what, what + "列表"):         # 裸名词不接（防"场景"两字触发）
+            return None
+        return {"kind": "list_automations" if "自动化" in what else "list_scenes"}
+    m = _DEL_IDX_RE.match(t)                      # 删第N条（回指上次清单）
+    if m:
+        n = auto_target("第" + (m.group("n") or m.group("n2")))
+        if isinstance(n, int):
+            return {"kind": "delete_index", "n": n}
         return None
     if len(t) < 5 or not any(k in t for k in ("当", "每天", "如果", "要是", "假如")):
         return None

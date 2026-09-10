@@ -684,7 +684,11 @@ class AdjustDeviceAttributeIntent(intent.IntentHandler):
             response.set_state(item, target.attributes, error)
 
         states, success_count = response.states()
+        # v1.0.34：补顶层 success 对齐 turn 族返回形态——加载项 _normalize_result
+        # 旧版只认 "success" 键，此返回整体被折进 raw，话术只剩裸「好的」
+        # （2026-09-10 实发：'调到百分之十' 执行成功却只回"好的"）。
         return {
+            "success": success_count > 0,
             "success_count": success_count,
             "states": states,
         }

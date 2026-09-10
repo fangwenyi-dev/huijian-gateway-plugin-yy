@@ -208,6 +208,7 @@ class Pipeline:
         self._last: "OrderedDict[str, dict]" = OrderedDict()
         # P2-10 会话上下文（按 origin=卫星 IP / "panel" 分桶）
         self._turns: dict[str, deque] = {}
+        self._last_list: Optional[str] = None   # 上次清单播报对象（"删第2条"回指）
         self._last_target: dict[str, dict] = {}
         self._origin_ts: dict[str, float] = {}      # LRU 清扫用
         # P2-13 待确认环
@@ -495,24 +496,24 @@ class Pipeline:
             return None
         if c["kind"] == "delete_scene":
             return await self._scene_delete(c, text, origin)
-        actions: list[dict] = []
-        echo_parts: list[str] = []
-        for clause in creation.split_actions(c["y"]):
-            plan = await self._match_fp(clause)
-            if plan is None or plan.intent not in creation.ACTIONABLE_INTENTS:
-                plan = await self._retry_with_area(clause, c)
-            if plan is None or plan.intent not in creation.ACTIONABLE_INTENTS:
-                logger.info("[创建] 子句拒收 %r → 整单作废（原句 %r）", clause, text)
-                return Reply(self._creation_reject(c, clause), "creation",
-                             ok=False, trace=[f"创建拒收:{clause!r}"])
-            actions.append({"intent": plan.intent, "params": copy.deepcopy(plan.args)})
-            echo_parts.append(clause)
-        y_say = "，".join(echo_parts)
+        if c["kind"] in ("list_scenes", "list_automations"):
+            return await self._object_list(c, text, origin)
+        if c["kind"] == "delete_automation":
+            return await self._automation_delete(c, text, origin)
+        if c["kind"] == "modify_scene":
+            return await self._scene_modify(c, text, origin)
+        if c["kind"] == "delete_index":
+            return await self._index_delete(c, text, origin)
+        built = await self._build_actions(c, text)
+        if isinstance(built, Reply):
+            return built
+        actions, y_say = built
         if c["kind"] == "scene":
             x = c["trigger_phrase"]
             if x in (self.scenes.triggers or []):
                 # 集成侧 create_scene 有权威 dup 闸，这里只是缓存命中的友好前置
-                return Reply(f"「{x}」这个场景已经有了，要改动作的话先到场景页删掉旧的再创建",
+                return Reply(f"「{x}」这个场景已经有了，要换动作就说"
+                             f"「把场景{x}改成……」",
                              "creation", ok=False, trace=[f"场景重名:{x}"])
             plan = Plan(intent="HassCreateVoiceScene",
                         args={"trigger_phrase": x, "actions": actions},
@@ -533,7 +534,10 @@ class Pipeline:
             if not ok:
                 return Reply("抱歉，自动化没创建成功，稍后再试", "creation",
                              ok=False, trace=plan.trace)
+            idx = await self._automation_count()      # 播报编号=删除锚点（fail-open）
             say = f"好的，语音自动化已创建：{self._cond_say(c)}，就{y_say}"
+            if idx:
+                say += f"。要改它就说「删除自动化{idx}」再说一句新的"
         self._remember_turn(origin, text, say)
         return Reply(say, "creation", True, plan.trace)
 
@@ -555,6 +559,196 @@ class Pipeline:
         say = f"好的，语音场景「{x}」已删除"
         self._remember_turn(origin, text, say)
         return Reply(say, "creation", True, plan.trace)
+
+    async def _build_actions(self, c: dict, text: str):
+        """Y 子句 → 可执行动作表（能执行的句子才能进场景）。
+        返回 (actions, y_say)，任一子句听不懂 → 直接返回拒收 Reply。"""
+        actions: list[dict] = []
+        echo_parts: list[str] = []
+        for clause in creation.split_actions(c["y"]):
+            plan = await self._match_fp(clause)
+            if plan is None or plan.intent not in creation.ACTIONABLE_INTENTS:
+                plan = await self._retry_with_area(clause, c)
+            if plan is None or plan.intent not in creation.ACTIONABLE_INTENTS:
+                logger.info("[创建] 子句拒收 %r → 整单作废（原句 %r）", clause, text)
+                return Reply(self._creation_reject(c, clause), "creation",
+                             ok=False, trace=[f"创建拒收:{clause!r}"])
+            actions.append({"intent": plan.intent, "params": copy.deepcopy(plan.args)})
+            echo_parts.append(clause)
+        return actions, "，".join(echo_parts)
+
+    async def _automation_rows(self):
+        """拉语音自动化列表（store 序=创建序，编号锚点）。走 run_raw 拿原始
+        dict（executor.run 会把结果折叠成话术串，列表数据不能走它）。失败 None。"""
+        plan = Plan(intent="HassListAutomations", args={}, source="creation",
+                    utterance="", trace=["列出自动化"])
+        ok, res = await self.executor.run_raw(plan)
+        if not ok or not isinstance(res, dict):
+            return None
+        rows = res.get("automations")
+        return rows if isinstance(rows, list) else None
+
+    async def _automation_count(self) -> int:
+        try:
+            rows = await self._automation_rows()
+            return len(rows) if rows is not None else 0
+        except Exception:
+            return 0
+
+    def _auto_say(self, i: int, a: dict) -> str:
+        """单条自动化 → 「1，当…就…」（编号=删除锚点）。"""
+        from .admin_api import _hv_trigger_cn, _hv_action_cn
+        trig = _hv_trigger_cn(a.get("trigger") or {})
+        acts = "；".join(filter(None, (_hv_action_cn(x)
+                                   for x in (a.get("actions") or [])[:2])))
+        return f"{i}，{trig}的时候{acts or '执行动作'}"
+
+    async def _object_list(self, c: dict, text: str, origin: str) -> Reply:
+        """语音列场景/列自动化（v1.0.34 本地，零 LLM）。"""
+        if c["kind"] == "list_scenes":
+            rows = self.scenes.all() if hasattr(self.scenes, "all") else []
+            if not rows:
+                await self.scenes.refresh(force=True)
+                rows = self.scenes.all() if hasattr(self.scenes, "all") else []
+            if not rows:
+                self._last_list = None
+                say = "你还没有创建过语音场景，说「当我说晚安，就关闭客厅灯」就能创建一个"
+            else:
+                from .admin_api import _hv_action_cn
+                parts = []
+                for s in rows[:5]:
+                    if not isinstance(s, dict):
+                        continue
+                    acts = "、".join(filter(None, (_hv_action_cn(a)
+                                              for a in (s.get("actions") or [])[:2])))
+                    tp = str(s.get("trigger_phrase") or s.get("name") or "")
+                    parts.append(f"{tp}就{acts}" if acts else tp)
+                more = f"；其余{len(rows)-5}个在管理页看" if len(rows) > 5 else ""
+                say = f"目前有{len(rows)}个语音场景：{'；'.join(parts)}{more}"
+                self._last_list = "scene"
+            self._remember_turn(origin, text, say)
+            return Reply(say, "creation", True, [f"列场景:{len(rows)}"])
+        rows = await self._automation_rows()
+        if rows is None:
+            return Reply("暂时读不到自动化列表，稍后再试", "creation", ok=False,
+                         trace=["列自动化失败"])
+        if not rows:
+            self._last_list = None
+            say = ("你还没有语音自动化，说「当客厅温度超过28度就打开空调」"
+                   "或「每天早上7点帮我打开客厅窗帘」就能创建")
+        else:
+            items = "；".join(self._auto_say(i, a)
+                              for i, a in enumerate(rows[:5], 1)
+                              if isinstance(a, dict))
+            more = f"，其余{len(rows)-5}条在管理页看" if len(rows) > 5 else ""
+            say = f"目前有{len(rows)}条语音自动化：{items}{more}"
+            self._last_list = "automation"
+        self._remember_turn(origin, text, say)
+        return Reply(say, "creation", True, [f"列自动化:{len(rows)}"])
+
+    async def _index_delete(self, c: dict, text: str, origin: str) -> Reply:
+        """「删第N条」= 上一次清单播报的第 N 项（清单说完紧跟着删的自然交互）。
+        无上下文如实反问；执行后清上下文（清单已失效，防旧编号误删）。"""
+        n = c["n"]
+        kind = self._last_list
+        if kind is None:
+            return Reply(f"要删的第{n}条是什么？先说「有哪些自动化」或「有哪些场景」"
+                         f"听一遍编号清单，再说「删第{n}条」",
+                         "creation", ok=False, trace=["删第N条:无清单上下文"])
+        if kind == "automation":
+            self._last_list = None
+            return await self._automation_delete({"target": str(n)}, text, origin)
+        rows = self.scenes.all() if hasattr(self.scenes, "all") else []
+        if not rows or n > len(rows):
+            await self.scenes.refresh(force=True)
+            rows = self.scenes.all() if hasattr(self.scenes, "all") else []
+        if n > len(rows):
+            return Reply(f"场景一共{len(rows)}个，没有第{n}条",
+                         "creation", ok=False, trace=[f"删第{n}条:越界"])
+        x = str(rows[n - 1].get("trigger_phrase") or "")
+        self._last_list = None
+        return await self._scene_delete({"trigger_phrase": x}, text, origin)
+
+    async def _automation_delete(self, c: dict, text: str, origin: str) -> Reply:
+        """语音删自动化（v1.0.34）：序号/关键词精准命中才删；裸删列编号引导。"""
+        rows = await self._automation_rows()
+        if rows is None:
+            return Reply("暂时读不到自动化列表，稍后再试", "creation", ok=False,
+                         trace=["删自动化:列表失败"])
+        if not rows:
+            return Reply("你还没有语音自动化，不用删除", "creation", True,
+                         trace=["删自动化:空"])
+        tgt = creation.auto_target(c.get("target", ""))
+        if tgt is None:                            # 裸删：列编号，让用户点名
+            items = "；".join(self._auto_say(i, a) for i, a in enumerate(rows[:5], 1)
+                              if isinstance(a, dict))
+            return Reply(f"要删哪一条？你说「删除自动化序号」：{items}",
+                         "creation", True, trace=["删自动化:引导"])
+        hit = []
+        if isinstance(tgt, int):
+            if 1 <= tgt <= len(rows):
+                hit = [rows[tgt - 1]]
+        else:
+            from .admin_api import _hv_action_cn
+            kw = str(tgt)
+            for a in rows:
+                if not isinstance(a, dict):
+                    continue
+                hay = str((a.get("trigger") or {}).get("entity_id") or "") + \
+                    str((a.get("trigger") or {}).get("at") or "") + \
+                    "；".join(filter(None, (_hv_action_cn(x)
+                                          for x in (a.get("actions") or []))))
+                if kw in hay:
+                    hit.append(a)
+        if not hit:
+            return Reply(f"没有找到和「{tgt}」对应的语音自动化，"
+                         f"说「有哪些自动化」可以看清单",
+                         "creation", ok=False, trace=[f"删自动化未命中:{tgt}"])
+        if len(hit) > 1:
+            items = "；".join(self._auto_say(rows.index(h) + 1, h)
+                              for h in hit[:5])
+            return Reply(f"「{tgt}」匹配到{len(hit)}条，说得再具体些：{items}",
+                         "creation", True, trace=[f"删自动化多义:{tgt}"])
+        aid = str(hit[0].get("automation_id") or "")
+        plan = Plan(intent="HassDeleteAutomation", args={"automation_id": aid},
+                    source="creation", utterance=text, trace=[f"删自动化:{aid}"])
+        ok, _ = await self.executor.run(plan)
+        if not ok:
+            return Reply("抱歉，自动化没删除成功，稍后再试", "creation", ok=False,
+                         trace=plan.trace)
+        say = f"好的，{self._auto_say(rows.index(hit[0]) + 1, hit[0])}这条自动化已删除"
+        self._remember_turn(origin, text, say)
+        return Reply(say, "creation", True, plan.trace)
+
+    async def _scene_modify(self, c: dict, text: str, origin: str) -> Reply:
+        """语音改场景（v1.0.34）：预检新动作全可执行 → 删旧 → 建新。
+        删成建败的窄窗如实报并提示重建（预检已把失败面压到集成掉线级别）。"""
+        x = c["trigger_phrase"]
+        if x not in (self.scenes.triggers or []):
+            return Reply(f"没有找到叫「{x}」的语音场景；说「有哪些场景」可以看清单",
+                         "creation", ok=False, trace=[f"改场景未命中:{x}"])
+        built = await self._build_actions(c, text)
+        if isinstance(built, Reply):
+            return built                            # 新动作听不懂：旧场景原样不动
+        actions, y_say = built
+        dp = Plan(intent="HassDeleteVoiceScene", args={"trigger_phrase": x},
+                  source="creation", utterance=text, trace=[f"改场景删旧:{x}"])
+        ok, _ = await self.executor.run(dp)
+        if not ok:
+            return Reply(f"抱歉，场景「{x}」没改成交（旧的还在，没动它）",
+                         "creation", ok=False, trace=dp.trace)
+        cp = Plan(intent="HassCreateVoiceScene",
+                  args={"trigger_phrase": x, "actions": actions},
+                  source="creation", utterance=text, trace=[f"改场景建新:{x}"])
+        ok2, _ = await self.executor.run(cp)
+        await self.scenes.refresh(force=True)
+        if not ok2:
+            say = (f"场景「{x}」的旧动作已删除，但新动作没保存成功——"
+                   f"请再说一句「当我说{x}，就{y_say}」")
+            return Reply(say, "creation", ok=False, trace=cp.trace)
+        say = f"好的，场景「{x}」已改成：就{y_say}"
+        self._remember_turn(origin, text, say)
+        return Reply(say, "creation", True, cp.trace)
 
     async def _retry_with_area(self, clause: str, c: dict):
         """Y 子句无目标而事件描述带区域（"当客厅温度超28度就打开空调"）→
