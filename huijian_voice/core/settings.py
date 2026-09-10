@@ -122,6 +122,7 @@ class Settings:
         self._lock = threading.Lock()
         self._data: dict[str, Any] = copy.deepcopy(DEFAULTS)
         self._listeners: list = []
+        self._env_overrides: dict[str, Any] = {}     # v1.0.40：options 只覆盖运行期
         self.load_or_create()
 
     # ── 生命周期 ────────────────────────────────────────────────
@@ -141,10 +142,26 @@ class Settings:
             except OSError:
                 pass
             self._data = copy.deepcopy(DEFAULTS)
-        changed = self._ensure_secrets()
+        changed = self._repair_nodes()
+        changed = self._ensure_secrets() or changed
         self._apply_env_overrides()
         if changed:
             self._write_locked()
+
+    def _repair_nodes(self) -> bool:
+        """节点类型修复（v1.0.40 修复 A4）：settings.json 被手改或异常写成
+        `"security": null` 这类非 dict 值时，旧实现会在 `_ensure_secrets` 直接
+        `AttributeError: 'NoneType' object has no attribute 'get'` **崩在启动路径**
+        （真机形态：改过文件/写盘被截断 → 服务起不来）。按 DEFAULTS 恢复为默认
+        dict，只警告不崩。返回是否发生修复。"""
+        fixed = False
+        for key, default in DEFAULTS.items():
+            if isinstance(default, dict) and not isinstance(self._data.get(key), dict):
+                logger.warning("[配置] %s 节点类型异常(%s)，已恢复默认",
+                               key, type(self._data.get(key)).__name__)
+                self._data[key] = copy.deepcopy(default)
+                fixed = True
+        return fixed
 
     def _ensure_secrets(self) -> bool:
         """ws_token/pairing_token 自动生成且持久（凭据定案：不是给用户改的，
@@ -158,19 +175,30 @@ class Settings:
         return changed
 
     def _apply_env_overrides(self) -> None:
-        """Supervisor options（run.sh 导出）覆盖层——只覆盖运行级键。"""
+        """Supervisor options（run.sh 导出）覆盖层——**只作用于运行期，绝不落盘**。
+
+        v1.0.40 修复（D4）：旧实现直接改 `self._data`（随后被 `_write_locked()` 落盘），
+        而 run.sh 每次启动都导出 options（`idle_unload_minutes` 默认 0）⇒ ① options
+        值被写进 settings.json；② **每次启动都压过 Web UI**（UI 里设的省电档一重启
+        就被 0 抹回，实测 BOOT1 写 42、BOOT2 撤掉 env 仍是 42）。
+        现改为运行期覆盖字典：`get()` 优先命中它，落盘永不涉及。且省电档改「仅有
+        非 0 值才覆盖」——0 是 options 的默认（=不干预），此时以 UI 的值为准。
+        """
+        self._env_overrides = {}
         if (v := os.environ.get("HUIJIAN_OPT_IDLE_UNLOAD_MIN")) not in (None, ""):
             try:
-                self._data["power"]["unload_when_idle_min"] = max(0, int(v))
+                n = max(0, int(v))
+                if n > 0:                       # 0 = 不干预，交回 Web UI（单一事实源）
+                    self._env_overrides["power.unload_when_idle_min"] = n
             except ValueError:
                 logger.warning("[配置] HUIJIAN_OPT_IDLE_UNLOAD_MIN 非法值 %r，忽略", v)
         if (v := os.environ.get("HUIJIAN_STT_PROVIDER")):
-            self._data["stt"]["provider"] = v
-        if (v := os.environ.get("HUIJIAN_DATA_DIR_FOR_TEST")):  # pytest 注入
-            pass
+            self._env_overrides["stt.provider"] = v
 
     # ── 读写 ────────────────────────────────────────────────────
     def get(self, dotted: str, default: Any = None) -> Any:
+        if dotted in self._env_overrides:            # v1.0.40：options 覆盖层（不落盘）
+            return self._env_overrides[dotted]
         cur: Any = self._data
         for part in dotted.split("."):
             if not isinstance(cur, dict) or part not in cur:
@@ -195,6 +223,10 @@ class Settings:
         if d["security"].get("ws_token"):
             t = d["security"]["ws_token"]
             d["security"]["ws_token"] = t[:4] + "…" + t[-4:]
+        if d["security"].get("pairing_token"):
+            # v1.0.40（D10）：配对 token 同样是凭据，按同纪律脱敏（旧实现原文返回）
+            t = d["security"]["pairing_token"]
+            d["security"]["pairing_token"] = t[:4] + "…" + t[-4:]
         return d
 
     def update(self, patch: dict) -> dict:
@@ -202,6 +234,7 @@ class Settings:
         with self._lock:
             self._scrub_masked(patch)
             self._data = _deep_merge(self._data, patch)
+            self._repair_nodes()          # v1.0.40：patch 也可能把节点写成非 dict
             self._ensure_secrets()
             self._write_locked()
         for cb in list(self._listeners):
@@ -222,8 +255,17 @@ class Settings:
             cloud = node.get("cloud")
             if isinstance(cloud, dict) and cloud.get("api_key") == "****":
                 del cloud["api_key"]
-        if patch.get("security", {}).get("ws_token") in ("", None) or patch.get("security", {}).get("ws_token", "").startswith(("****",)):
-            patch.get("security", {}).pop("ws_token", None)
+        sec = patch.get("security")
+        if isinstance(sec, dict):
+            for key in ("ws_token", "pairing_token"):
+                v = sec.get(key)
+                # v1.0.40 修复（A3）：旧的哨兵只认 `""/None/**** 前缀`，而 `masked()`
+                # 的输出格式是 `t[:4]+"…"+t[-4:]`——两者不匹配 ⇒ 任何"GET /api/settings
+                # 后原样 POST 回 security 块"的客户端会把真 token **写成 9 字符残串**
+                # （实测 32→9，且不报错）。凡"空值/任何脱敏形态"一律丢弃。
+                if v is None or v == "" or (
+                        isinstance(v, str) and (v.startswith("****") or "…" in v)):
+                    sec.pop(key, None)
 
     def save(self) -> None:
         with self._lock:

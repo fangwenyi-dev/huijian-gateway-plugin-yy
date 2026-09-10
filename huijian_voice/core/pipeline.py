@@ -229,6 +229,34 @@ def _has_explicit_target(args: dict) -> bool:
     return bool(_target_names(args) or _target_areas(args) or args.get("entity_id"))
 
 
+def _is_wholehouse_args(args: dict) -> bool:
+    """target 仅由「空 name + domains 过滤」构成 = 显式全屋。
+
+    v1.0.40 修复（A2）：这类目标必须**免于上下文继承**——旧实现下 `_has_explicit_target`
+    对它是 False（没有 name/area/entity_id），于是「再打开所有灯」会被上一轮的目标
+    （如「客厅的灯」）静默替换：用户说全屋、实际只动一个房间，而 trace 里还写着
+    "全屋显式"。真机实测：覆盖前 `[{'devices':[{'name':'','domains':['light']}]}]`
+    → 覆盖后 `[{'area':'客厅','devices':[{'name':'灯'}]}]`。
+    """
+    tgt = args.get("target")
+    if not isinstance(tgt, list) or not tgt:
+        return False
+    saw_domain = False
+    for ent in tgt:
+        if not isinstance(ent, dict) or ent.get("area") or ent.get("entity_id"):
+            return False
+        devs = ent.get("devices")
+        if not isinstance(devs, list) or not devs:
+            return False
+        for d in devs:
+            if not isinstance(d, dict) or d.get("name"):
+                return False
+            if not d.get("domains"):
+                return False
+            saw_domain = True
+    return saw_domain
+
+
 def _at_say(at: str) -> str:
     """'07:00' → '早上7点'、'22:30' → '晚上10点半'（耳朵友好，不回显 ISO 格式）。"""
     try:
@@ -1104,6 +1132,9 @@ class Pipeline:
         args = plan.args
         if args is None:                       # 坑：`plan.args or {}` 对空 dict 会
             args = plan.args = {}              # 另造孤儿 dict，注入写进去等于没写
+        if _is_wholehouse_args(args):
+            # v1.0.40（A2）：显式全屋绝不被上一轮目标替换（说"所有灯"就必须是全屋）
+            return plan
         if _has_explicit_target(args):
             # 明示目标（非代词/回指解析）也补卫星区域——v1.0.20 空间化此前被
             # 这道早退挡住，"开灯"永不落本区域（2026-09-12 探针实锤）。

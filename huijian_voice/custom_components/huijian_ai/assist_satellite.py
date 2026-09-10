@@ -85,6 +85,37 @@ _TIMER_EVENT_TYPES: EsphomeEnumMapper[VoiceAssistantTimerEventType, TimerEventTy
 
 _ANNOUNCEMENT_TIMEOUT_SEC = 5 * 60  # 5 minutes
 _CONFIG_TIMEOUT_SEC = 5
+
+# v1.0.40：上行音频队列**必须有界**。设备按 32ms/帧（≈31 帧/秒、≈1KB/帧）推，
+# 入队由设备消息驱动（handle_audio / UDP datagram_received），而消费方是 HA 管线
+# ——一旦管线停顿（HA 事件循环被占、STT 引擎慢），旧的 `asyncio.Queue()`（无
+# maxsize）就按 ≈32KB/s 无界涨 HA 内存。上限取 ≈5 秒语音，溢出丢**最旧**保最新：
+# 宁可丢开头也不丢刚说的话，且绝不无界涨。
+_MAX_AUDIO_QUEUE_CHUNKS = 160
+_AUDIO_DROP_LOG_EVERY = 100       # 丢包告警限频（1 次 + 每 100 块）
+
+
+def _queue_audio_chunk(queue: "asyncio.Queue[bytes | None]", item) -> bool:
+    """把音频块/结束哨兵放进有界队列：满则丢最旧。返回是否发生了丢弃。
+
+    **哨兵绝不丢**：`None` 是 `_wrap_audio_stream` 的结束信号，丢了会让管线永不
+    收束（设备侧只能等自己的会话超时）。本实现先腾格再入队，故单事件循环内
+    （get→put 之间无 await，原子）哨兵必然入队。
+    """
+    try:
+        queue.put_nowait(item)
+        return False
+    except asyncio.QueueFull:
+        pass
+    try:
+        queue.get_nowait()          # 丢最旧
+    except asyncio.QueueEmpty:      # 并发腾空竞态：让下面的 put 再试一次
+        pass
+    try:
+        queue.put_nowait(item)
+    except asyncio.QueueFull:       # 理论不可达（刚腾出一格）
+        return True
+    return True
 _WAKE_WORD_CONFIG_SCHEMA = vol.Schema(
     {
         vol.Required("type"): str,
@@ -129,7 +160,11 @@ class EsphomeAssistSatellite(
 
         self._is_running: bool = True
         self._pipeline_task: asyncio.Task | None = None
-        self._audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+        # v1.0.40：有界（≈5s 语音）——消费停顿时丢最旧，绝不无界涨内存
+        self._audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue(
+            maxsize=_MAX_AUDIO_QUEUE_CHUNKS
+        )
+        self._audio_dropped_chunks: int = 0
         self._tts_streaming_task: asyncio.Task | None = None
         self._udp_server: VoiceAssistantUDPServer | None = None
 
@@ -598,7 +633,15 @@ class EsphomeAssistSatellite(
         台架×固件协议审计实锤）。data2=增强音频第二通道，本固件只发单声道
         取偶通道后的流（data2 恒 None），收到即忽略；保留参数以兼容双通道设备。
         """
-        self._audio_queue.put_nowait(data)
+        if _queue_audio_chunk(self._audio_queue, data):
+            self._audio_dropped_chunks += 1
+            if (self._audio_dropped_chunks == 1
+                    or self._audio_dropped_chunks % _AUDIO_DROP_LOG_EVERY == 0):
+                _LOGGER.warning(
+                    "上行音频队列已满（上限 %d 块），丢最旧保最新——管线消费停顿"
+                    "（HA 事件循环被占 / STT 慢）；累计丢弃 %d 块",
+                    _MAX_AUDIO_QUEUE_CHUNKS, self._audio_dropped_chunks,
+                )
 
     async def handle_pipeline_stop(self, abort: bool) -> None:
         """Handle request for pipeline to stop."""
@@ -760,13 +803,13 @@ class EsphomeAssistSatellite(
 
     def _stop_pipeline(self) -> None:
         """Request pipeline to be stopped by ending the audio stream and continue processing."""
-        self._audio_queue.put_nowait(None)
+        _queue_audio_chunk(self._audio_queue, None)   # 哨兵保入队（满则腾最旧）
         _LOGGER.debug("Requested pipeline stop")
 
     def _abort_pipeline(self) -> None:
         """Request pipeline to be aborted (no further processing)."""
         _LOGGER.debug("Requested pipeline abort")
-        self._audio_queue.put_nowait(None)
+        _queue_audio_chunk(self._audio_queue, None)   # 哨兵保入队（满则腾最旧）
         if self._pipeline_task is not None:
             self._pipeline_task.cancel()
 
@@ -814,6 +857,7 @@ class VoiceAssistantUDPServer(asyncio.DatagramProtocol):
         """Initialize protocol."""
         super().__init__(*args, **kwargs)
         self._audio_queue = audio_queue
+        self._audio_dropped_chunks: int = 0    # v1.0.40：有界队列丢包计数
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         """Store transport for later use."""
@@ -824,7 +868,15 @@ class VoiceAssistantUDPServer(asyncio.DatagramProtocol):
         if self.remote_addr is None:
             self.remote_addr = addr
 
-        self._audio_queue.put_nowait(data)
+        # v1.0.40：与 API 通道同规——有界队列、丢最旧，防 UDP 侧无界涨
+        if _queue_audio_chunk(self._audio_queue, data):
+            self._audio_dropped_chunks += 1
+            if (self._audio_dropped_chunks == 1
+                    or self._audio_dropped_chunks % _AUDIO_DROP_LOG_EVERY == 0):
+                _LOGGER.warning(
+                    "UDP 上行音频队列已满（上限 %d 块），丢最旧保最新；累计丢弃 %d 块",
+                    _MAX_AUDIO_QUEUE_CHUNKS, self._audio_dropped_chunks,
+                )
 
     def error_received(self, exc: Exception) -> None:
         """Handle when a send or receive operation raises an OSError.
@@ -834,7 +886,7 @@ class VoiceAssistantUDPServer(asyncio.DatagramProtocol):
         _LOGGER.error("ESPHome Voice Assistant UDP server error received: %s", exc)
 
         # Stop pipeline
-        self._audio_queue.put_nowait(None)
+        _queue_audio_chunk(self._audio_queue, None)   # 哨兵保入队（满则腾最旧）
 
     def close(self) -> None:
         """Close the receiver."""

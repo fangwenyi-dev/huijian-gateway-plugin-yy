@@ -152,7 +152,15 @@ async def _tts_test(request):
 
 
 def _scene_row(sc: dict) -> dict:
-    """场景 dict → 页面行（动作压成人读摘要，缺字段不炸）。永不抛。"""
+    """场景 dict → 页面行（动作压成人读摘要，缺字段不炸）。永不抛。
+
+    v1.0.40：现役 pipeline（`_build_actions`）存的是 **list 形态**
+    `params.target = [{"area":…, "devices":[{"name":…}]}]`，本函数旧实现却按
+    **dict** 读（`isinstance(tgt, dict)` 恒假）→ area/设备名全丢、bits 空，
+    页面只剩英文意图名（`TurnDeviceOn`）。改为优先复用同一文件里自动化页已在
+    用的 `_hv_action_cn`（list 形态正确），并保留平铺形态的旧渲染作兜底——
+    历史/异构数据行为不变。
+    """
     acts = sc.get("actions") or []
     sums = []
     for a in acts[:6]:
@@ -163,6 +171,17 @@ def _scene_row(sc: dict) -> dict:
         if not isinstance(pr, dict):
             pr = {}
         tgt = pr.get("target")
+        # 慧尖现役形态判据：target 为 list；或意图自带语义（无目标也成人话）。
+        # 不满足即走下方平铺兜底——`_hv_action_cn` 对未知意图只会回吐裸英文
+        # 意图名（非空），若按"非空即用"会把平铺形态的 entity_id 一起吞掉。
+        if isinstance(tgt, list) or intent in ("SetDeviceMode",
+                                               "AdjustDeviceAttribute",
+                                               "ControlWindow"):
+            cn = _hv_action_cn(a)
+            if cn:
+                sums.append(cn)
+                continue
+        # ── 兜底：非慧尖形态（平铺 params/entity_id）保持原渲染，兼容历史数据 ──
         area = tgt.get("area") if isinstance(tgt, dict) else ""
         bits = [str(x) for x in (pr.get("entity_id"), area, pr.get("state"),
                                  pr.get("brightness"), pr.get("temperature"))
@@ -221,10 +240,17 @@ def _hv_trigger_cn(trig: dict) -> str:
 
 
 def _hv_action_cn(act: dict) -> str:
-    """{intent, params} → 「打开客厅射灯」式短语。永不抛。"""
+    """{intent, params} → 「打开客厅射灯」式短语。永不抛。
+
+    v1.0.40：补齐两处会丢信息的意图——`ControlWindow` 的开关动作（open/close/
+    pause/a）与 `AdjustDeviceAttribute` 的「属性+数值」（旧 `_scene_row` 本就想
+    显示 brightness/temperature，list 形态下被吃掉）。SetDeviceMode 原样。
+    """
     try:
         intent = str(act.get("intent") or act.get("name") or "")
         p = act.get("params") or act.get("parameters") or {}
+        if not isinstance(p, dict):
+            return ""
         if intent == "SetDeviceMode":
             from .executor import MODE_CN
             mode = str(p.get("mode") or "")
@@ -236,9 +262,22 @@ def _hv_action_cn(act: dict) -> str:
             for d in (t.get("devices") or []):
                 if isinstance(d, dict):
                     words.append(f"{t.get('area', '')}{d.get('name', '')}")
-        verb = {"TurnDeviceOff": "关闭", "TurnDeviceOn": "打开"}.get(
-            intent, _HV_INTENT_CN.get(intent, intent))
-        return verb + "、".join(w for w in words if w)
+        targets = "、".join(w for w in words if w)
+        if intent == "AdjustDeviceAttribute":
+            from .executor import ATTR_CN
+            raw_attr = str(p.get("attribute") or "")
+            attr = ATTR_CN.get(raw_attr, raw_attr)
+            delta = str(p.get("delta") or "")
+            delta = {"max": "最大", "min": "最小"}.get(delta, delta)
+            return (f"调节{targets}{attr}{delta}").strip()
+        if intent == "ControlWindow":
+            from .executor import ACT_CN
+            verb = ACT_CN.get(str(p.get("action") or "").lower(),
+                              _HV_INTENT_CN.get(intent, intent))
+        else:
+            verb = {"TurnDeviceOff": "关闭", "TurnDeviceOn": "打开"}.get(
+                intent, _HV_INTENT_CN.get(intent, intent))
+        return verb + targets
     except Exception:
         return ""
 

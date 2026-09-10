@@ -29,13 +29,34 @@ if bashio::config.true 'auto_install_integration'; then
     if bashio::fs.directory_exists "${DST}" && [ "${want}" = "${have}" ]; then
       bashio::log.info "huijian_ai 集成已是目标版本 v${want}，跳过落盘"
     else
+      # v1.0.40 修复（A5）：旧实现 `rm -rf DST` 后 `cp -a` 再写版本戳——中途失败
+      # （磁盘满/中断）会留下**内容残缺但版本戳正确**的集成：HA 加载失败，且下次
+      # 启动因版本戳相同而跳过修复（永久坏）。与同脚本下载 klar 时的 sha256 纪律
+      # 也不一致。现改为：拷到临时目录 → 校验（manifest 可解析）→ 原子换名 →
+      # 失败回滚；版本戳只在换名成功后写。
       mkdir -p /homeassistant/custom_components
-      rm -rf "${DST}"
-      cp -a "${SRC}" "${DST}"
-      echo "${want}" > "${DST}/.huijian_voice_stamp"
-      # 剔除 vendored 目录可能带来的 __pycache__，防止跨 python 版本脏字节码
-      find "${DST}" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
-      bashio::log.warning "已落盘 huijian_ai v${want}（含 D1 门禁补丁）→ 请重启 HA Core 生效（首次安装必需；已运行则重载集成即可）"
+      TMP="${DST}.new.$$"
+      OLD="${DST}.old.$$"
+      rm -rf "${TMP}" "${OLD}"
+      if cp -a "${SRC}" "${TMP}" && [ -f "${TMP}/manifest.json" ] \
+         && jq -e . "${TMP}/manifest.json" >/dev/null 2>&1; then
+        # 剔除 vendored 目录可能带来的 __pycache__，防止跨 python 版本脏字节码
+        find "${TMP}" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
+        [ -d "${DST}" ] && mv "${DST}" "${OLD}"
+        if mv "${TMP}" "${DST}"; then
+          rm -rf "${OLD}"
+          echo "${want}" > "${DST}/.huijian_voice_stamp"
+          bashio::log.warning "已落盘 huijian_ai v${want}（含 D1 门禁补丁）→ 请重启 HA Core 生效（首次安装必需；已运行则重载集成即可）"
+        else
+          rm -rf "${DST}"
+          [ -d "${OLD}" ] && mv "${OLD}" "${DST}"
+          rm -rf "${TMP}"
+          bashio::log.error "集成换名失败，已回滚到上一版本（本次不做变更）"
+        fi
+      else
+        rm -rf "${TMP}"
+        bashio::log.error "集成拷贝/校验失败（源 ${SRC} 不可用），保留现有安装不动"
+      fi
     fi
   else
     bashio::log.warning "镜像内未找到集成源 ${SRC}（跳过自动安装）"

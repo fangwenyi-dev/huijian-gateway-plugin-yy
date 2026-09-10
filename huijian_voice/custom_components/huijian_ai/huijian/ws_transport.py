@@ -43,6 +43,10 @@ class WsTransport:
         self.entry = entry
         self.logger = logger or _LOGGER
         self._connection_lock = asyncio.Lock()
+        # v1.0.40：连接循环句柄（防重复 spawn，见 ensure_connected 说明）
+        self._loop_task = None
+        # v1.0.40：叫醒信号——要求正在退避的循环立即重连（见 _wait_backoff）
+        self._connect_now = asyncio.Event()
 
         self._recv_writer: MemoryObjectSendStream = None  # type: ignore
         self._recv_reader: MemoryObjectReceiveStream = None  # type: ignore
@@ -83,7 +87,18 @@ class WsTransport:
             )
 
     async def ensure_connected(self):
-        """Ensure WebSocket is connected. Connect if not already connected."""
+        """Ensure WebSocket is connected. Connect if not already connected.
+
+        v1.0.40（重连竞态修复）：连接循环**只允许一条**。`run_connection_loop`
+        在掉线后会退避重连（`sleep(3~60s)`，期间 `is_connected` 为假但循环仍活着），
+        而本方法此前只要 `is_connected` 为假就再 spawn 一条循环——循环句柄从未被
+        记住（原代码 `task = …` 赋值后即丢弃）。两条循环并发 `_create_streams()`
+        会互相覆盖同一组 stream/`_current_ws`：先起那条的 `_handle_outgoing_messages`
+        消费的是被替换掉的"孤儿 reader"（该属性在协程入口一次性求值）→ 僵尸连接
+        （收得到、永远发不出），且两连接同时压同一通道。现场形态：加载项/HA 重启
+        或网络抖动后的那一轮 `Response timeout`/没声。
+        修法：留住句柄，已有活循环就只等待、不再 spawn。
+        """
         if not self.should_reconnect:
             self.logger.info("Interrupted before ensure connected")
             return False
@@ -101,14 +116,24 @@ class WsTransport:
                 self.logger.error("No endpoint configured in config entry")
                 return False
 
-            self.logger.info("On-demand connecting to WebSocket: %s", self.endpoint)
+            if self._loop_task is not None and not self._loop_task.done():
+                # 已有连接循环在跑（含退避重连窗口）→ 只等它连上，绝不重复 spawn；
+                # 若它正在退避睡觉，用 _connect_now 叫醒它立刻重试（否则白等 15s）。
+                self.logger.info(
+                    "Connection loop already running, waiting for it to connect: %s",
+                    self.endpoint,
+                )
+                self._connect_now.set()
+            else:
+                self.logger.info(
+                    "On-demand connecting to WebSocket: %s", self.endpoint
+                )
+                self._loop_task = self.entry.async_create_background_task(
+                    self.hass,
+                    self.run_connection_loop(),
+                    f"transport_loop:{self._transport_type}",
+                )
             self.update_activity_time()
-
-            task = self.entry.async_create_background_task(
-                self.hass,
-                self.run_connection_loop(),
-                f"transport_loop:{self._transport_type}",
-            )
 
             # Wait for connection to be established
             for _ in range(150):
@@ -148,7 +173,24 @@ class WsTransport:
                 )
                 self.reconnect_times += 1
                 if seconds > 0:
-                    await asyncio.sleep(seconds)
+                    await self._wait_backoff(seconds)
+
+    async def _wait_backoff(self, seconds: float) -> None:
+        """退避等待，但被 `ensure_connected` 要求立即重连时提前醒来。
+
+        v1.0.40：修复"重复 spawn"后不能再靠"另起一条循环"来抢时间——否则一条
+        循环正在 60s 退避里睡觉时，新请求会白等满 15s 等待窗才失败（比旧行为更慢）。
+        故改为**叫醒同一条循环**：等 event 或被超时打断，二者先到为准。
+        """
+        if self._connect_now.is_set():
+            self._connect_now.clear()      # 进睡前已被叫醒 → 直接重试，不再睡
+            return
+        try:
+            await asyncio.wait_for(self._connect_now.wait(), timeout=seconds)
+            self._connect_now.clear()      # 睡中被叫醒 → 立即重试
+            self.logger.info("Reconnect requested while backing off, retrying now")
+        except asyncio.TimeoutError:
+            pass
 
     async def connect_to_client(self) -> bool:
         """Connect to WebSocket endpoint."""
@@ -359,6 +401,9 @@ class WsTransport:
         self.logger.info("Stop begin, reason: '%s'", reason)
         self.should_reconnect = False
         self._is_connected = False
+        # v1.0.40：唤醒正在退避的循环，令其立刻看到 should_reconnect=False 退出，
+        # 不必再空睡最长 60s（卸载集成/删除条目的收尾更快）
+        self._connect_now.set()
         self.reconnect_times = 0
 
         if self._current_ws and not self._current_ws.closed:

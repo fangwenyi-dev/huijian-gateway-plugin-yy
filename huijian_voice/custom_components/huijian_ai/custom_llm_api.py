@@ -91,8 +91,13 @@ class HuijianControlAPI(llm.API):
             try:
                 if not async_should_expose(self.hass, assistant, state.entity_id):
                     return False, None
-            except (KeyError, Exception):
-                pass
+            except Exception:  # noqa: BLE001
+                # v1.0.40 修复（A6）：原写法是"冗余异常的元组 + 完全静默"（KeyError 与
+                # Exception 并列，后者已覆盖前者）。暴露判定一旦出问题（注册表结构变化
+                # 等），这里会按"可见"放行且**不留任何痕迹** ⇒ LLM 可能看到用户刻意隐藏
+                # 的实体，而现场无从归因。保持 fail-open 语义，但必须留痕。
+                _LOGGER.debug("实体暴露判定失败，按可见处理: %s", state.entity_id,
+                              exc_info=True)
         entry = entity_reg.async_get(state.entity_id)
         if not entry or entry.hidden_by or entry.disabled_by:
             return False, None

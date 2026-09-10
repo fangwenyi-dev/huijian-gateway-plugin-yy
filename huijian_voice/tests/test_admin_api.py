@@ -256,6 +256,49 @@ def test_hv_helpers_never_raise():
         {"area": "卧室", "devices": [{"name": "灯"}]}]}}) == "关闭卧室灯"
 
 
+def test_scene_row_renders_list_target_in_chinese():
+    """v1.0.40 回归钉（实机缺陷）：现役 pipeline._build_actions 存的是
+    **list 形态** `params.target=[{area,devices:[{name}]}]`，而 _scene_row 旧实现
+    按 dict 读 → area/设备名全丢，场景页「执行动作」列只剩英文意图名
+    （TurnDeviceOn/SetDeviceMode）。上方 test_scenes_and_reload 的假夹具用的是
+    平铺形态，正是它让此缺陷长期假绿。"""
+    from core.admin_api import _scene_row
+    row = _scene_row({
+        "trigger_phrase": "观影模式", "scene_id": "s1",
+        "actions": [
+            {"intent": "TurnDeviceOn", "params": {"target": [
+                {"area": "客厅", "devices": [{"name": "射灯"}]}]}},
+            {"intent": "SetDeviceMode", "params": {"mode": "sleep"}},
+        ]})
+    assert row["actions"] == ["打开客厅射灯", "设为睡眠模式"]
+    assert row["action_count"] == 2
+
+
+def test_scene_row_flat_shape_fallback_unchanged():
+    """兜底钉：平铺形态（entity_id/state…）行为与旧实现完全一致，防修 A 时回归。"""
+    from core.admin_api import _scene_row
+    row = _scene_row({"trigger_phrase": "T", "actions": [
+        {"intent": "HassTurnOff", "params": {"entity_id": "light.客厅"}}]})
+    assert row["actions"] == ["HassTurnOff light.客厅"]
+
+
+def test_hv_action_cn_window_and_attribute_gain_detail():
+    """v1.0.40：ControlWindow 补开/关动作、AdjustDeviceAttribute 补属性+数值
+    （旧 _scene_row 本想显示 brightness/temperature，list 形态下被吃掉）。"""
+    from core.admin_api import _hv_action_cn
+    assert _hv_action_cn({"intent": "ControlWindow", "params": {
+        "action": "open",
+        "target": [{"area": "客厅", "devices": [{"name": "窗帘"}]}]}}) == "打开客厅窗帘"
+    assert _hv_action_cn({"intent": "AdjustDeviceAttribute", "params": {
+        "attribute": "brightness", "delta": "50",
+        "target": [{"area": "客厅", "devices": [{"name": "射灯"}]}]}}) == "调节客厅射灯亮度50"
+    assert _hv_action_cn({"intent": "AdjustDeviceAttribute", "params": {
+        "attribute": "brightness", "delta": "max",
+        "target": [{"area": "书房", "devices": [{"name": "灯"}]}]}}) == "调节书房灯亮度最大"
+    # 脏 params（非 dict）不许抛，交回 "" 让场景页走平铺兜底
+    assert _hv_action_cn({"intent": "TurnDeviceOn", "params": ["坏"]}) == ""
+
+
 def test_manage_page_render_three_trigger_shapes():
     """集成 manage-page 源码级钉（HA 依赖不可本地导入；行为在 CI e2e）：
     at/to 形态必须有渲染分支，且不给编辑弹窗（防保存覆盖丢字段）。"""

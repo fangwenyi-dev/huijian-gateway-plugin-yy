@@ -7,7 +7,7 @@ from pathlib import Path
 APP_NAME = "huijian_voice"
 # 裸 docker build 会把 ENV 烘成占位值 0.0.0：毒值不得穿透成对外版本
 _env_ver = os.environ.get("HUIJIAN_VERSION", "")
-APP_VERSION = _env_ver if _env_ver and _env_ver != "0.0.0" else "1.0.39"
+APP_VERSION = _env_ver if _env_ver and _env_ver != "0.0.0" else "1.0.40"
 
 
 def addon_version() -> str:

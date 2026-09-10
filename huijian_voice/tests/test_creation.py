@@ -103,6 +103,30 @@ def test_auto_time_pm_ambiguity():
     assert c["trigger"]["at"] == "15:00"
 
 
+# ── v1.0.40：「两」口径统一（CN_MAP 漏收「两」的回归钉）────────────
+# creation.py 的时间/阈值正则本就收录「两」，唯 targets.CN_MAP 漏了 →
+# 「下午两点」被算成 12:00、「超过两百度」算成 100。零测试覆盖，故补钉。
+def test_cn_map_has_liang():
+    from core.nlu.targets import CN_MAP, cn2num
+    assert CN_MAP["两"] == 2
+    assert cn2num("两") == "2"
+    assert cn2num("两百") == "200"          # 「百」分支自愈
+    assert cn2num("两百五") == "205"
+    assert cn2num("两百五十") == "250"      # 「十」分支自愈
+
+
+def test_auto_time_liang_hour():
+    """「两点」是高频说法：下午两点=14:00、凌晨两点=02:00。"""
+    assert cr.parse("每天下午两点就打开窗帘")["trigger"]["at"] == "14:00"
+    assert cr.parse("每天凌晨两点就关闭所有灯")["trigger"]["at"] == "02:00"
+    assert cr.parse("每天早上两点半就开空调")["trigger"]["at"] == "02:30"
+
+
+def test_auto_threshold_liang():
+    c = cr.parse("当温度超过两百度就打开空调")
+    assert c["trigger"]["above"] == 200
+
+
 # ── 白名单对齐（与集成侧六 intent 闭环）────────────────────────
 def test_actionable_whitelist_alignment():
     src = (Path(__file__).resolve().parents[1] /

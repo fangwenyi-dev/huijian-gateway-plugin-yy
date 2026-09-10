@@ -29,8 +29,14 @@ logger = logging.getLogger("huijian.fastpath")
 
 # ── 动作词匹配规则（v1.5 L207-255 逐字移植；(pattern, intent, action_val)）──
 _ACTION_PATTERNS: list[tuple[re.Pattern, str, Any]] = [
-    (re.compile(r"^(开窗|打开窗|开窗户|打开窗户|窗户打开)"), "ControlWindow", "open"),
-    (re.compile(r"^(关窗|关闭窗|关窗户|关闭窗户|窗户关闭)"), "ControlWindow", "close"),
+    # v1.0.40 修复（A1）：交替式必须**长词在前**——Python re 交替是"最左优先"而非
+    # 最长匹配，旧写法 `^(开窗|打开窗|开窗户|打开窗户|…)` 对「打开窗户」先命中"打开窗"
+    # → 残留"户" → 目标提取质量门不过 → 整句落空（真机实测 打开窗户/关闭窗户/开窗户/
+    # 关窗户/打开窗帘/关窗帘/关闭窗帘 七个常见说法全部 None，而 T1 明明判对）。
+    # 另加 `(?!帘)`：窗帘是 cover 设备，不能被窗户动作吃掉前缀（否则"打开窗帘"残留
+    # "帘"、且语义也从"开窗帘"错成"开窗"）；命中不了即落到下方通用 `^(打开|…)`。
+    (re.compile(r"^(打开窗户|开窗户|打开窗(?!帘)|开窗(?!帘)|窗户打开)"), "ControlWindow", "open"),
+    (re.compile(r"^(关闭窗户|关窗户|关闭窗(?!帘)|关窗(?!帘)|窗户关闭)"), "ControlWindow", "close"),
     (re.compile(r"^(内倒|内导|内岛|内到|内道|内达|内打|内大|内藻)"), "ControlWindow", "A"),
     # 音乐带（2026-09-12）：后接音乐补语（播放/音乐/歌）时让位——"停止播放"
     # 是播控令不是窗帘暂停；裸"暂停/停"与"暂停窗帘"仍走窗户语义。
@@ -317,6 +323,27 @@ def _scan_window_action(text: str) -> Optional[str]:
     return None
 
 
+# v1.0.40 修复（D3）：T1 的标签集里只有 OpenCover、**没有 CloseCover**（见 _T1_MAP），
+# 于是"拉上/合上/收起窗帘"这类关闭向说法被模型判成 OpenCover(0.86~0.97) 后原样
+# 映射 TurnDeviceOn → **反向执行**（用户要关、设备去开）。按方向词就地纠正：
+# 出现关闭向词且无开启向词 → 翻成 TurnDeviceOff。
+_COVER_CLOSE_WORDS = ("拉上", "合上", "收起", "收拢", "放下", "降下", "关闭", "关上", "关掉", "关")
+_COVER_OPEN_WORDS = ("打开", "拉开", "开启", "开一下", "升起", "升起", "抬", "开")
+
+
+def _cover_intent(text: str, intent: str) -> str:
+    """T1 命中 OpenCover 后的方向纠正；非 TurnDeviceOn 原样返回。永不抛。"""
+    try:
+        if intent != "TurnDeviceOn" or not text:
+            return intent
+        if any(w in text for w in _COVER_CLOSE_WORDS) and not any(
+                w in text for w in _COVER_OPEN_WORDS):
+            return "TurnDeviceOff"
+    except Exception:
+        return intent
+    return intent
+
+
 class FastPath:
     def __init__(self, scenes, textcnn, settings):
         self.scenes = scenes
@@ -503,6 +530,12 @@ class FastPath:
                 intent, seed = _T1_MAP[label]
                 if intent == "SceneTrigger":
                     return await self._scene_plan(text, text, trace)
+                if label == "OpenCover":
+                    # v1.0.40（D3）：标签集无 CloseCover → 按方向词纠正，防"拉上窗帘"被反向执行
+                    fixed = _cover_intent(text, intent)
+                    if fixed != intent:
+                        trace.append(f"T1方向纠正:{label}→{fixed}")
+                        intent = fixed
                 matched_intent = intent
                 extra_args = dict(seed)
                 rest_text = text
@@ -536,6 +569,34 @@ class FastPath:
 
         trace.append(f"{source}:{matched_intent} rest={rest_text!r} extra={extra_args}")
         plan = self._build_plan(matched_intent, rest_text, extra_args, text, source, trace)
+        if plan is None and source != "t1" and self.settings.get(
+                "nlu.textcnn_enabled", True) and self.textcnn:
+            # v1.0.40 修复（A1 后半）：T0 命中了动作、但**目标提取落空**（残留字/质量门/
+            # 提取低分）时，旧实现直接落空进兜底话术——而 T1 往往判得对（实测「打开窗户」
+            # 旧正则残留「户」时 T1 判 ControlWindow 0.9+、「打开窗帘」判 OpenCover）。
+            # 给 T1 一次接管机会；仍失败则维持原 None 语义（继续 klar/查询族/LLM/兜底）。
+            hit2 = await asyncio.get_running_loop().run_in_executor(
+                None, self.textcnn.predict, text)
+            if hit2:
+                label2, prob2 = hit2
+                t1_intent, seed2 = _T1_MAP.get(label2, (None, {}))
+                if t1_intent and t1_intent != "SceneTrigger":
+                    if label2 == "OpenCover":
+                        t1_intent = _cover_intent(text, t1_intent)
+                    retry_extra = dict(seed2)
+                    if t1_intent == "ControlWindow" and "action" not in retry_extra:
+                        act2 = _scan_window_action(text)
+                        if act2:
+                            retry_extra["action"] = act2
+                    if t1_intent == "AdjustDeviceAttribute":
+                        scanned2 = _scan_delta(text, retry_extra.get("attribute", ""))
+                        if scanned2:
+                            retry_extra["delta"] = scanned2[0]
+                    trace.append(f"T1-retry={label2}({prob2:.2f})")
+                    retry_plan = self._build_plan(t1_intent, text, retry_extra, text,
+                                                  "t1", trace)
+                    if retry_plan is not None:
+                        plan = retry_plan
         if plan is None:
             # 构造失败（守卫/提取质量低/复合残余）→ 触发词兜底：前缀形态仍算用户
             # 说了触发词（"打开空调吧"被 ① 吃成 rest="空调吧" 后判 miss）。命中才
