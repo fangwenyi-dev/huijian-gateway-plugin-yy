@@ -148,6 +148,22 @@ def test_list_phrases():
     assert cr.parse("打开场景灯") is None              # 非查询句不误伤
 
 
+def test_list_phrases_with_leading_filler():
+    """2026-09-10 真机补洞钉桩：「现在有哪些语音场景」曾整句落兜底（正则锚定不留
+    前导时间/语气词位）。正例=用户自然说法，反例=裸名词/命令句/其他族不得被吞。"""
+    for s in ("现在有哪些语音场景", "目前有哪些语音场景", "当前有哪些语音场景",
+              "现在有哪些场景", "现在有几个语音场景", "现在有哪几个语音场景",
+              "现在都有哪些场景", "看看现在有哪些场景", "现在有多少个语音场景",
+              "现在有哪些自动化", "现在有哪些语音自动化", "现在有哪些语音场景呢"):
+        p = cr.parse(s)
+        assert p is not None, s
+        want = "list_automations" if "自动化" in s else "list_scenes"
+        assert p["kind"] == want, (s, p)
+    for s in ("现在打开客厅的灯", "现在几点了", "所有灯", "现在删除场景", "观影模式"):
+        p = cr.parse(s)
+        assert p is None or p.get("kind") not in ("list_scenes", "list_automations"), (s, p)
+
+
 def test_delete_automation_phrases():
     p = cr.parse("删除自动化2");      assert p["kind"] == "delete_automation" and cr.auto_target(p["target"]) == 2
     p = cr.parse("删掉自动化一");     assert cr.auto_target(p["target"]) == 1

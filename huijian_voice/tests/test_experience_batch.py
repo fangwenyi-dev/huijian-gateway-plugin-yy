@@ -578,6 +578,51 @@ def test_split_compound_bounded_and_safe():
     assert split_compound("开灯") == []
 
 
+# ── 连排句切分（2026-09-10 真机：连排双动作只执行了后一个）────────
+def test_serial_clauses_matrix():
+    """无连接词的动词连排按动词边界切；单句/把字句/纯动词残段/契约句一律不切
+    （宁欠勿过——切错会变成"多做一个动作"甚至全屋动作）。"""
+    from core.nlu.creation import serial_clauses
+    assert serial_clauses("关闭办公室射灯关闭办公室平开窗") == \
+        ["关闭办公室射灯", "关闭办公室平开窗"]
+    assert serial_clauses("打开客厅的灯关闭客厅的窗帘") == \
+        ["打开客厅的灯", "关闭客厅的窗帘"]
+    assert serial_clauses("关闭办公室射灯关闭办公室平开窗打开空调") == \
+        ["关闭办公室射灯", "关闭办公室平开窗", "打开空调"]
+    for s in ("打开客厅的灯", "关闭办公室的平开窗", "打开空调",
+              "把空调调到26度", "把卧室空调打开",          # 把字句不得拦腰
+              "打开客厅的灯关闭",                          # 纯动词残段→全屋，必须拒
+              "全开", "关一半", "把客厅窗帘关一半",
+              "观影模式", "当我说晚安就关闭客厅灯",        # 场景契约句
+              "删除场景晚安", "现在有哪些语音场景"):       # 生命周期/查询句
+        assert serial_clauses(s) == [], s
+    assert not serial_clauses("")
+
+
+def test_serial_chain_executes_both_clauses():
+    """连排双动作真链发：两段各成一个 Plan（首段 + extra_steps）。"""
+    ex = RecExecutor()
+    fp = Lane(table={
+        "关闭办公室射灯": _p("TurnDeviceOff", _tgt(area="办公室", name="射灯")),
+        "关闭办公室平开窗": _p("ControlWindow", _tgt(area="办公室", name="平开窗")),
+    })
+    p = _pipe(fp=fp, ex=ex)
+    r = arun(p.handle("关闭办公室射灯关闭办公室平开窗"))
+    assert r.ok and r.source == "chain", r.trace
+    merged = ex.plans[0]
+    assert merged.intent == "TurnDeviceOff"
+    assert [s["name"] for s in merged.extra_steps] == ["ControlWindow"]
+
+
+def test_serial_residue_refuses_to_chain_partially():
+    """任一段听不懂 → 整句不链发（宁可不做，也不做一半）。"""
+    ex = RecExecutor()
+    fp = Lane(table={"关闭办公室射灯": _p("TurnDeviceOff", _tgt(area="办公室", name="射灯"))})
+    p = _pipe(fp=fp, ex=ex)
+    r = arun(p.handle("关闭办公室射灯关闭办公室平开窗"))
+    assert r.source != "chain", r.trace
+
+
 def test_is_pronoun():
     assert is_pronoun("它") and is_pronoun("那个。")
     assert not is_pronoun("它的灯") and not is_pronoun("开灯")

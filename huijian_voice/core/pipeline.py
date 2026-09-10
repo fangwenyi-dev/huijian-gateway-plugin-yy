@@ -1040,7 +1040,17 @@ class Pipeline:
     async def _try_compound(self, text: str, origin: str) -> Optional[Reply]:
         if not self.settings.get("dialog.chain_enabled", True):
             return None
+        # 场景契约恒最高优先（模块头裁决①）：整句就是某个触发词时**绝不切分**——
+        # 契约句必须走单发通路交给 fast_path 的 scene 判定，否则「当我说X」会被
+        # 连排切分当设备指令做掉（与 fast_path 侧同一纪律）。
+        # getattr：部分单测手工装配的 Pipeline 没有 scenes 字段（真机恒有）。
+        _sc = getattr(self, "scenes", None)
+        if _sc is not None and _sc.check(text) == text:
+            return None
         clauses = split_compound(text)
+        if not clauses:
+            # 无连接词的动词连排（2026-09-10 真机：连排双动作只执行了后一个）
+            clauses = creation.serial_clauses(text)
         if not clauses:
             return None
         pairs = await asyncio.gather(*[self._match_pair(c) for c in clauses])

@@ -791,6 +791,44 @@ async def main():
         check("S9.35 S9e 清场（自动化回到 1 条）", len(ha.vautomations) == 1,
               str([a.get("trigger") for a in ha.vautomations]))
 
+        # S9f 触发词撞设备指令形态（2026-09-10 真机实锤：场景建好了、复述触发词却落
+        # 兜底——触发词判定排在 T0 动作正则之后且被 not matched_intent 守卫挡住；
+        # 更隐蔽的形态是"能构造成功"→ 直接去开关设备，场景永不触发）
+        print("\n─ S9f 触发词=设备指令形态 ─")
+        v0 = len(ha.vscenes)
+        n = len(ha.calls)
+        r = await llm_turn(sess, port,
+                           "当我说打开空调就打开客厅射灯关闭客厅窗帘")
+        check("S9.36 多动作场景入库（触发词=设备指令形态）",
+              len(ha.vscenes) == v0 + 1
+              and bool([c for c in ha.calls[n:] if c[1] == "HassCreateVoiceScene"]),
+              text_of(r))
+        n = len(ha.calls)
+        r = await llm_turn(sess, port, "打开空调")
+        trig = [c for c in ha.calls[n:] if c[0] == "intent"
+                and c[1] == "HassTriggerVoiceScene"]
+        check("S9.37 复述触发词触场景（不被 T0 动作正则吃掉）",
+              bool(trig) and trig[0][2].get("trigger_phrase") == "打开空调",
+              str(ha.calls[n:])[:200])
+        svc = json.dumps([c for c in ha.calls[n:] if c[0] == "service"],
+                         ensure_ascii=False)
+        check("S9.38 两动作真执行（灯 + 窗帘各自服务调用）",
+              "light.客厅射灯" in svc and "cover.客厅窗帘" in svc, svc[:200])
+        n = len(ha.calls)
+        r = await llm_turn(sess, port, "打开空调场景")   # 构造失败→触发词兜底路径
+        check("S9.39 前缀形态同样触场景（构造失败→触发词兜底）",
+              bool([c for c in ha.calls[n:] if c[0] == "intent"
+                    and c[1] == "HassTriggerVoiceScene"]), text_of(r))
+        n = len(ha.calls)
+        r = await llm_turn(sess, port, "打开客厅空调")   # 等值护栏：带区域长句不误吞
+        check("S9.40 等值护栏：带区域长句仍走设备指令",
+              not [c for c in ha.calls[n:] if c[0] == "intent"
+                   and c[1] == "HassTriggerVoiceScene"]
+              and bool([c for c in ha.calls[n:] if c[0] == "service"]), text_of(r))
+        await llm_turn(sess, port, "删除场景打开空调")
+        check("S9.41 S9f 清场（场景回到原数）", len(ha.vscenes) == v0,
+              str(ha.vscenes))
+
         # S10 场景模式（v1.0.30 SetMode 语料吸收：preset 英文规范名直发）
         print("\n─ S10 场景模式 ─")
         n = len(ha.calls)
@@ -811,6 +849,31 @@ async def main():
               not [c for c in ha.calls[n:]
                    if c[0] == "intent" and c[1] == "SetDeviceMode"],
               str(ha.calls[n:])[:160])
+
+        # S11 连排双动作（2026-09-10 真机：「关闭办公室射灯关闭办公室平开窗」只关了
+        # 平开窗——连排切分此前只在建场景的 Y 子句里用，直接指令通路整句被当成一句）
+        print("\n─ S11 连排双动作（无连接词） ─")
+        n = len(ha.calls)
+        r = await llm_turn(sess, port, "打开客厅射灯关闭客厅窗帘")
+        svc = json.dumps([c for c in ha.calls[n:] if c[0] == "service"],
+                         ensure_ascii=False)
+        check("S11.1 连排双动作两段都执行（灯开 + 窗帘关）",
+              "light.客厅射灯" in svc and "cover.客厅窗帘" in svc, svc[:200])
+        n = len(ha.calls)
+        r = await llm_turn(sess, port, "打开客厅射灯关闭")   # 纯动词残段→全屋，必须不切
+        svc = json.dumps([c for c in ha.calls[n:] if c[0] == "service"],
+                         ensure_ascii=False)
+        check("S11.2 纯动词残段不切分（不会误解成全屋关灯）",
+              "light.客厅射灯" in svc and "书房灯" not in svc, svc[:200])
+        # 场景契约优先于连排切分：整句就是触发词时不得被切成一串设备指令
+        # （句式刻意与 S11.1 异文——同句 2s 内重说会撞去重窗口重放旧回复）
+        await llm_turn(sess, port, "当我说关闭客厅射灯打开书房灯就关闭客厅射灯")
+        n = len(ha.calls)
+        r = await llm_turn(sess, port, "关闭客厅射灯打开书房灯")
+        check("S11.3 整句=触发词时场景优先（不被连排切分做掉）",
+              bool([c for c in ha.calls[n:] if c[0] == "intent"
+                    and c[1] == "HassTriggerVoiceScene"]), str(ha.calls[n:])[:200])
+        await llm_turn(sess, port, "删除场景关闭客厅射灯打开书房灯")
 
     await runner.cleanup()
     total = len(PASS) + len(FAIL)

@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from . import corrector, targets as T
+from . import creation
 from .music import GENERIC_WORDS as _MUSIC_WORDS
 
 logger = logging.getLogger("huijian.fastpath")
@@ -410,6 +411,14 @@ class FastPath:
         if phrase and phrase == text:
             return await self._scene_plan(phrase, text, trace)
 
+        # 连排句绝不在单发通路里执行（2026-09-10 真机实锤）：无连接词的动词连排
+        # （"关闭办公室射灯关闭办公室平开窗"）必须由 pipeline 链发切分逐段执行；
+        # 走单发会被 T0 当成一句——轻则第一子句被吃成区域残渣（"办公室射灯关闭
+        # 办公室"）只动最后一个设备，重则前半句执行、后半句**静默丢掉**。链发那
+        # 边任一段听不懂会拒绝，这里同样拒（交上层），宁可如实说没听懂。
+        if creation.serial_clauses(text):
+            return self._miss(trace, "连排句→交链发/上层")
+
         matched_intent: Optional[str] = None
         extra_args: dict[str, Any] = {}
         rest_text = text
@@ -580,6 +589,12 @@ class FastPath:
 
         _was_on = intent == "TurnDeviceOn"
         area, name, score = T.parse_target(rest_text, action_match=_any_action_match)
+        # 连排残渣守卫（2026-09-10 真机）：链发没接住的连排句会被 T0 当成**一句**，
+        # parse_target 把第一个动作子句整段吃成"区域名"（"办公室射灯关闭办公室"）。
+        # 区域名里出现动作动词＝这句其实是两句，绝不能拿残渣区域去执行——真机里
+        # 它把平开窗关了、射灯没关还报"成功"（静默做错远糟于如实拒收）。
+        if area and _AREA_VERB_RESIDUE.search(str(area)):
+            return self._miss(trace, f"区域残渣(连排未切分):{area}")
         # 窗型词落进设备名 → 按钮按压语义，不是开关设备（实机 2026-09-08：
         # 「打开 办公室平开窗」被错产成 TurnDeviceOn，集成按开关找窗必 miss）。
         if intent in ("TurnDeviceOn", "TurnDeviceOff") and name:
@@ -663,6 +678,12 @@ _AC_KEYWORDS = ("空调", "空調", "aircondition")
 # 显式全屋说法（2026-09-15 用户令）：只有用户明说"所有/全部/全屋/整个家/家里/每个"
 # 才是全屋语义；没写区域的"开灯"由创建侧继承触发条件的区域（客厅温度→客厅的灯）。
 _WHOLEHOUSE_RE = re.compile(r"所有|全部|全屋|整屋|整个家|家里|全家|各个|每个")
+
+# 连排残渣检测（2026-09-10）：区域名里出现这些动作动词＝parse_target 把第二个动作
+# 子句当成了区域（见 _build_plan 守卫）。与 creation._SERIAL_VERB 同表。
+_AREA_VERB_RESIDUE = re.compile(
+    r"打开|关闭|关掉|关上|开启|开一下|开到|关到|调到|调为|调成|调节|调整|"
+    r"设为|设成|设定|设置|播放|停止|暂停|锁上|解锁|拉上|拉下|全开|全关")
 
 
 def is_whole_house(text: str) -> bool:

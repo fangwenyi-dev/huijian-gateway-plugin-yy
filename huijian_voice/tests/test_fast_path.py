@@ -130,6 +130,74 @@ def test_scene_uncached_miss(fp):
     assert asyncio.run(fp.match("观影模式")) is None
 
 
+# ── 场景契约恒最高优先（2026-09-10 真机实锤：触发词被 T0 动作正则吃掉）────
+def test_scene_trigger_shaped_like_device_command(tc, settings):
+    """触发词=设备指令形态（"打开空调"/"打开客厅的灯"）必须触发场景。
+    真机日志病灶：创建成功、复述触发词却落兜底；更糟的形态会直接去开关设备。"""
+    fp = FastPath(FakeScenes(triggers=("打开空调", "打开客厅的灯")), tc, settings)
+    for s in ("打开空调", "打开客厅的灯"):
+        plan = asyncio.run(fp.match(s))
+        assert plan is not None, s
+        assert (plan.source, plan.intent) == ("scene", "HassTriggerVoiceScene"), (s, plan)
+        assert plan.args["trigger_phrase"] == s
+
+
+def test_scene_prefix_fallback_after_guard_miss(tc, settings):
+    """构造失败（空调缺区域守卫等）后仍回落到触发词前缀形态，不再落兜底。"""
+    fp = FastPath(FakeScenes(triggers=("打开空调",)), tc, settings)
+    for s in ("打开空调吧", "打开空调场景"):
+        plan = asyncio.run(fp.match(s))
+        assert plan is not None, s
+        assert plan.intent == "HassTriggerVoiceScene", (s, plan)
+        assert plan.args["trigger_phrase"] == "打开空调"
+
+
+def test_scene_priority_does_not_swallow_long_command(tc, settings):
+    """等值优先的回归护栏：短触发词"开灯"不得把「开灯亮度50」整句吞成场景。"""
+    fp = FastPath(FakeScenes(triggers=("开灯",)), tc, settings)
+    long_cmd = asyncio.run(fp.match("开灯亮度50"))
+    assert long_cmd is not None and long_cmd.intent == "TurnDeviceOn", long_cmd
+    exact = asyncio.run(fp.match("开灯"))
+    assert exact is not None and exact.intent == "HassTriggerVoiceScene", exact
+
+
+def test_scene_priority_keeps_area_command(tc, settings):
+    """带区域的长句不误吞（触发词"打开空调"vs「打开办公室的空调」）。"""
+    fp = FastPath(FakeScenes(triggers=("打开空调",)), tc, settings)
+    plan = asyncio.run(fp.match("打开办公室的空调"))
+    assert plan is not None and plan.intent == "TurnDeviceOn", plan
+    assert plan.args["target"][0]["area"] == "办公室"
+
+
+# ── 连排句禁走单发（2026-09-10 真机：只执行了后一个）──────────────
+def test_serial_sentence_never_single_shot(tc, settings):
+    """无连接词的动词连排必须由链发逐段执行；单发通路一律拒（交上层）。
+
+    真机病灶：「关闭办公室射灯关闭办公室平开窗」被 T0 当一句——第一子句被吃成
+    区域残渣（"办公室射灯关闭办公室"），只有名字匹配上的平开窗动了，还回
+    「已经帮你执行了」；反向形态「关闭客厅射灯打开书房灯」则是后半句被静默丢掉。"""
+    fp = FastPath(FakeScenes(triggers=()), tc, settings)
+    for s in ("关闭办公室射灯关闭办公室平开窗",
+              "打开客厅的灯关闭客厅的窗帘",
+              "关闭客厅射灯打开书房灯"):
+        assert asyncio.run(fp.match(s)) is None, s
+    # 对照：单句不得被连排闸误伤（含把字句/单动作）
+    for s, intent in (("关闭办公室平开窗", "ControlWindow"),
+                      ("打开 办公室射灯", "TurnDeviceOn"),
+                      ("打开客厅的灯", "TurnDeviceOn")):
+        plan = asyncio.run(fp.match(s))
+        assert plan is not None and plan.intent == intent, (s, plan)
+
+
+def test_serial_clause_hits_alone(tc, settings):
+    """链发按段调用单发通路——每段必须自己能命中（否则链发拒绝，宁欠勿过）。"""
+    fp = FastPath(FakeScenes(triggers=()), tc, settings)
+    a = asyncio.run(fp.match("关闭办公室射灯"))
+    b = asyncio.run(fp.match("关闭办公室平开窗"))
+    assert a is not None and a.intent == "TurnDeviceOff"
+    assert b is not None and b.intent == "ControlWindow"
+
+
 def test_office_spotlight_target(fp):
     # 修A 端到端锁定（用户实机轨迹：曾产出 {name:灯} 无区域 → HA 等值匹配全空 "没找到这个设备"）
     plan = asyncio.run(fp.match("打开 办公室射灯"))
