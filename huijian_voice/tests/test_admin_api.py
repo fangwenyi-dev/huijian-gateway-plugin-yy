@@ -203,9 +203,64 @@ def test_automations_route(admin):
     j = json.loads(body)
     assert st == 200 and j["error"] == ""
     a1, a2 = j["automations"]
-    assert a1 == {"id": "auto1", "alias": "回家开灯", "description": "地理围栏到家",
+    assert a1 == {"kind": "core", "id": "auto1", "alias": "回家开灯",
+                  "description": "地理围栏到家",
                   "last_triggered": "2026-09-12T10:00:00", "state": "on"}
     assert a2["state"] == ""                                  # 无 automation.auto2 实体
+
+
+def test_automations_huijian_merge():
+    """v1.0.32 双引擎合并：语音自动化（.storage 经集成视图）必须出现在
+    加载项「场景」tab 列表，trigger/action 压成人读中文。"""
+    import asyncio
+    from types import SimpleNamespace
+    from core.admin_api import CTX_KEY, _automations
+    rest = {
+        "/api/huijian-ai/automations": {"automations": [
+            {"automation_id": "automation_1", "trigger": {"at": "07:00"},
+             "actions": [{"intent": "TurnDeviceOn",
+                          "params": {"target": [{"area": "客厅",
+                                                 "devices": [{"name": "窗帘"}]}]}}],
+             "last_triggered": "2026-09-14T07:00:00"},
+            {"automation_id": "automation_2",
+             "trigger": {"entity_id": "办公室温湿度传感器温度", "above": 30},
+             "actions": [{"intent": "SetDeviceMode",
+                          "params": {"mode": "sleep"}}]},
+            {"automation_id": "automation_3",
+             "trigger": {"entity_id": "书房人体", "to": "on"}, "actions": []},
+        ]},
+        "/api/config/automations/config": {"automations": []},
+    }
+    ctx = AppContext(settings=SettingsFake(), ha=FakeHAClient(rest=rest), asr=None,
+                     tts=TtsFake(), pipeline=PipelineFake(), scenes=ScenesFake(),
+                     textcnn=None, store=StoreSnap(), started_at=time.time())
+    resp = asyncio.run(_automations(SimpleNamespace(app={CTX_KEY: ctx})))
+    j = json.loads(resp.body)
+    hv = [a for a in j["automations"] if a.get("kind") == "huijian"]
+    assert len(hv) == 3 and j["error"] == ""
+    assert hv[0]["alias"] == "每天早上7点" and hv[0]["description"] == "打开客厅窗帘"
+    assert hv[1]["alias"] == "办公室温湿度传感器温度（高于30）"
+    assert hv[1]["description"] == "设为睡眠模式"
+    assert hv[2]["alias"] == "书房人体 有人"
+
+
+def test_hv_helpers_never_raise():
+    from core.admin_api import _hv_trigger_cn, _hv_action_cn
+    assert isinstance(_hv_trigger_cn({"at": "垃圾"}), str)     # 脏值兜底不死
+    assert _hv_trigger_cn({}) == "?"
+    assert _hv_action_cn({"intent": "TurnDeviceOff", "params": {"target": [
+        {"area": "卧室", "devices": [{"name": "灯"}]}]}}) == "关闭卧室灯"
+
+
+def test_manage_page_render_three_trigger_shapes():
+    """集成 manage-page 源码级钉（HA 依赖不可本地导入；行为在 CI e2e）：
+    at/to 形态必须有渲染分支，且不给编辑弹窗（防保存覆盖丢字段）。"""
+    src = (Path(__file__).resolve().parents[1] / "custom_components"
+           / "huijian_ai" / "api.py").read_text(encoding="utf-8")
+    assert "每天 {at} 自动执行" in src and "时间自动化" in src
+    assert "检测到有人" in src and "状态自动化" in src
+    assert src.count('edit_btn_html = ""') == 2               # at 与 to 双分支
+    assert '{kind_tag}' in src and "{edit_btn_html}" in src
 
 
 def test_automations_no_bridge():

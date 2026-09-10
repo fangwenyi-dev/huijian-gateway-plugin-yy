@@ -180,30 +180,104 @@ async def _scenes(request):
                               "scenes": rows, "error": error})
 
 
+_HV_INTENT_CN = {"TurnDeviceOn": "打开", "TurnDeviceOff": "关闭",
+                 "ControlWindow": "开/关窗", "AdjustDeviceAttribute": "调节",
+                 "SetDeviceMode": "设为"}
+
+
+def _hv_trigger_cn(trig: dict) -> str:
+    """语音自动化 trigger 结构 → 中文短语（v1.0.32，列表展示用）。永不抛。"""
+    try:
+        at = str(trig.get("at") or "").strip()
+        if at:
+            h, m = int(at[:2]), at[3:5]
+            seg = ("凌晨" if h < 6 else "早上" if h < 11 else "中午" if h < 13
+                   else "下午" if h < 18 else "晚上")
+            hh = h if 1 <= h <= 12 else (h - 12 if h >= 13 else 12)
+            tail = "半" if m == "30" else "" if m == "00" else f"{int(m)}分"
+            return f"每天{seg}{hh}点{tail}"
+        ent = str(trig.get("entity_id") or "") or "?"
+        if trig.get("to") is not None:
+            return f"{ent} 有人" if str(trig["to"]) == "on" else f"{ent} 无人"
+        parts = []
+        if trig.get("above") is not None:
+            parts.append(f"高于{trig['above']:g}")
+        if trig.get("below") is not None:
+            parts.append(f"低于{trig['below']:g}")
+        return f"{ent}（{'、'.join(parts)}）" if parts else ent
+    except Exception:
+        return str(trig)
+
+
+def _hv_action_cn(act: dict) -> str:
+    """{intent, params} → 「打开客厅射灯」式短语。永不抛。"""
+    try:
+        intent = str(act.get("intent") or act.get("name") or "")
+        p = act.get("params") or act.get("parameters") or {}
+        if intent == "SetDeviceMode":
+            from .executor import MODE_CN
+            mode = str(p.get("mode") or "")
+            return f"设为{MODE_CN.get(mode, mode)}模式"
+        words = []
+        for t in (p.get("target") or []):
+            if not isinstance(t, dict):
+                continue
+            for d in (t.get("devices") or []):
+                if isinstance(d, dict):
+                    words.append(f"{t.get('area', '')}{d.get('name', '')}")
+        verb = {"TurnDeviceOff": "关闭", "TurnDeviceOn": "打开"}.get(
+            intent, _HV_INTENT_CN.get(intent, intent))
+        return verb + "、".join(w for w in words if w)
+    except Exception:
+        return ""
+
+
 async def _automations(request):
-    """自动化 = HA 核心 REST（零集成依赖，集成没装也有的看）；
-    开关态从 states 的 automation.<id> 联查。"""
+    """自动化 = 两引擎合并视图（v1.0.32）：
+    ① 慧尖语音自动化（.storage 私有引擎，经集成 /api/huijian-ai/automations；
+       集成未装/掉线 fail-open——只剩核心档并如实提示，不整表报错）；
+    ② HA 核心 REST（YAML/UI 自动化，原行为）。"""
     ctx = request.app[CTX_KEY]
+    out: list[dict] = []
+    note = ""
+    try:
+        data = await ctx.ha.rest_get("/api/huijian-ai/automations")
+        for a in ((data or {}).get("automations", [])
+                  if isinstance(data, dict) else []):
+            if not isinstance(a, dict):
+                continue
+            out.append({
+                "kind": "huijian",
+                "id": str(a.get("automation_id") or ""),
+                "alias": _hv_trigger_cn(a.get("trigger") or {}),
+                "description": "；".join(
+                    x for x in (_hv_action_cn(act)
+                                for act in (a.get("actions") or [])[:3]) if x),
+                "last_triggered": str(a.get("last_triggered") or ""),
+                "state": "语音引擎",
+            })
+    except Exception as e:                        # 集成缺席不拦核心列表
+        note = f"语音自动化读取失败（集成未装/未响应）：{str(e)[:80]}"
     cfg = await ctx.ha.rest_get("/api/config/automations/config")
     items = cfg.get("automations") if isinstance(cfg, dict) else None
     if not isinstance(items, list):
-        return web.json_response({"automations": [],
-                                  "error": "读不到自动化配置（HA API 不可达或未鉴权）"})
+        return web.json_response({"automations": out,
+                                  "error": note or "读不到自动化配置（HA API 不可达或未鉴权）"})
     states = await ctx.ha.states()
-    out = []
     for a in items:
         if not isinstance(a, dict):
             continue
         aid = str(a.get("id") or "")
         st = states.get(f"automation.{aid}") or {}
         attrs = st.get("attributes") or {}
-        out.append({"id": aid,
+        out.append({"kind": "core",
+                    "id": aid,
                     "alias": str(a.get("alias") or attrs.get("friendly_name") or aid),
                     "description": str(a.get("description") or ""),
                     "last_triggered": str(a.get("last_triggered")
                                           or attrs.get("last_triggered") or ""),
                     "state": str(st.get("state") or "")})
-    return web.json_response({"automations": out, "error": ""})
+    return web.json_response({"automations": out, "error": note})
 
 
 async def _reload_models(request):

@@ -14,8 +14,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#030712">
 <title>慧尖HA语音插件</title>
-<link rel="stylesheet" href="css/huijian.css?v=1.0.31">
-<link rel="stylesheet" href="css/voice.css?v=1.0.31">
+<link rel="stylesheet" href="css/huijian.css?v=1.0.32">
+<link rel="stylesheet" href="css/voice.css?v=1.0.32">
 </head>
 <body>
 <!-- 「星辰大海」背景层（与网关加载项同一设计标准/同一固定种子＝同一片天）：
@@ -179,11 +179,11 @@
     <button class="act gray" id="sceneBtn">刷新</button>
     <div class="hint">说「把现在这样保存为观影模式」即可现场建场景；删除/编辑在 HA 集成配置页。</div>
   </div>
-  <div class="card"><h3>自动化（HA 核心，不依赖集成）</h3>
-    <table><thead><tr><th>别名</th><th>状态</th><th>最近触发</th><th>说明</th></tr></thead><tbody id="autoBody"></tbody></table>
+  <div class="card"><h3>自动化（语音创建 + HA 核心，双引擎合并）</h3>
+    <table><thead><tr><th>触发条件 / 别名</th><th>状态</th><th>最近触发</th><th>执行动作 / 说明</th></tr></thead><tbody id="autoBody"></tbody></table>
     <div id="autoMsg" class="hint"></div>
     <button class="act gray" id="autoBtn">刷新</button>
-    <div class="hint">状态取自 automation.&lt;id&gt; 实体（on=已启用）；「无实体」多为 YAML 定义未重载。</div>
+    <div class="hint">「语音引擎」= 说「当客厅温度超过28度就打开空调」这类话创建的自动化（增删改与测试在 HA 集成配置页）；「无实体」多为 YAML 定义未重载。</div>
   </div>
 </section>
 
@@ -230,7 +230,7 @@
 
 <script>
 "use strict";
-const CURRENT_VERSION = "1.0.31";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
+const CURRENT_VERSION = "1.0.32";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
 // 音色表 = kokoro-multi-lang-v1_1 官方 103 sid 全表（k2-fsa docs sid 表实证；
 // 标注=对用户上传试听样本的 CAM++ 声纹溯源榜：v1_1 不含晓晓/云扬，
 // sid18=zf_026 女声最似晓晓(0.454 全场最近)，sid81=zm_055 最似云扬）
@@ -494,8 +494,10 @@ async function loadAutomations(){
   const esc = s => String(s??"").replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
   try { const r = await api("/api/automations");
     $("#autoBody").innerHTML = (r.automations||[]).map(a=>`<tr><td>${esc(a.alias)}</td><td>`+
-      (a.state==="on"? pill("已启用","ok") : a.state==="off"? pill("已禁用","warn") : pill("无实体","mut"))+
-      `</td><td class="mut">${esc(a.last_triggered||"–")}</td><td class="mut">${esc(a.description||"")}</td></tr>`).join("")
+      (a.kind==="huijian"? pill("语音引擎","ok") : a.state==="on"? pill("已启用","ok")
+       : a.state==="off"? pill("已禁用","warn") : pill("无实体","mut"))+
+      `</td><td class="mut">${esc(a.last_triggered?String(a.last_triggered).replace("T"," ").slice(0,16):"待触发")}</td>`+
+      `<td class="mut">${esc(a.description||"")}</td></tr>`).join("")
       || `<tr><td colspan="4" class="mut">暂无自动化</td></tr>`;
     $("#autoMsg").textContent = r.error||"";
   } catch(e){ $("#autoMsg").textContent = "读取失败："+e.message; }
@@ -524,6 +526,6 @@ $("#regenBtn").onclick = async ()=>{
   try { await post("/api/token/regenerate",{}); toast("已重置"); loadEndpoints(); } catch(e){ toast(e.message); }
 };
 </script>
-<script src="js/starsky.js?v=1.0.31"></script>
+<script src="js/starsky.js?v=1.0.32"></script>
 </body>
 </html>

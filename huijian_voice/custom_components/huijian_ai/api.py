@@ -334,14 +334,34 @@ class CombinedManageView(HomeAssistantView):
             friendly = _entity_id_to_friendly(hass, trigger_entity)
             above = auto.get("trigger", {}).get("above")
             below = auto.get("trigger", {}).get("below")
+            at = str(auto.get("trigger", {}).get("at") or "").strip()
+            to_val = auto.get("trigger", {}).get("to")
             cond_parts = []
             if above is not None:
                 cond_parts.append(f"> {above}度")
             if below is not None:
                 cond_parts.append(f"< {below}度")
-            trigger_display = (
-                f"{friendly} {'、'.join(cond_parts)}" if cond_parts else friendly
-            )
+            if at:
+                # v1.0.32 时间触发卡（旧渲染 entity 为空 → 标题整个空白）
+                trigger_display = f"每天 {at} 自动执行"
+                kind_tag = "时间自动化"
+                edit_btn_html = ""      # 编辑弹窗仅支持传感器形态，时间档给删除重建
+            else:
+                if to_val is not None:
+                    cond_parts.append(
+                        "检测到有人" if str(to_val) == "on" else f"状态={to_val}")
+                trigger_display = (
+                    f"{friendly} {'、'.join(cond_parts)}" if cond_parts else friendly
+                )
+                kind_tag = "状态自动化" if to_val is not None else "传感器自动化"
+                # 编辑弹窗只认 entity+above/below——to/at 形态给了会误导
+                # （保存即覆盖成丢 to 的形态），一律以删除重建为准（v1.0.32）
+                edit_btn_html = "" if to_val is not None else (
+                    f"""<button class="edit-btn" onclick="openEditAuto('{auto_id}', """
+                    f"""'{html_mod.escape(trigger_entity)}', """
+                    f"""'{above if above is not None else ""}', """
+                    f"""'{below if below is not None else ""}')">编辑</button>"""
+                )
 
             created = auto.get("created_at", "")
             created_display = ""
@@ -373,9 +393,9 @@ class CombinedManageView(HomeAssistantView):
             auto_cards_html += f"""
 <div class="card auto" id="auto-{auto_id}">
     <div class="card-header">
-        <div><span class="card-trigger auto">{html_mod.escape(trigger_display)}</span><span class="card-tag auto">传感器自动化</span></div>
+        <div><span class="card-trigger auto">{html_mod.escape(trigger_display)}</span><span class="card-tag auto">{kind_tag}</span></div>
         <button class="delete-btn" onclick="deleteAutomation('{auto_id}', '{html_mod.escape(trigger_display)}')">删除</button>
-        <button class="edit-btn" onclick="openEditAuto('{auto_id}', '{html_mod.escape(trigger_entity)}', '{above if above is not None else ""}', '{below if below is not None else ""}')">编辑</button>
+        {edit_btn_html}
         <button class="test-btn" onclick="testAutomation('{auto_id}')">测试</button>
     </div>
     <div class="info">创建时间: {created_display}{trigger_info}</div>
