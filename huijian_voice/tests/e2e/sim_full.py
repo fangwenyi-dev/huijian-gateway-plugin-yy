@@ -128,6 +128,26 @@ class SimHA:
                 return {"success": False, "error": f"未找到场景:{tp}"}
             self.vscenes.remove(hit[0])
             return {"success": True, "message": "deleted"}
+        if name == "HassTriggerVoiceScene":
+            # 与集成 HassTriggerVoiceSceneIntent 同语义（intent_voice_scene.py）：
+            # 按触发词查场景 → 逐个动作经 handle_intent 真执行；查无 / 任一动作失败
+            # 一律失败。**此前无此分支**——KNOWN_INTENTS 由集成源码派生已含该意图，
+            # 落到函数末尾的 return {"success": True} 就是"替身恒成功"：场景触发到底
+            # 有没有真执行根本验不出来（2026-09-10 真机「打开空调」触发词事故正是
+            # 这类缺口会掩盖的）。
+            tp = str(data.get("trigger_phrase") or "").strip()
+            hit = [s for s in self.vscenes if s["trigger_phrase"] == tp]
+            if not hit:
+                return {"success": False, "error": f"未找到触发词'{tp}'对应的场景"}
+            done = []
+            for a in hit[0]["actions"]:
+                r = await self.handle_intent(a["intent"], a.get("params") or {})
+                done.append({"intent": a["intent"], "result": r.get("success")})
+                if not r.get("success"):
+                    return {"success": False, "executed_actions": done,
+                            "error": f"动作执行失败:{a.get('intent')}"}
+            return {"success": True, "scene_id": hit[0]["scene_id"],
+                    "executed_actions": done, "message": f"已执行场景：{tp}"}
         if name == "HassCreateAutomation":
             from core.nlu import creation as _cr
             trig = data.get("trigger") or {}
@@ -736,6 +756,40 @@ async def main():
             settings.update({"llm": {"enabled": False}})
             pipeline.agent = None
             await llm_runner.cleanup()
+
+        # S9e 动作区域继承 vs 显式全屋（用户令 2026-09-15：没写区域→继承触发条件
+        # 区域；只有明说"所有灯/全部灯"才是全屋）
+        print("\n─ S9e 区域继承 vs 显式全屋 ─")
+
+        def _last_auto_target():
+            au = [c for c in ha.calls if c[0] == "intent"
+                  and c[1] == "HassCreateAutomation"]
+            if not au:
+                return None
+            return (((au[-1][2].get("actions") or [{}])[0].get("params") or {})
+                    .get("target"))
+
+        r = await llm_turn(sess, port, "当客厅湿度超过60就开灯")
+        tgt = _last_auto_target()
+        hit = ha._match(tgt) if tgt else None
+        check("S9.32 没写区域→继承触发条件区域（客厅湿度→客厅的灯）",
+              hit == ["light.客厅射灯"], f"{tgt} → {hit}")
+        r = await llm_turn(sess, port, "当书房温度超过30度就打开所有灯")
+        tgt = _last_auto_target()
+        hit = ha._match(tgt) if tgt else None
+        check("S9.33 明说「所有灯」才是全屋（客厅+书房两盏都动）",
+              set(hit or []) == {"light.客厅射灯", "light.书房灯"}, f"{tgt} → {hit}")
+        n = len(ha.calls)
+        r = await llm_turn(sess, port, "打开所有灯")
+        svc = json.dumps([c for c in ha.calls[n:] if c[0] == "service"],
+                         ensure_ascii=False)
+        check("S9.34 直接说「打开所有灯」=全屋（不被卫星区域缩回客厅）",
+              "客厅射灯" in svc and "书房灯" in svc, svc[:180])
+        # 清场：删掉 S9e 建的两条，别影响后续块
+        await llm_turn(sess, port, "删除自动化湿度")
+        await llm_turn(sess, port, "删除自动化书房")
+        check("S9.35 S9e 清场（自动化回到 1 条）", len(ha.vautomations) == 1,
+              str([a.get("trigger") for a in ha.vautomations]))
 
         # S10 场景模式（v1.0.30 SetMode 语料吸收：preset 英文规范名直发）
         print("\n─ S10 场景模式 ─")

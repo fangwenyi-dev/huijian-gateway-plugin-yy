@@ -164,6 +164,9 @@ class Plan:
     # ── klar 一级 NLU 专用（其余来源恒默认值，构造全兼容）──
     speech: str = ""                              # 引擎自带的中文播报（优先于话术层）
     extra_steps: list = field(default_factory=list)  # 多分句后续步骤 [{name,args}]
+    # 显式全屋语义（"打开所有灯/全部灯/全屋的灯"）：目标不带区域不带名字，只留域过滤；
+    # 空间化（卫星区域注入）与创建侧区域继承都必须让路，否则"所有灯"会被缩成一间屋。
+    whole_house: bool = False
 
 
 # ── 礼貌/口语归一（体验批 P2-16）───────────────────────────────
@@ -319,6 +322,29 @@ class FastPath:
         self.textcnn = textcnn
         self.settings = settings
 
+    def _wholehouse_plan(self, text: str, trace: list[str]) -> Optional[Plan]:
+        """显式全屋动作句（动词在前："打开所有灯/关掉全部窗帘"）→ Plan。
+        必须在复杂查询守卫**之前**裁决：守卫的 `所有.*(?:灯|设备|开关)` 分支会把
+        「打开所有灯」误判成查询句交上层（2026-09-15 实测），而它是命令。
+        认不出域的口径（"所有设备"）返回 None——不冒然全屋全动（会带上门锁）。"""
+        if not _WHOLEHOUSE_RE.search(text or ""):
+            return None
+        for pattern, intent_type, _v in _ACTION_PATTERNS:
+            if intent_type not in ("TurnDeviceOn", "TurnDeviceOff"):
+                continue
+            m = pattern.match(text)
+            if not m:
+                continue
+            word = _wholehouse_word(text[m.end():].strip() or text)
+            doms = [str(d) for d in (T.domain_hint(word) if word else [])]
+            if not doms:
+                return None
+            trace.append(f"全屋显式:{word}→domains={doms}")
+            return Plan(intent=intent_type,
+                        args={"target": [{"devices": [{"name": "", "domains": doms}]}]},
+                        source="t0", utterance=text, trace=trace, whole_house=True)
+        return None
+
     # ── 主入口 ──────────────────────────────────────────────────
     async def match(self, raw_text: str) -> Optional[Plan]:
         trace: list[str] = []
@@ -344,6 +370,10 @@ class FastPath:
         if not text or len(text.strip()) < 2:
             return None
         trace.append(f"纠错→{text}")
+        # 显式全屋命令先于复杂查询守卫裁决（守卫会吞掉"打开所有灯"，见方法注释）
+        wh = self._wholehouse_plan(text, trace)
+        if wh is not None:
+            return wh
         if _is_complex_query(text):
             trace.append("复杂查询守卫→交上层")
             plan_src = None
@@ -369,6 +399,16 @@ class FastPath:
             await self.scenes.refresh()
         else:
             self.scenes.refresh_soon()
+
+        # 场景契约恒最高优先（模块头裁决①；2026-09-10 真机实锤补）：触发词是用户
+        # 点名创建的契约，必须**先于** T0 动作正则判定——「打开空调」这类"看着像
+        # 设备指令"的触发词会被 ① 的 ^打开 吃掉、再被空调区域守卫判 miss，整句
+        # 直接落兜底（真机：创建成功、复述触发词却 fallback）；能构造成功的形态
+        # 更糟——会去开关那台设备，场景永不触发。与复杂查询分支同纪律：**只认等值**，
+        # 防短触发词（"开灯"）把「开灯亮度50」这类长指令整句吞成场景。
+        phrase = self.scenes.check(text)
+        if phrase and phrase == text:
+            return await self._scene_plan(phrase, text, trace)
 
         matched_intent: Optional[str] = None
         extra_args: dict[str, Any] = {}
@@ -483,7 +523,15 @@ class FastPath:
             return self._miss(trace, "PlayMusic 不接管(模式B)")
 
         trace.append(f"{source}:{matched_intent} rest={rest_text!r} extra={extra_args}")
-        return self._build_plan(matched_intent, rest_text, extra_args, text, source, trace)
+        plan = self._build_plan(matched_intent, rest_text, extra_args, text, source, trace)
+        if plan is None:
+            # 构造失败（守卫/提取质量低/复合残余）→ 触发词兜底：前缀形态仍算用户
+            # 说了触发词（"打开空调吧"被 ① 吃成 rest="空调吧" 后判 miss）。命中才
+            # 接管，未命中维持原 None 语义（继续走 klar/查询族/LLM/兜底）。
+            phrase = self.scenes.check(text)
+            if phrase:
+                return await self._scene_plan(phrase, text, trace)
+        return plan
 
     # ── 场景与参数组装 ──────────────────────────────────────────
     async def _scene_plan(self, phrase: str, text: str, trace: list[str]) -> Optional[Plan]:
@@ -567,6 +615,17 @@ class FastPath:
             if not area and not _ac_name_qualified(name):
                 return self._miss(trace, "空调缺区域信息")
         args: dict[str, Any] = {}
+        # 显式全屋（余下语序："全屋的灯打开"等）：目标不带区域、不带设备名，只留域
+        # 过滤（集成端 name 空 + area 无 = 不过滤，全屋同域设备一起动），并打
+        # whole_house 标，让卫星空间化/创建侧区域继承一律让路。
+        if intent in ("TurnDeviceOn", "TurnDeviceOff") and _WHOLEHOUSE_RE.search(text):
+            word = _wholehouse_word(rest_text or text)
+            doms = [str(d) for d in (T.domain_hint(word) if word else [])]
+            if doms:
+                args["target"] = [{"devices": [{"name": "", "domains": doms}]}]
+                trace.append(f"全屋显式:{word}→domains={doms}")
+                return Plan(intent=intent, args=args, source=source, utterance=text,
+                            trace=trace, whole_house=True)
         if name or area:
             device_item = {"name": name, "domains": T.domain_hint(name or "")} if name else {"domains": []}
             entry: dict[str, Any] = {}
@@ -599,6 +658,23 @@ _WINDOW_TYPES = ("内开内倒窗", "外装平开窗", "单内倒窗", "平推�
 
 
 _AC_KEYWORDS = ("空调", "空調", "aircondition")
+
+
+# 显式全屋说法（2026-09-15 用户令）：只有用户明说"所有/全部/全屋/整个家/家里/每个"
+# 才是全屋语义；没写区域的"开灯"由创建侧继承触发条件的区域（客厅温度→客厅的灯）。
+_WHOLEHOUSE_RE = re.compile(r"所有|全部|全屋|整屋|整个家|家里|全家|各个|每个")
+
+
+def is_whole_house(text: str) -> bool:
+    """文本是否含显式全屋标记（创建侧据此不继承区域）。"""
+    return bool(_WHOLEHOUSE_RE.search(text or ""))
+
+
+def _wholehouse_word(text: str) -> str:
+    """显式全屋说法的设备词：剥掉"所有/全部/全屋/家里"等标记与属格"的"后的实义部分
+    （"所有灯"→灯、"全屋的窗帘"→窗帘），供域提示推断。永不抛。"""
+    t = _WHOLEHOUSE_RE.sub("", text or "").replace("的", "").strip()
+    return t
 
 
 def _ac_name_qualified(name: str) -> bool:

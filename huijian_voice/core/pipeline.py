@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Coroutine, Optional
 
 from . import const
-from .nlu.fast_path import FastPath, Plan, is_pronoun, split_compound
+from .nlu.fast_path import FastPath, Plan, is_pronoun, is_whole_house, split_compound
 from .nlu import targets as T
 from .nlu import music
 from .nlu import creation
@@ -618,6 +618,38 @@ class Pipeline:
         self._remember_turn(origin, text, say)
         return Reply(say, "creation", True, plan.trace)
 
+    def _scope_action_area(self, plan: Plan, clause: str, c: dict) -> Plan:
+        """动作句没写区域时，继承触发条件里的区域（2026-09-15 用户令）：
+        「当客厅温度超过28度就开灯」＝**客厅的灯**；只有用户明说「打开所有灯/
+        全部灯/全屋的灯」才保留全屋语义。设备名自带区域（"书房空调"）或句子本身
+        已写区域的零改动；推断出的"区域"不是真区域（如"客厅灯温度"）也不注入。"""
+        if plan is None or getattr(plan, "whole_house", False) or is_whole_house(clause):
+            return plan
+        desc = str(c.get("desc") or "")
+        if not desc:
+            return plan
+        area, _rest = T.extract_prefix(desc)
+        if not area:
+            return plan
+        known = self._known_areas()
+        if known and area not in known:
+            return plan
+        targets = (plan.args or {}).get("target")
+        if not isinstance(targets, list) or not targets:
+            return plan
+        for t in targets:
+            if not isinstance(t, dict) or str(t.get("area") or "").strip():
+                continue
+            devs = [d for d in (t.get("devices") or []) if isinstance(d, dict)]
+            if not devs:
+                continue
+            names = [str(d.get("name") or "") for d in devs]
+            if any(n and any(a in n for a in known) for n in names):
+                continue                     # 设备名自带区域（"书房空调"）→ 不覆盖
+            t["area"] = area
+            plan.trace = (plan.trace or []) + [f"动作区域继承:{area}"]
+        return plan
+
     async def _scene_delete(self, c: dict, text: str, origin: str) -> Reply:
         """语音删场景（v1.0.33 本地句，零 LLM）：只认带名字的精准删除；
         触发词表在缓存里查无 → 如实报不瞎删。裸删（不带名字）本地列清单+
@@ -665,6 +697,7 @@ class Pipeline:
                 logger.info("[创建] 子句拒收 %r → 整单作废（原句 %r）", clause, text)
                 return Reply(self._creation_reject(c, clause), "creation",
                              ok=False, trace=[f"创建拒收:{clause!r}"])
+            plan = self._scope_action_area(plan, clause, c)
             actions.append({"intent": plan.intent, "params": copy.deepcopy(plan.args)})
             echo_parts.append(clause)
         return actions, "，".join(echo_parts)
@@ -1113,6 +1146,8 @@ class Pipeline:
         area = (self.settings.get("spatial.satellite_areas") or {}).get(origin)
         if not area:
             return
+        if getattr(plan, "whole_house", False):
+            return                       # 显式全屋（"打开所有灯"）绝不被缩回本房间
         targets = args.get("target")
         if isinstance(targets, list) and targets:
             # 只给"泛类词"目标补区域（灯/窗帘/空调…），指名道姓的设备句零影响
@@ -1343,7 +1378,8 @@ class Pipeline:
             return None if p is None else {
                 "intent": p.intent, "args": p.args, "source": p.source,
                 "trace": p.trace, "speech": getattr(p, "speech", ""),
-                "extra_steps": getattr(p, "extra_steps", [])}
+                "extra_steps": getattr(p, "extra_steps", []),
+                "whole_house": bool(getattr(p, "whole_house", False))}
         out = {"nlu_enabled": True, "plan": _dump(plan),
                "fast_path": _dump(fp_plan), "klar": _dump(kl_plan)}
         if plan is None:

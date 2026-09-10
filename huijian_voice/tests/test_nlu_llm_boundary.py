@@ -25,7 +25,14 @@ class S:
         self.d = {"nlu.textcnn_enabled": False, "llm.enabled": False, **kw}
 
     def get(self, k, default=None):
-        return self.d.get(k, default)
+        if k in self.d:                     # 兼容扁平点号键与嵌套两种写法
+            return self.d[k]
+        cur = self.d
+        for part in k.split("."):
+            if not isinstance(cur, dict) or part not in cur:
+                return default
+            cur = cur[part]
+        return cur
 
 
 class FakeScenes:
@@ -447,6 +454,73 @@ def test_duplicate_automations_numbered_by_identity():
     assert r.ok and "2，" in r.text, r.text
     dele = [p for p in ex.calls if p.intent == "HassDeleteAutomation"]
     assert dele[-1].args == {"automation_id": "a2"}
+
+
+# ── F. 动作区域继承 vs 显式全屋（用户令 2026-09-15）────────────────
+def _created_action(ex, idx=0):
+    made = [p for p in ex.calls if p.intent == "HassCreateAutomation"]
+    return made[idx].args["actions"][0]["params"]["target"]
+
+
+def test_action_clause_inherits_trigger_area():
+    """没写区域的动作用触发条件的区域：「当客厅温度超过28度就开灯」＝客厅的灯。"""
+    ex = Recorder()
+    r = _casc(_pipe(executor=ex, ha=FakeHAWithAreas()), "当客厅温度超过28度就开灯")
+    assert r.ok, r.text
+    assert _created_action(ex) == [{"devices": [{"name": "灯", "domains": ["light"]}],
+                                    "area": "客厅"}]
+
+
+def test_presence_trigger_area_also_inherited():
+    ex = Recorder()
+    assert _casc(_pipe(executor=ex, ha=FakeHAWithAreas()), "当书房有人就开灯").ok
+    assert _created_action(ex)[0]["area"] == "书房"
+
+
+def test_explicit_whole_house_is_kept():
+    """只有明说「所有灯/全部灯」才是全屋：目标不带区域、只留域过滤。"""
+    for sentence in ("当客厅温度超过28度就打开所有灯",
+                     "当客厅温度超过28度就打开全部灯"):
+        ex = Recorder()
+        assert _casc(_pipe(executor=ex, ha=FakeHAWithAreas()), sentence).ok, sentence
+        tgt = _created_action(ex)
+        assert tgt == [{"devices": [{"name": "", "domains": ["light"]}]}], sentence
+
+
+def test_time_trigger_without_area_stays_whole_house():
+    """时间触发没有区域可继承 → 保持原语义（要限定就说「打开客厅的灯」）。"""
+    ex = Recorder()
+    assert _casc(_pipe(executor=ex, ha=FakeHAWithAreas()), "每天早上7点就开灯").ok
+    tgt = _created_action(ex)
+    assert "area" not in tgt[0]
+
+
+def test_action_clause_with_own_area_is_not_overridden():
+    """动作句自己写了区域（哪怕与触发条件不同）→ 一律不动它。"""
+    ex = Recorder()
+    assert _casc(_pipe(executor=ex, ha=FakeHAWithAreas()),
+                 "当客厅温度超过28度就打开书房灯").ok
+    tgt = _created_action(ex)[0]
+    assert tgt["area"] == "书房"
+
+
+def test_unknown_domain_whole_house_is_rejected():
+    """认不出域的全屋口径（"所有设备"）不冒然全屋全动（会带上门锁）→ 整单拒绝。"""
+    ex = Recorder()
+    r = _casc(_pipe(executor=ex, ha=FakeHAWithAreas()),
+              "当客厅温度超过28度就打开所有设备")
+    assert not r.ok and ex.calls == []
+
+
+def test_direct_whole_house_not_shrunk_by_satellite_area():
+    """直接说「打开所有灯」也是全屋——卫星区域不得把它缩回本房间。"""
+    ex = Recorder()
+    pipe = _pipe(executor=ex, ha=FakeHAWithAreas(),
+                 **{"spatial": {"satellite_areas": {"127.0.0.1": "客厅"}}})
+    r = asyncio.run(pipe._cascade("打开所有灯", "127.0.0.1"))
+    assert r.ok
+    assert ex.calls[-1].args["target"] == [{"devices": [{"name": "",
+                                                          "domains": ["light"]}]}]
 
 
 def test_llm_scene_write_gate_still_applies():
