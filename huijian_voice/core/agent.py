@@ -106,6 +106,15 @@ TOOLS: list[dict] = [
             "required": ["automation_id"]}}},
 ]
 
+# 场景/自动化写入类工具（本地级联已零 LLM 全覆盖，LLM 只是兜底，所以写权限
+# 必须显式开关——默认口径见 settings.DEFAULTS：场景放行、自动化关）。
+_SCENE_WRITE_TOOLS = frozenset({
+    "HassCreateVoiceScene", "HassDeleteVoiceScene",
+})
+_AUTOMATION_WRITE_TOOLS = frozenset({
+    "HassCreateAutomation", "HassUpdateAutomation", "HassDeleteAutomation",
+})
+
 SYSTEM_PROMPT = (
     "你是慧尖智能家居语音助手。规则：1) 控制设备必须调用工具，不要凭空声称已完成；"
     "2) 设备状态问题先调用 huijianGetLiveContext 再回答；3) 最终回答是口播短句，"
@@ -322,10 +331,13 @@ class Agent:
             result = await self.ha.handle_intent(name, {})
             raw = json.dumps(result.get("raw", result), ensure_ascii=False)[:2000]
             return bool(result.get("success")), raw
-        if (name in ("HassCreateVoiceScene", "HassCreateAutomation",
-                     "HassUpdateAutomation")
+        if (name in _AUTOMATION_WRITE_TOOLS
+                and not self.settings.get("llm.allow_automation_write", False)):
+            return False, ("自动化的创建/修改/删除没开启——直接说「当客厅温度超过28度"
+                           "就打开空调」这类句子，本地就能建，不需要大模型")
+        if (name in _SCENE_WRITE_TOOLS
                 and not self.settings.get("llm.allow_scene_write", True)):
-            return False, "场景与自动化创建未开启"
+            return False, "语音场景的创建/删除没开启"
         plan = Plan(intent=name, args=args, source="llm")
         return await self.executor.run(plan)
 

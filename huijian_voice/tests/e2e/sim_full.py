@@ -53,6 +53,8 @@ STATES = {
     "light.书房灯": ("off", "书房灯", "书房"),
     "cover.客厅窗帘": ("closed", "客厅窗帘", "客厅"),
     "switch.客厅通道": ("off", "客厅通道", "客厅"),
+    # 空调单列：区域继承的目标必须收窄到它，"客厅"整片设备不能被带开
+    "climate.客厅空调": ("off", "客厅空调", "客厅"),
 }
 MEDIA = "media_player.书房音箱"
 
@@ -153,6 +155,31 @@ class SimHA:
                 return {"success": False, "error": f"未找到自动化:{aid}"}
             self.vautomations.remove(hit[0])
             return {"success": True, "message": "deleted"}
+        if name == "HassUpdateAutomation":
+            # 与集成 HaasUpdateAutomationIntent 同语义（trigger/actions 可给其一，
+            # 未找到 ID / 两者都没给 / 动作不可执行 一律失败——替身绝不恒成功）
+            aid = str(data.get("automation_id") or "")
+            trig, acts = data.get("trigger"), data.get("actions")
+            hit = [a for a in self.vautomations if a["automation_id"] == aid]
+            if not hit:
+                return {"success": False, "error": f"未找到自动化ID'{aid}'"}
+            if not trig and not acts:
+                return {"success": False, "error": "请提供要修改的trigger或actions"}
+            if trig is not None and not (
+                    str(trig.get("entity_id") or "").strip()
+                    or str(trig.get("at") or "").strip()):
+                return {"success": False,
+                        "error": "trigger.entity_id 或 trigger.at 至少给一个"}
+            from core.nlu import creation as _cr2
+            if acts is not None and (not isinstance(acts, list) or not acts or [
+                    a for a in acts if not isinstance(a, dict)
+                    or a.get("intent") not in _cr2.ACTIONABLE_INTENTS]):
+                return {"success": False, "error": "动作不可执行"}
+            if trig is not None:
+                hit[0]["trigger"] = dict(trig)
+            if acts is not None:
+                hit[0]["actions"] = [dict(a) for a in acts]
+            return {"success": True, "message": f"已更新自动化：{aid}"}
         if name in LOCK_INTENTS:
             ents = [e for e in self._match(data.get("target"))
                     if e.split(".", 1)[0] == "lock"]
@@ -503,7 +530,21 @@ async def main():
               au[0][2]["trigger"].get("above") == 28.0 and
               au[0][2]["trigger"].get("entity_id") == "客厅温度", str(au)[:200])
         n = len(ha.calls)
-        await llm_turn(sess, port, "当我说出发就念一遍今日运势")
+        r = await llm_turn(sess, port, "把自动化1的动作改成打开空调")
+        upd = [c for c in ha.calls[n:] if c[0] == "intent"
+               and c[1] == "HassUpdateAutomation"]
+        tgt3 = ((((upd[0][2].get("actions") or [{}])[0].get("params") or {})
+                 .get("target")) if upd else None)
+        hit3 = ha._match(tgt3) if tgt3 else None
+        # 旧形态 {name:"客厅", domains:[]} 会按名字子串命中客厅全部设备——
+        # 区域继承必须收窄到空调本身（SimHA 按集成真语义复算）
+        legacy = ha._match([{"devices": [{"name": "客厅", "domains": []}]}])
+        check("S9.4b 区域继承收窄到空调（不误开客厅全屋）",
+              bool(upd) and hit3 == ["climate.客厅空调"], f"{tgt3} → {hit3}")
+        check("S9.4c 对照：旧形态确属过宽（区域当名字命中多台）",
+              len(legacy) >= 3, str(legacy))
+        n = len(ha.calls)
+        r = await llm_turn(sess, port, "当我说出发就念一遍今日运势")
         check("S9.5 听不懂子句整单拒绝（零半成品入库）",
               not [c for c in ha.calls[n:]
                    if c[0] == "intent" and c[1].startswith("HassCreate")],
@@ -594,6 +635,107 @@ async def main():
         check("S9.22 多动作连排句入库两步（真机原句式）",
               len(sc.get("actions", [])) == 2 and "已创建" in text_of(r),
               text_of(r)[:60])
+
+        # S9c 本地闭环补全（无 LLM 全生命周期：改自动化 + 裸删场景引导）
+        print("\n─ S9c 本地闭环补全（改自动化/裸删场景） ─")
+        r = await llm_turn(sess, port, "每天早上6点半打开客厅射灯")
+        check("S9.23a 自动化入库（改的前提）", len(ha.vautomations) == 1,
+              text_of(r))
+        r = await llm_turn(sess, port, "把自动化1改成每天早上8点关闭客厅射灯")
+        cur = ha.vautomations[0] if ha.vautomations else {}
+        check("S9.23 改自动化整句替换（触发条件+动作都换）",
+              len(ha.vautomations) == 1 and cur.get("trigger") == {"at": "08:00"}
+              and cur.get("actions", [{}])[0].get("intent") == "TurnDeviceOff"
+              and "已改成" in text_of(r),
+              text_of(r) + " | " + str(cur)[:120])
+        r = await llm_turn(sess, port, "把自动化1的动作改成打开客厅射灯")
+        cur = ha.vautomations[0] if ha.vautomations else {}
+        check("S9.24 改自动化仅动作（触发条件不动）",
+              cur.get("trigger") == {"at": "08:00"}
+              and cur.get("actions", [{}])[0].get("intent") == "TurnDeviceOn"
+              and "动作已改成" in text_of(r),
+              text_of(r) + " | " + str(cur)[:120])
+        r = await llm_turn(sess, port, "把自动化1的触发条件改成每天晚上9点")
+        cur = ha.vautomations[0] if ha.vautomations else {}
+        check("S9.25 改自动化仅触发条件（动作不动）",
+              cur.get("trigger") == {"at": "21:00"}
+              and cur.get("actions", [{}])[0].get("intent") == "TurnDeviceOn"
+              and "触发条件已改成" in text_of(r),
+              text_of(r) + " | " + str(cur)[:120])
+        n = len(ha.calls)
+        r = await llm_turn(sess, port, "把自动化1的动作改成念一遍新闻")
+        check("S9.26 新动作听不懂整单拒绝（零改动）",
+              "先不创建" in text_of(r)
+              and not [c for c in ha.calls[n:] if c[1] == "HassUpdateAutomation"],
+              text_of(r))
+        n = len(ha.calls)
+        r = await llm_turn(sess, port, "把自动化9改成每天早上8点打开客厅射灯")
+        check("S9.27 改不存在的自动化如实报（零调用）",
+              "没有找到" in text_of(r)
+              and not [c for c in ha.calls[n:] if c[1] == "HassUpdateAutomation"],
+              text_of(r))
+        n = len(ha.calls)
+        r = await llm_turn(sess, port, "删除场景")
+        check("S9.28 裸删场景本地引导（零执行）", "要删哪个场景" in text_of(r)
+              and not [c for c in ha.calls[n:] if c[1] == "HassDeleteVoiceScene"],
+              text_of(r))
+        r = await llm_turn(sess, port, "把第1个删掉")
+        check("S9.29 引导后编号删除可用（无 LLM 闭环）",
+              len(ha.vscenes) == 0 and "已删除" in text_of(r), text_of(r))
+        n = len(ha.calls)
+        r = await llm_turn(sess, port, "客厅开灯")
+        check("S9.30 区域当设备名的过宽目标被拦（零执行+引导）",
+              "不确定你要哪一台" in text_of(r)
+              and not [c for c in ha.calls[n:] if c[0] == "service"],
+              text_of(r))
+        n = len(ha.calls)
+        r = await llm_turn(sess, port, "打开客厅灯")
+        check("S9.31 说清设备后照常执行（拦的是歧义不是功能）",
+              bool([c for c in ha.calls[n:] if c[0] == "service"]), text_of(r))
+
+        # S9d 「LLM 只做兜底」实证：真 Agent + 桩端点计数——本地命中的句子
+        # （含场景/自动化生命周期）一次都不许打到 LLM；只有全未命中才允许。
+        print("\n─ S9d LLM 只做兜底（真 Agent + 桩端点计数） ─")
+        llm_hits: list = []
+
+        async def _chat(request):
+            llm_hits.append(await request.json())
+            return web.json_response({"choices": [{"message": {
+                "role": "assistant", "content": "这是大模型的兜底回答。"}}]})
+
+        llm_app = web.Application()
+        llm_app.router.add_post("/v1/chat/completions", _chat)
+        llm_runner = web.AppRunner(llm_app, access_log=None)
+        await llm_runner.setup()
+        llm_site = web.TCPSite(llm_runner, "127.0.0.1", 0)
+        await llm_site.start()
+        llm_port = llm_runner.addresses[0][1]
+        from core.agent import Agent                               # noqa: E402
+        settings.update({"llm": {"enabled": True, "stream": False,
+                                 "model": "stub", "temperature": 0.3,
+                                 "base_url": f"http://127.0.0.1:{llm_port}/v1"}})
+        pipeline.agent = Agent(settings, ha, executor)
+        try:
+            n0 = len(llm_hits)
+            r = await llm_turn(sess, port, "当我说睡觉就关闭客厅射灯")
+            check("S9d.1 本地建场景零 LLM 调用",
+                  len(ha.vscenes) == 1 and len(llm_hits) == n0, text_of(r))
+            r = await llm_turn(sess, port, "把自动化1改成每天早上7点关闭客厅射灯")
+            cur = ha.vautomations[0] if ha.vautomations else {}
+            check("S9d.2 本地改自动化零 LLM 调用",
+                  len(llm_hits) == n0 and cur.get("trigger") == {"at": "07:00"}
+                  and "已改成" in text_of(r), text_of(r))
+            r = await llm_turn(sess, port, "删除场景")
+            check("S9d.3 本地裸删引导零 LLM 调用",
+                  len(llm_hits) == n0 and "要删哪个场景" in text_of(r), text_of(r))
+            r = await llm_turn(sess, port, "帮我推荐一部科幻电影")
+            check("S9d.4 全未命中才交 LLM（兜底通道仍在）",
+                  len(llm_hits) == n0 + 1 and "大模型" in text_of(r),
+                  text_of(r) + f" | hits={len(llm_hits)}")
+        finally:
+            settings.update({"llm": {"enabled": False}})
+            pipeline.agent = None
+            await llm_runner.cleanup()
 
         # S10 场景模式（v1.0.30 SetMode 语料吸收：preset 英文规范名直发）
         print("\n─ S10 场景模式 ─")

@@ -139,6 +139,12 @@ def test_auto_numeric_area_inheritance():
     assert p.args["trigger"] == {"entity_id": "客厅温度", "above": 28.0}
     assert p.args["actions"][0]["intent"] == "TurnDeviceOn"
     assert "客厅" in r.text                      # 区域继承进了动作目标
+    # 继承必须是**窄目标**（2026-09-15 实证修复）：name=客厅/domains 空 的旧形态
+    # 会按名字子串命中客厅全部设备（灯/窗帘/通道/门锁一起动）
+    tgt = p.args["actions"][0]["params"]["target"][0]
+    assert not (tgt.get("devices") or [{}])[0].get("name") == "客厅"
+    assert (tgt.get("area") == "客厅"
+            or (tgt.get("devices") or [{}])[0].get("domains"))
 
 
 def test_auto_presence_and_time_shapes():

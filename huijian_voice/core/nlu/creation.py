@@ -84,6 +84,21 @@ _SCENE_MOD_RE = re.compile(
     r"(?:改成|改为|换成|换做|修改为|修改成|变为|变成)\s*"
     r"(?:(?:就|帮我|请|要|给我)\s*)?(?P<y>\S(?:.*\S)?)$")
 
+# ①h 裸删场景（本地闭环补全）：只说"删除场景/把场景删掉"不带名字——不猜、
+# 不交由 LLM，本地列清单+编号引导（与裸删自动化同纪律；trigger_phrase=""）。
+_SCENE_DEL_BARE_RE = re.compile(
+    r"^(?:(?:帮我|请|我要)\s*)?(?:删除|删掉|移除|删)\s*(?:语音)?场景\s*(?:列表)?\s*$"
+    r"|^把\s*(?:语音)?场景\s*(?:给我)?\s*删(?:掉|了|除)?\s*$")
+
+# ①i 自动化修改（本地闭环补全）：把自动化N改成<新句> / 修改自动化N的动作，改成<Y>。
+# Y 是否为完整条件句由 pipeline 判定：是→连触发条件一起换；只是动作→保留原条件。
+_AUTO_MOD_RE = re.compile(
+    r"^(?:(?:帮我|请|我要)\s*)?(?:把|将)?\s*(?:修改|更改|调整)?\s*(?:语音)?自动化\s*"
+    r"[「\"『]?(?P<t>[^「」\"』，,。;；\s]{1,14}?)[」\"』]?\s*(?:这|那)?(?:一)?(?:条|个)?\s*"
+    r"(?:的?(?:动作|内容|触发条件|条件|触发))?\s*[，,、]?\s*"
+    r"(?:改成|改为|换成|换做|修改为|修改成|变为|变成)\s*"
+    r"(?:(?:就|帮我|请|要|给我)\s*)?(?P<y>\S(?:.*\S)?)$")
+
 _CN_IDX = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
            "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
 
@@ -284,6 +299,7 @@ def parse(text: str) -> Optional[dict[str, Any]]:
       {kind:"automation", trigger:{...}, desc, y}           创建语音自动化
       {kind:"delete_scene", trigger_phrase}                 删除语音场景
       {kind:"modify_scene", trigger_phrase, y}              改语音场景动作
+      {kind:"modify_automation", target, y}                 改自动化（y=新条件句或仅新动作）
       {kind:"list_scenes"|"list_automations"}               列出
       {kind:"delete_automation", target:raw}                删自动化(序号/关键词/裸)
       {kind:"delete_index", n:int}                          「删第N条」回指上次清单
@@ -295,14 +311,25 @@ def parse(text: str) -> Optional[dict[str, Any]]:
     m = _SCENE_DEL_RE.match(t)                    # 删除句先过闸（不含"当"系字）
     if m:
         x = (m.group("x") or m.group("x2") or "").strip()
+        if x in ("给我", "我", "它", "吧"):        # "把场景给我删了" 实为裸删
+            return {"kind": "delete_scene", "trigger_phrase": ""}
         if 1 <= len(x) <= 12:
             return {"kind": "delete_scene", "trigger_phrase": x}
         return None
+    if _SCENE_DEL_BARE_RE.match(t):               # 裸删：本地列清单+编号引导
+        return {"kind": "delete_scene", "trigger_phrase": ""}
     m = _SCENE_MOD_RE.match(t)                    # 改场景（v1.0.34）
     if m:
         x, y = m.group("x").strip(), _clean_y(m.group("y"))
         if 1 <= len(x) <= 12 and len(y) >= 2:
             return {"kind": "modify_scene", "trigger_phrase": x, "y": y}
+        return None
+    m = _AUTO_MOD_RE.match(t)                     # 改自动化（本地闭环补全）
+    if m:
+        raw = (m.group("t") or "").strip().strip("这那")
+        y = _clean_y(m.group("y"))
+        if raw and raw not in ("的", "动作", "内容", "条件", "触发条件") and len(y) >= 2:
+            return {"kind": "modify_automation", "target": raw, "y": y}
         return None
     m = _AUTO_DEL_RE.match(t)                     # 删自动化（v1.0.34）
     if m:

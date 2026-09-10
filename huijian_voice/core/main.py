@@ -162,6 +162,7 @@ class Service:
                     "stt_loaded": self.asr.ready(), "tts_loaded": self.tts.ready(),
                     "textcnn": self.textcnn.available,
                     "llm_enabled": bool(self.settings.get("llm.enabled")),
+                    "nlu_enabled": bool(self.settings.get("nlu.enabled", True)),
                     "ts": time.time(),
                 }
                 _atomic_write(const.STATUS_FILE, json.dumps(snap, ensure_ascii=False))
@@ -195,8 +196,28 @@ class Service:
         try:
             self.textcnn.set_thresholds_override(data.get("nlu", {}).get("thresholds_override") or {})
             self._write_endpoints()
+            self._warn_local_nlu(data)
         except Exception:
             logger.exception("[配置] 热应用失败")
+
+    def _warn_local_nlu(self, data: dict) -> None:
+        """本地理解总开关关掉＝场景触发词/场景自动化本地建・改・删/本地查询/音乐带
+        全停（只剩大模型）。离场必须留痕：现场支持第一眼就能看到根因；两端都关再
+        点明"只会回固定兜底"。只在开关翻转时告警，避免每次保存刷日志。"""
+        nlu = data.get("nlu", {}) or {}
+        llm = data.get("llm", {}) or {}
+        off = nlu.get("enabled", True) is False
+        prev = getattr(self, "_nlu_warn_off", False)
+        self._nlu_warn_off = off
+        if off == prev:
+            return
+        if not off:
+            logger.info("[配置] 本地理解已恢复启用：场景触发词/本地建改删/查询族/音乐带恢复工作")
+        elif llm.get("enabled") and str(llm.get("base_url") or "").strip():
+            logger.warning("[配置] 本地理解已关闭：语音场景触发词、场景/自动化本地建・改・删、"
+                           "本地查询、音乐带全部停用，仅大模型兜底")
+        else:
+            logger.warning("[配置] 本地理解已关闭且大模型未配置：助手只会回一句固定兜底")
 
     def _write_endpoints(self) -> None:
         try:

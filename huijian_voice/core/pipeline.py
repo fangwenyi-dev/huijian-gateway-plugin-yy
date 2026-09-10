@@ -71,6 +71,57 @@ _GENERIC_DEVICE_WORDS = frozenset({
 
 _INTEGRATION_HINTS = ("集成",)
 
+# 本地 NLU 总开关（nlu.enabled=false）关掉时的兜底话术：两端都关必须说人话，
+# 不能拿"这句话我还不会"糊弄（那会把配置问题伪装成理解失败）。
+_NLU_OFF_TEXT = ("本地理解已关闭，而且还没配置大模型——请在设置里打开"
+                 "「启用本地理解」，或填好大模型端点再试")
+
+# 触发条件形状（"每天晚上8点"/"当客厅温度超过30度"）：改自动化时用户只给条件、
+# 不重复动作 → 动作沿用原样，只换触发条件。
+_TRIGGER_ONLY_RE = re.compile(r"^(?:每天|当|如果|要是|假如)")
+
+
+# 区域继承的重排动词表（"打开空调"+客厅 → "打开客厅空调"，fast_path 认的
+# 动词+区域+设备语序；单字动词排最后，避免把"开合度"类名词拦腰切断）
+_AREA_VERB_RE = re.compile(
+    r"^(打开|开启|开一下|关闭|关掉|关上|关了|拉上|拉下|调到|调成|调高|调低|"
+    r"调整|调节|设为|设成|设定|设置|锁上|解锁|停止|暂停|开|关|调|拉|锁)")
+
+
+def _area_as_name(plan: Optional[Plan], area: str) -> bool:
+    """区域被当成了设备名（target 无 area、name=区域、domains 空）——执行侧按
+    名字子串命中（"客厅"∈"客厅射灯/客厅空调/客厅窗帘"）会把整个区域的设备都开了，
+    属于"过宽目标"，绝不允许进场景/自动化，也不许直接执行。"""
+    tgt = (plan.args or {}).get("target") if plan is not None else None
+    if not isinstance(tgt, list) or not tgt:
+        return True
+    for t in tgt:
+        if not isinstance(t, dict):
+            return True
+        if str(t.get("area") or "").strip():
+            continue                              # 有区域限定 → 窄目标，放行
+        for d in (t.get("devices") or []):
+            if not isinstance(d, dict):
+                return True
+            if str(d.get("name") or "").strip() == area and not (d.get("domains") or []):
+                return True
+    return False
+
+
+def _reorder_area(clause: str, area: str) -> Optional[str]:
+    """「打开空调」→「打开客厅空调」；「把空调打开」→「客厅空调打开」。
+    两条都是 fast_path 认得的语序，产出 区域+设备+domains 的规范目标；
+    无法安全重排（无动词可切）返回 None，交由调用方如实拒收。"""
+    s = (clause or "").strip()
+    m = _AREA_VERB_RE.match(s)
+    if m:
+        rest = s[m.end():].strip()
+        return f"{m.group(1)}{area}{rest}" if rest else None
+    s2 = re.sub(r"^[把将]\s*", "", s)
+    if s2 and s2 != s:
+        return f"{area}{s2}"                      # 设备在前：区域+设备+动作
+    return None
+
 
 def _mentions_window_device(args: Any) -> bool:
     """慧尖场景里「窗」多为开合器按钮，cover 服务表达不了内倒/暂停。
@@ -350,6 +401,16 @@ class Pipeline:
         if answered is not None:
             return answered
 
+        # nlu.enabled=false：本地理解全线让位（快速通道/场景契约/查询族/场景与
+        # 自动化本地承接一律不参与），只剩 LLM 兜底——开关必须说到做到，否则
+        # 用户"关了 NLU 却还被本地拦截"就是配置与行为打架（本次修订核心之一）。
+        if not self.settings.get("nlu.enabled", True):
+            if self.agent and self.agent.enabled:
+                llm = await self._llm(text, origin, on_sentence)
+                if llm:
+                    return llm
+            return Reply(_NLU_OFF_TEXT, "fallback", ok=False, trace=["NLU已关闭"])
+
         # v1.0.30 语音创建承接（零 LLM）：「当我说X就Y」/「当[事件]就Y」。
         # 必须前置于复合切分——创建句内的"并/然后"属于 Y 子句内容，不能被链发。
         created = await self._voice_creation(text, origin)
@@ -366,10 +427,16 @@ class Pipeline:
         plan = select_primary_plan(fp_plan, kl_plan)
         plan = self._apply_context(plan, text, origin)
         if plan:
+            ob = self._overbroad_area_target(plan)
+            if ob:
+                logger.info("[级联] 过宽目标拦截（%s 全部设备）：%s", ob, plan.args)
+                return Reply(self._overbroad_say(ob), "clarify", ok=False,
+                             trace=[f"过宽目标拦截:{ob}"])
             ask = self._confirm_ask(plan, origin)
             if ask is not None:
                 return ask
             ok, speech = await self.executor.run(plan)
+            exec_risk = self._exec_risk()          # 本次执行是否可能已生效（防复议重放）
             trace = list(plan.trace)
             if not ok:
                 fb = select_fallback_plan(plan, fp_plan, kl_plan, speech)
@@ -381,6 +448,7 @@ class Pipeline:
                     logger.info("[级联] %s 执行失败 → 降级 %s:%s（%r）",
                                 plan.source, fb.source, fb.intent, speech[:24])
                     ok2, speech2 = await self.executor.run(fb)
+                    exec_risk = exec_risk or self._exec_risk()
                     trace.append(f"降级→{fb.source}:{fb.intent}" + ("✓" if ok2 else "✗"))
                     if ok2:
                         self._note_target(origin, fb)
@@ -393,12 +461,18 @@ class Pipeline:
                 self._note_target(origin, plan)
                 self._remember_turn(origin, text, speech)
                 return Reply(speech, plan.source, True, trace)
-            # 快速通道（klar+慧尖意图）双双用尽：LLM 配置了就复议，没配如实播失败
-            if self.agent and self.agent.enabled:
+            # 快速通道（klar+慧尖意图）双双用尽：LLM 配置了就复议，没配如实播失败。
+            # 安全闸（本次修订）：已部分生效（多步链）或结果不确定（超时/连接/5xx）
+            # → 绝不复议——LLM 拿原句重做会把相对量动作（+10 亮度）叠加第二遍，
+            # "多一层兜底"不能变成"多一次动作"。
+            if self.agent and self.agent.enabled and not exec_risk:
                 logger.info("[级联] 快速通道执行失败 → LLM 复议: %s", speech)
                 llm = await self._llm(text, origin, on_sentence)
                 if llm:
                     return llm
+            elif exec_risk and self.agent and self.agent.enabled:
+                trace.append("复议跳过:可能已执行")
+                logger.info("[级联] 跳过 LLM 复议（本地执行可能已部分生效/结果不确定）")
             self._remember_turn(origin, text, speech)
             return Reply(speech, plan.source, False, trace)
         # ⑤ 查询族
@@ -408,6 +482,7 @@ class Pipeline:
             logger.exception("[级联] 查询族异常")
             ans = None
         if ans:
+            self._remember_turn(origin, text, ans)   # 查询轮也进 LLM 历史，防跨轮失忆
             return Reply(ans, "query", True, [f"query:{text}"])
         # ⑤b 音乐过渡带（零改动，用户定向 2026-09-12）：点歌/播控直连 HA 标准
         # media_player 服务，置于 LLM 前——点歌令绝不落入闲聊吞掉
@@ -502,6 +577,8 @@ class Pipeline:
             return await self._automation_delete(c, text, origin)
         if c["kind"] == "modify_scene":
             return await self._scene_modify(c, text, origin)
+        if c["kind"] == "modify_automation":
+            return await self._automation_modify(c, text, origin)
         if c["kind"] == "delete_index":
             return await self._index_delete(c, text, origin)
         built = await self._build_actions(c, text)
@@ -543,8 +620,16 @@ class Pipeline:
 
     async def _scene_delete(self, c: dict, text: str, origin: str) -> Reply:
         """语音删场景（v1.0.33 本地句，零 LLM）：只认带名字的精准删除；
-        触发词表在缓存里查无 → 如实报不瞎删。"""
+        触发词表在缓存里查无 → 如实报不瞎删。裸删（不带名字）本地列清单+
+        编号引导，不推到 LLM（无 LLM 时也必须能用）。"""
         x = c["trigger_phrase"]
+        if not x:
+            listed = await self._object_list({"kind": "list_scenes"}, text, origin)
+            if self._last_list is None:              # 空清单：已给创建引导
+                return listed
+            listed.text = (f"要删哪个场景？{listed.text}。"
+                           f"说「删除场景名字」或「删第N条」都行")
+            return listed
         if x not in (self.scenes.triggers or []):
             return Reply(f"没有找到叫「{x}」的语音场景；全部场景可在管理页"
                          f"「场景/自动化」查看。", "creation", ok=False,
@@ -567,6 +652,13 @@ class Pipeline:
         echo_parts: list[str] = []
         for clause in creation.split_actions(c["y"]):
             plan = await self._match_fp(clause)
+            ob = self._overbroad_area_target(plan)
+            if ob:
+                # "当我说回家就客厅开灯"这类子句：区域被当设备名 → 会把整片区域
+                # 的设备（含门锁/开关）都写进场景，绝不入库
+                logger.info("[创建] 子句过宽目标拒收 %r（%s 全部设备）", clause, ob)
+                return Reply(self._overbroad_say(ob), "creation", ok=False,
+                             trace=[f"创建拒收:过宽目标:{ob}"])
             if plan is None or plan.intent not in creation.ACTIONABLE_INTENTS:
                 plan = await self._retry_with_area(clause, c)
             if plan is None or plan.intent not in creation.ACTIONABLE_INTENTS:
@@ -595,13 +687,27 @@ class Pipeline:
         except Exception:
             return 0
 
+    @staticmethod
+    def _auto_index(rows: list, row: dict) -> int:
+        """行在列表里的 1-based 编号——按**对象身份**取，不用 list.index：两条内容
+        完全相同的自动化（同 trigger/同动作）用 == 比较会指到先出现那条，播报编号
+        就张冠李戴（删除仍按 automation_id 走，不会删错，但话术会骗人）。"""
+        for i, r in enumerate(rows, 1):
+            if r is row:
+                return i
+        try:
+            return rows.index(row) + 1
+        except ValueError:
+            return 0
+
     def _auto_say(self, i: int, a: dict) -> str:
         """单条自动化 → 「1，当…就…」（编号=删除锚点）。"""
         from .admin_api import _hv_trigger_cn, _hv_action_cn
         trig = _hv_trigger_cn(a.get("trigger") or {})
         acts = "；".join(filter(None, (_hv_action_cn(x)
                                    for x in (a.get("actions") or [])[:2])))
-        return f"{i}，{trig}的时候{acts or '执行动作'}"
+        head = f"{i}，" if i else ""
+        return f"{head}{trig}的时候{acts or '执行动作'}"
 
     async def _object_list(self, c: dict, text: str, origin: str) -> Reply:
         """语音列场景/列自动化（v1.0.34 本地，零 LLM）。"""
@@ -669,6 +775,26 @@ class Pipeline:
         self._last_list = None
         return await self._scene_delete({"trigger_phrase": x}, text, origin)
 
+    def _auto_hits(self, rows: list, tgt) -> list:
+        """序号/关键词 → 命中的自动化行（删与改共用同一套匹配纪律）。"""
+        hit: list = []
+        if isinstance(tgt, int):
+            if 1 <= tgt <= len(rows):
+                hit = [rows[tgt - 1]]
+            return hit
+        from .admin_api import _hv_action_cn
+        kw = str(tgt)
+        for a in rows:
+            if not isinstance(a, dict):
+                continue
+            trig = a.get("trigger") or {}
+            hay = str(trig.get("entity_id") or "") + str(trig.get("at") or "") + \
+                "；".join(filter(None, (_hv_action_cn(x)
+                                      for x in (a.get("actions") or []))))
+            if kw in hay:
+                hit.append(a)
+        return hit
+
     async def _automation_delete(self, c: dict, text: str, origin: str) -> Reply:
         """语音删自动化（v1.0.34）：序号/关键词精准命中才删；裸删列编号引导。"""
         rows = await self._automation_rows()
@@ -682,30 +808,16 @@ class Pipeline:
         if tgt is None:                            # 裸删：列编号，让用户点名
             items = "；".join(self._auto_say(i, a) for i, a in enumerate(rows[:5], 1)
                               if isinstance(a, dict))
+            self._last_list = "automation"          # 清单编号即锚点，「删第N条」直接可用
             return Reply(f"要删哪一条？你说「删除自动化序号」：{items}",
                          "creation", True, trace=["删自动化:引导"])
-        hit = []
-        if isinstance(tgt, int):
-            if 1 <= tgt <= len(rows):
-                hit = [rows[tgt - 1]]
-        else:
-            from .admin_api import _hv_action_cn
-            kw = str(tgt)
-            for a in rows:
-                if not isinstance(a, dict):
-                    continue
-                hay = str((a.get("trigger") or {}).get("entity_id") or "") + \
-                    str((a.get("trigger") or {}).get("at") or "") + \
-                    "；".join(filter(None, (_hv_action_cn(x)
-                                          for x in (a.get("actions") or []))))
-                if kw in hay:
-                    hit.append(a)
+        hit = self._auto_hits(rows, tgt)
         if not hit:
             return Reply(f"没有找到和「{tgt}」对应的语音自动化，"
                          f"说「有哪些自动化」可以看清单",
                          "creation", ok=False, trace=[f"删自动化未命中:{tgt}"])
         if len(hit) > 1:
-            items = "；".join(self._auto_say(rows.index(h) + 1, h)
+            items = "；".join(self._auto_say(self._auto_index(rows, h), h)
                               for h in hit[:5])
             return Reply(f"「{tgt}」匹配到{len(hit)}条，说得再具体些：{items}",
                          "creation", True, trace=[f"删自动化多义:{tgt}"])
@@ -716,7 +828,94 @@ class Pipeline:
         if not ok:
             return Reply("抱歉，自动化没删除成功，稍后再试", "creation", ok=False,
                          trace=plan.trace)
-        say = f"好的，{self._auto_say(rows.index(hit[0]) + 1, hit[0])}这条自动化已删除"
+        say = f"好的，{self._auto_say(self._auto_index(rows, hit[0]), hit[0])}这条自动化已删除"
+        self._remember_turn(origin, text, say)
+        return Reply(say, "creation", True, plan.trace)
+
+    async def _automation_modify(self, c: dict, text: str, origin: str) -> Reply:
+        """语音改自动化（本地闭环补全，零 LLM）：新句是完整条件句 → 连触发条件
+        一起换；只给动作 → 保留原触发条件只换动作；只给条件（"每天…点"）→ 只换
+        条件动作不变。动作子句听不懂 → 整单拒绝，旧数据零改动（同创建纪律）。
+        执行走集成 HassUpdateAutomation（trigger/actions 可给其一），不删旧建新。"""
+        rows = await self._automation_rows()
+        if rows is None:
+            return Reply("暂时读不到自动化列表，稍后再试", "creation", ok=False,
+                         trace=["改自动化:列表失败"])
+        if not rows:
+            return Reply("你还没有语音自动化，不用修改。说「当客厅温度超过28度"
+                         "就打开空调」就能创建一个", "creation", True,
+                         trace=["改自动化:空"])
+        tgt = creation.auto_target(c.get("target", ""))
+        if tgt is None:
+            return Reply("要改哪一条？说「有哪些自动化」听一遍编号，再说"
+                         "「把自动化1改成每天早上8点打开客厅灯」",
+                         "creation", ok=False, trace=["改自动化:无目标"])
+        hit = self._auto_hits(rows, tgt)
+        if not hit:
+            return Reply(f"没有找到和「{tgt}」对应的语音自动化，"
+                         f"说「有哪些自动化」可以看清单",
+                         "creation", ok=False, trace=[f"改自动化未命中:{tgt}"])
+        if len(hit) > 1:
+            items = "；".join(self._auto_say(self._auto_index(rows, h), h)
+                              for h in hit[:5])
+            return Reply(f"「{tgt}」匹配到{len(hit)}条，说得再具体些：{items}",
+                         "creation", True, trace=[f"改自动化多义:{tgt}"])
+        row = hit[0]
+        idx = self._auto_index(rows, row)
+        new_text = str(c.get("y") or "").strip()
+        inner = creation.parse(new_text)
+        trigger = desc = None
+        y_text = new_text
+        if isinstance(inner, dict) and inner.get("kind") == "automation":
+            trigger = inner["trigger"]
+            desc = str(inner.get("desc") or "")
+            y_text = inner["y"]
+        elif _TRIGGER_ONLY_RE.match(new_text):
+            # 只给触发条件：借一次"条件+占位动作"解析取 trigger，动作表不动
+            probe = creation.parse(new_text + "就打开客厅灯")
+            if isinstance(probe, dict) and probe.get("kind") == "automation":
+                trigger = probe["trigger"]
+                desc = str(probe.get("desc") or "")
+                y_text = ""
+        actions: Optional[list] = None
+        y_say = ""
+        if y_text:
+            if trigger is None:
+                # 仅改动作：旧触发条件里的区域名（"客厅温度"→客厅）作为无目标
+                # 动作句的区域继承来源，让「把自动化1的动作改成打开空调」可执行
+                desc = str((row.get("trigger") or {}).get("entity_id") or "")
+            built = await self._build_actions(
+                {"kind": "automation", "y": y_text, "desc": desc or ""}, text)
+            if isinstance(built, Reply):
+                return built                        # 动作听不懂：旧数据原样不动
+            actions, y_say = built
+        if trigger is None and actions is None:
+            return Reply(self._creation_reject(
+                {"kind": "automation"},
+                f"{new_text}（要带上触发条件或动作）"), "creation", ok=False,
+                trace=["改自动化:无可改内容"])
+        args: dict = {"automation_id": str(row.get("automation_id") or "")}
+        if trigger:
+            args["trigger"] = trigger
+        if actions is not None:
+            args["actions"] = actions
+        plan = Plan(intent="HassUpdateAutomation", args=args, source="creation",
+                    utterance=text,
+                    trace=[f"改自动化:{idx}" + ("（含触发条件）" if trigger else "（仅动作）")])
+        ok, _ = await self.executor.run(plan)
+        if not ok:
+            return Reply("抱歉，自动化没改成功，稍后再试", "creation", ok=False,
+                         trace=plan.trace)
+        if not y_say:                               # 只换触发条件
+            say = (f"好的，自动化{idx}的触发条件已改成："
+                   f"{self._cond_say({'trigger': trigger, 'desc': desc or ''})}"
+                   f"（动作不变）")
+        elif trigger:
+            say = (f"好的，自动化{idx}已改成："
+                   f"{self._cond_say({'trigger': trigger, 'desc': desc or ''})}"
+                   f"，就{y_say}")
+        else:
+            say = f"好的，自动化{idx}的动作已改成：就{y_say}（触发条件不变）"
         self._remember_turn(origin, text, say)
         return Reply(say, "creation", True, plan.trace)
 
@@ -752,7 +951,13 @@ class Pipeline:
 
     async def _retry_with_area(self, clause: str, c: dict):
         """Y 子句无目标而事件描述带区域（"当客厅温度超28度就打开空调"）→
-        区域继承重试一次；仍听不懂照旧拒绝。"""
+        区域继承重试一次；仍听不懂照旧拒绝。
+
+        ⚠ 区域继承必须产出**窄目标**：`f"{area}{clause}"` 在 fast_path 会走
+        t0 前缀分支，把区域当成设备名（"客厅打开空调"→ name=客厅/domains 空），
+        执行侧按名字子串命中整个客厅的设备——2026-09-15 实证：这种目标会把客厅
+        所有设备一起打开。故命中"区域当名字"的形态一律作废，改用动词+区域+设备
+        语序重排（"打开客厅空调"）；重排不成 → 不继承、如实拒收。"""
         desc = str(c.get("desc") or "")
         if not desc:
             return None
@@ -760,7 +965,18 @@ class Pipeline:
         if not area:
             return None
         merged = await self._match_fp(f"{area}{clause}")
-        if merged is None or merged.intent not in creation.ACTIONABLE_INTENTS:
+        if merged is not None and (merged.intent not in creation.ACTIONABLE_INTENTS
+                                   or _area_as_name(merged, area)):
+            merged = None
+        if merged is None:
+            alt = _reorder_area(clause, area)
+            if alt:
+                merged = await self._match_fp(alt)
+                if merged is not None and (
+                        merged.intent not in creation.ACTIONABLE_INTENTS
+                        or _area_as_name(merged, area)):
+                    merged = None
+        if merged is None:
             return None
         merged.trace = (merged.trace or []) + [f"区域继承:{area}"]
         return merged
@@ -804,6 +1020,11 @@ class Pipeline:
             # 上下文注入按分句文本（先前误用整句文本，"它"会误标到首句）；
             # 链内先行目标优先，跨轮目标/卫星区域兜底。
             p = self._apply_context(p, clause, origin, seed=chain_spec)
+            ob = self._overbroad_area_target(p)
+            if ob:
+                # 链中分句过宽：整句不执行，直接引导（同单发口径）
+                return Reply(self._overbroad_say(ob), "clarify", ok=False,
+                             trace=[f"链内过宽目标拦截:{ob}"])
             if self._risky(p):
                 return None                          # 链中藏风险操作 → 不链发
             # risky 判定放到注入后：代词分句继承出「锁」类目标同样要拦
@@ -944,6 +1165,20 @@ class Pipeline:
             self._last_target[origin] = spec
             self._gc_origins()
 
+    def _exec_risk(self) -> bool:
+        """最近一次 Executor.run 是否"可能已经生效"——部分步骤已落地（多步链
+        中途失败）或失败原因不确定（超时/连接/5xx：HA 可能已执行只是回执丢了）。
+        这类回合禁止交给 LLM 复议重做。执行桩无该状态时按 False（保守放行）。"""
+        st = getattr(self.executor, "last_run", None)
+        if not isinstance(st, dict):
+            return False
+        try:
+            if int(st.get("applied") or 0) > 0:
+                return True
+            return bool(st.get("indeterminate"))
+        except (TypeError, ValueError):
+            return False
+
     def _remember_turn(self, origin: str, user: str, assistant: str) -> None:
         if not origin:
             origin = "panel"
@@ -980,6 +1215,57 @@ class Pipeline:
             if a:
                 msgs.append({"role": "assistant", "content": a})
         return msgs
+
+    def _known_areas(self) -> set:
+        """已知区域名集合（HA 区域注册表缓存 + 卫星区域映射）。取不到=空集，
+        闸门随之失效（宁可不拦，也不误拦）。"""
+        areas: set = set()
+        try:
+            areas.update(str(v) for v in (getattr(self.ha, "_areas", {}) or {}).values())
+        except Exception:
+            pass
+        try:
+            areas.update(str(v) for v in
+                         (self.settings.get("spatial.satellite_areas", {}) or {}).values())
+        except Exception:
+            pass
+        return {a.strip() for a in areas if a and str(a).strip()}
+
+    def _overbroad_area_target(self, plan: Optional[Plan]) -> Optional[str]:
+        """target 只有"区域名当设备名"+空 domains（"客厅开灯"→name=客厅/domains=[]）
+        → 执行侧按名字子串命中**该区域所有设备**（灯、窗帘、开关、门锁一起动，
+        2026-09-15 实测复现）。命中返回区域名，安全返回 None。
+
+        这类目标一律不执行、不入库，改用一句引导让用户说清设备——按项目既定
+        纪律「比礼貌失败糟糕得多」处理。"""
+        if plan is None:
+            return None
+        areas = self._known_areas()
+        if not areas:
+            return None
+        tgt = (plan.args or {}).get("target")
+        if not isinstance(tgt, list) or not tgt:
+            return None
+        for t in tgt:
+            if not isinstance(t, dict) or str(t.get("area") or "").strip():
+                continue
+            devs = t.get("devices")
+            if not isinstance(devs, list):
+                continue
+            # 逐台检查（不假设"只有一台"）：klar 多目标/复合目标里混进一个
+            # "区域当设备名"同样会把整片区域带开，必须一并拦下
+            for d in devs:
+                if not isinstance(d, dict) or d.get("domains"):
+                    continue
+                nm = str(d.get("name") or "").strip()
+                if nm and nm in areas:
+                    return nm
+        return None
+
+    @staticmethod
+    def _overbroad_say(area: str) -> str:
+        return (f"「{area}」里设备不止一台，我不确定你要哪一台，这次先不动。"
+                f"说具体点就行，比如「打开{area}的灯」或「打开{area}空调」")
 
     # ── P2-13 风险操作确认环 ───────────────────────────────────
     def _risky(self, plan: Plan) -> bool:
@@ -1042,6 +1328,14 @@ class Pipeline:
 
         v1.0.9：plan 展示**真实会被执行的裁决结果**（scene>慧尖独占>klar>
         字面表剩余），并附 fast_path / klar 两路原始命中，调试面板直视分派依据。"""
+        llm_on = bool(self.agent and self.agent.enabled)
+        if not self.settings.get("nlu.enabled", True):
+            # 本地理解已关：面板必须如实说"没有任何本地命中"，否则调试结论全错
+            out: dict = {"nlu_enabled": False, "plan": None, "fast_path": None,
+                         "klar": None, "llm_enabled": llm_on}
+            if not llm_on:
+                out["final"] = _NLU_OFF_TEXT
+            return out
         fp_plan, kl_plan = await self._match_pair(text)   # 与真流量同构（并行）
         plan = select_primary_plan(fp_plan, kl_plan)
 
@@ -1050,7 +1344,8 @@ class Pipeline:
                 "intent": p.intent, "args": p.args, "source": p.source,
                 "trace": p.trace, "speech": getattr(p, "speech", ""),
                 "extra_steps": getattr(p, "extra_steps", [])}
-        out = {"plan": _dump(plan), "fast_path": _dump(fp_plan), "klar": _dump(kl_plan)}
+        out = {"nlu_enabled": True, "plan": _dump(plan),
+               "fast_path": _dump(fp_plan), "klar": _dump(kl_plan)}
         if plan is None:
             try:
                 out["query_answer"] = await self.query.answer(text)

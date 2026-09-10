@@ -124,7 +124,13 @@ def test_scene_delete_phrases():
 
 
 def test_scene_delete_requires_explicit_name():
-    for s in ("删除场景", "把场景删了", "删除所有场景", "删了"):
+    """裸删（不带名字）本地只出"列清单+编号引导"（trigger_phrase 空=不执行删除），
+    批量语义（"删除所有场景"）与无意义残句仍不接——一句话清库绝不本地承接。"""
+    for s in ("删除场景", "删除语音场景", "把场景删了", "把场景给我删了"):
+        p = cr.parse(s)
+        assert p is not None and p.get("kind") == "delete_scene", s
+        assert p.get("trigger_phrase") == "", s          # 空名=引导，非删除目标
+    for s in ("删除所有场景", "删了"):
         p = cr.parse(s)
         assert p is None or p.get("kind") != "delete_scene", s
 

@@ -144,6 +144,9 @@ def test_health(admin):
     assert st == 200
     j = json.loads(body)
     assert j["ok"] and "version" in j and j["models_ready"]
+    # 两个总开关都要透出：本地理解关掉＝场景触发词/本地建改删/查询族/音乐带全停，
+    # 首页必须能一眼看见（settings 桩里 nlu 无键 → 默认按"开"）
+    assert j["nlu_enabled"] is True and "llm_enabled" in j
 
 
 def test_settings_roundtrip(admin):

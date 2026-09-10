@@ -559,9 +559,12 @@ class FastPath:
         if (intent in ("TurnDeviceOn", "TurnDeviceOff") and name and area is None
                 and str(name).strip() in _MUSIC_WORDS):
             return self._miss(trace, f"音乐泛词:{name}→交音乐带")
-        # 空调区域守卫（原 L662-668）
-        if name and any(k in name.lower() for k in ("空调", "空調", "aircondition")):
-            if not area:
+        # 空调区域守卫（原 L662-668）；2026-09-15 补：动态词表（P2-17）会把
+        # 区域吸进设备名——HA 实体常叫「客厅空调」——此时 name 已自带限定，
+        # 再按"缺区域"拒执行会让这类设备的**所有**空调指令失效（无 LLM 时
+        # 直接不可用）。只有裸"空调"（或纯编号）才算真的缺区域。
+        if name and any(k in name.lower() for k in _AC_KEYWORDS):
+            if not area and not _ac_name_qualified(name):
                 return self._miss(trace, "空调缺区域信息")
         args: dict[str, Any] = {}
         if name or area:
@@ -593,6 +596,18 @@ class FastPath:
 _WINDOW_TYPES = ("内开内倒窗", "外装平开窗", "单内倒窗", "平推窗", "平开窗",
                  "推拉窗", "内开窗", "外开窗", "推拉门", "智能窗", "天窗",
                  "飘窗", "窗户")
+
+
+_AC_KEYWORDS = ("空调", "空調", "aircondition")
+
+
+def _ac_name_qualified(name: str) -> bool:
+    """设备名是否自带区域/编号限定（"客厅空调"/"办公室空调"/"2号空调"）。
+    判据：剥掉"空调"字样后还剩实义汉字——只有裸"空调"才需要用户补区域。"""
+    s = str(name or "").strip().lower()
+    for k in _AC_KEYWORDS:
+        s = s.replace(k, "")
+    return any("\u4e00" <= c <= "\u9fff" for c in s)
 
 
 def _window_type(name: str) -> Optional[str]:

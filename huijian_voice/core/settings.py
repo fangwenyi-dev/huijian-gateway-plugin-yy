@@ -43,9 +43,11 @@ DEFAULTS: dict[str, Any] = {
                   "response_format": "", "sample_rate": 0},   # 预设透传项（空/0=pcm@24k）
     },
     "nlu": {
-        "enabled": True,
+        "enabled": True,                       # 本地理解总开关：关=快速通道/场景契约/
+                                               # 查询族/场景自动化本地承接全线让位，仅 LLM 兜底
         "textcnn_enabled": True,               # T1 分类器总开关
         "query_local": True,                   # 查询族（"客厅多少度"）本地读回（M1 定案）
+        "creation_enabled": True,              # 场景/自动化语音句本地承接总开关（零 LLM）
         "thresholds_override": {},             # 按类阈值微调（默认用 intent.thresholds.json）
         "corrections_extra": {},               # 用户自定义热词纠错（追加到 58 条基础表）
     },
@@ -67,8 +69,8 @@ DEFAULTS: dict[str, Any] = {
         "temperature": 0.3,
         "history_rounds": 10,
         "max_tool_rounds": 3,
-        "allow_scene_write": True,
-        "allow_automation_write": False,       # v2 定案：LLM 写自动化默认关，需二次确认
+        "allow_scene_write": True,             # LLM 写语音场景（本地句已零 LLM 覆盖，LLM 是兜底）
+        "allow_automation_write": False,       # v2 定案：LLM 写自动化默认关（本地句可直接建）
         "stream": True,                        # 体验批 P2-15：SSE 流式（平台不认自动回退整包）
     },
     "dialog": {
