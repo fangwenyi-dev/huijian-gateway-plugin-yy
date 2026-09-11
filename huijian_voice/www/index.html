@@ -14,8 +14,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#1d1750">
 <title>慧尖HA语音插件</title>
-<link rel="stylesheet" href="css/huijian.css?v=1.0.46">
-<link rel="stylesheet" href="css/voice.css?v=1.0.46">
+<link rel="stylesheet" href="css/huijian.css?v=1.0.47">
+<link rel="stylesheet" href="css/voice.css?v=1.0.47">
 </head>
 <body>
 <!-- 「星辰大海」背景层（与网关加载项同一设计标准/同一固定种子＝同一片天）：
@@ -270,7 +270,7 @@
 
 <script>
 "use strict";
-const CURRENT_VERSION = "1.0.46";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
+const CURRENT_VERSION = "1.0.47";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
 // 音色表 = kokoro-multi-lang-v1_1 官方 103 sid 全表（k2-fsa docs sid 表实证；
 // 标注=对用户上传试听样本的 CAM++ 声纹溯源榜：v1_1 不含晓晓/云扬，
 // sid18=zf_026 女声最似晓晓(0.454 全场最近)，sid81=zm_055 最似云扬）
@@ -738,6 +738,6 @@ $("#regenBtn").onclick = async ()=>{
   try { await post("/api/token/regenerate",{}); toast("已重置"); loadEndpoints(); } catch(e){ toast(e.message); }
 };
 </script>
-<script src="js/starsky.js?v=1.0.46"></script>
+<script src="js/starsky.js?v=1.0.47"></script>
 </body>
 </html>
