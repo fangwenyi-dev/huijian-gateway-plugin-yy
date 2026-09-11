@@ -36,6 +36,13 @@ sys.path.insert(0, str(ROOT))
 ASAT_MAIN = ROOT / "custom_components" / "huijian_ai" / "assist_satellite.py"
 ASAT_STORE = ROOT.parent / "yyjicheng" / "custom_components" / "huijian_ai" / "assist_satellite.py"
 
+# 商店工作副本（yyjicheng/）gitignored、CI 检出树没有——在位才参与双钉。
+# 首版钉把 store 硬列进 parametrize，v1.0.43 CI 首跑 8 条 [store] FileNotFoundError，
+# 教训即本行（CI 实锤：yyjicheng 不作为测试对象，见 test_v1034_fixes 注释）。
+_COPIES = [pytest.param(ASAT_MAIN, id="main")]
+if ASAT_STORE.exists():
+    _COPIES.append(pytest.param(ASAT_STORE, id="store"))
+
 
 def _extract_method(path: Path, name: str, extra_ns: dict | None = None):
     """从类体内按名摘出单个方法为模块级函数执行（不复制逻辑）。
@@ -123,7 +130,7 @@ def _with_watchdog(fn, seconds=5):
         signal.signal(signal.SIGALRM, old)
 
 
-@pytest.mark.parametrize("path", [ASAT_MAIN, ASAT_STORE], ids=["main", "store"])
+@pytest.mark.parametrize("path", _COPIES)
 class TestPickPipelineIndex:
     def test_terminates_when_entity_registered_but_stateless(self, path):
         """钉原炸点：两个 wake_word select 都在注册表、都无状态（禁用实体形态）
@@ -165,7 +172,7 @@ def _wrapper(path: Path):
     return _extract_method(path, "handle_pipeline_start", ns)
 
 
-@pytest.mark.parametrize("path", [ASAT_MAIN, ASAT_STORE], ids=["main", "store"])
+@pytest.mark.parametrize("path", _COPIES)
 class TestStartWrapper:
     def test_impl_exception_returns_none(self, path):
         async def boom(self, *args):
@@ -193,7 +200,7 @@ class TestStartWrapper:
 
 # ── 源码形态钉：两份副本同修同形，防"骨架回退"再引入不推进的 continue ──
 
-@pytest.mark.parametrize("path", [ASAT_MAIN, ASAT_STORE], ids=["main", "store"])
+@pytest.mark.parametrize("path", _COPIES)
 def test_copies_share_the_fix(path):
     src = path.read_text(encoding="utf-8")
     assert "async def _handle_pipeline_start_impl(" in src, "wrapper 拆分丢失（异常兜底失效入口）"

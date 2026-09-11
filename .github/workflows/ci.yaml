@@ -432,7 +432,7 @@ jobs:
   # 定案背景：Gitee 无 webhook 自动 release，历史做法是发版后手动补最新
   # 一条（"只发最新版"规矩）。此 job 把该人工步骤自动化：body 取
   # CHANGELOG 对应版本段、target_commitish 必带（API 缺省行为不可靠）、
-  # 幂等且**正文自愈**（同 tag 存在则 PUT 同步 CHANGELOG 最新正文，v1.0.42 起；
+  # 幂等且**正文自愈**（同 tag 存在则 PATCH 同步 CHANGELOG 最新正文，v1.0.43 起；PUT 必 405，
   # 旧版"存在即跳过"会让发版后的文档补记永久漂移）、401 时给出 BOM/凭据排障提示
   # （.gitee_token 曾带 UTF-8 BOM 致 API 崩，Secret 值必须是纯 ASCII token）。
   gitee-release:
@@ -491,7 +491,7 @@ jobs:
           body = body + "\n\n---\n完整记录见 GitHub 仓库 CHANGELOG.md 与 Release v%s。" % ver
           # v1.0.42 发版后补记教训（星辰大海段 Gitee 缺、GitHub 有）：旧逻辑
           # 「存在即跳过」让 release 创建之后的 CHANGELOG 修正永远漂移在镜像仓外。
-          # 新逻辑：tag 直查（别拿 per_page=100 赌列表序）——存在则 PUT 同步正文，
+          # 新逻辑：tag 直查（别拿 per_page=100 赌列表序）——存在则 PATCH 同步正文，
           # 不存在才创建。Gitee 无 webhook，本 job 是唯一同步通道。
           try:
               existing = call(f"{api}/releases/tags/v{ver}?access_token={tok}")
@@ -500,8 +500,9 @@ jobs:
                   raise
               existing = None
           if existing and existing.get("id"):
+              # 405 实锤（df92fa5 CI）：Gitee 更新发行版走 PATCH，PUT 必 405
               r = call(f"{api}/releases/{existing['id']}?access_token={tok}",
-                       {"body": body}, method="PUT")
+                       {"body": body}, method="PATCH")
               print(f"Gitee Release 已同步正文: id={r.get('id', existing['id'])} tag=v{ver}")
               sys.exit(0)
           r = call(f"{api}/releases?access_token={tok}", {
