@@ -93,6 +93,9 @@ _CONFIG_TIMEOUT_SEC = 5
 # 宁可丢开头也不丢刚说的话，且绝不无界涨。
 _MAX_AUDIO_QUEUE_CHUNKS = 160
 _AUDIO_DROP_LOG_EVERY = 100       # 丢包告警限频（1 次 + 每 100 块）
+# v1.0.43：wake_word select 扫描硬上限（本集成只建 0/1 两个，留足余量）。
+# 挑索引环以此兜底——注册表异常也绝不可能无限推进（防事件循环挂死类事故复发）。
+_MAX_WAKE_WORD_SELECTS = 16
 _STREAM_END_POLL_S = 0.5          # v1.0.41 审查 S4：哨兵被挤丢后"pending+排空"兜底的观察节拍
 
 
@@ -530,7 +533,64 @@ class EsphomeAssistSatellite(
             preannounce_media_id=preannounce_media_id or "",
         )
 
+    def _pick_wake_word_pipeline_index(self, wake_word_phrase: str | None) -> int:
+        """按唤醒词挑激活的 pipeline 索引（0=默认）。
+
+        v1.0.43 挂死根治：本方法替换 handle_pipeline_start 里的内联 while 环。
+        旧内联版在「select 实体在注册表但无状态」（用户禁用该 CONFIG 实体，或
+        HA 重启窗口 select 尚未 added）时走 `continue` 而**不推进索引**——
+        get_wake_word_entity 对同一 index 恒返回同一 entity_id，while True 即
+        成死循环，且它在 `while not queue.empty(): await` 之前没有任何挂起点
+        → **整个 HA 事件循环冻结**：VoiceAssistantResponse 永不发出（设备侧
+        "HA did not answer Request in time"×2 → 强拆连接），client 连断开都
+        读不到、更不重连（设备侧 "No API client …" 久无回连）——正是现场
+        "看得见连接、听不见回答、永远连不回"的签名。上游（official esphome）
+        语义是**每轮无条件推进**；本实现照抄并另加硬上限，注册表怎么烂都挂不了。
+        """
+        index = 0
+        while index < _MAX_WAKE_WORD_SELECTS:
+            ww_entity_id = self.get_wake_word_entity(index)
+            if not ww_entity_id:
+                break
+            ww_state = self.hass.states.get(ww_entity_id)
+            if ww_state is not None and ww_state.state == wake_word_phrase:
+                # First match
+                return index
+            # Try next wake word select
+            index += 1
+        return 0
+
     async def handle_pipeline_start(
+        self,
+        conversation_id: str,
+        flags: int,
+        audio_settings: VoiceAssistantAudioSettings,
+        wake_word_phrase: str | None,
+    ) -> int | None:
+        """Handle pipeline run request.
+
+        v1.0.43 外层异常兜底：aioesphomeapi 只在 start 回调**正常完成**时才回
+        VoiceAssistantResponse——回调抛异常 = 设备侧 8s 黑屏「HA did not answer
+        Request」，与事件循环挂死在现场不可区分。返回 None 让 client 回
+        error=True → 设备走 failed_to_start 拿到显式拒绝（不计半开熔断），
+        异常整栈落 HA 日志直接可归因。
+        """
+        try:
+            return await self._handle_pipeline_start_impl(
+                conversation_id, flags, audio_settings, wake_word_phrase
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _LOGGER.exception(
+                "慧尖卫星 pipeline 启动异常 → 已向设备回 error（conversation_id=%s "
+                "wake_word=%r）",
+                conversation_id,
+                wake_word_phrase,
+            )
+            return None
+
+    async def _handle_pipeline_start_impl(
         self,
         conversation_id: str,
         flags: int,
@@ -587,24 +647,12 @@ class EsphomeAssistSatellite(
             # ANNOUNCEMENT format from media player
             self._update_tts_format()
 
-        # Run the appropriate pipeline.
-        self._active_pipeline_index = 0
-
-        maybe_pipeline_index = 0
-        while True:
-            if not (ww_entity_id := self.get_wake_word_entity(maybe_pipeline_index)):
-                break
-
-            if not (ww_state := self.hass.states.get(ww_entity_id)):
-                continue
-
-            if ww_state.state == wake_word_phrase:
-                # First match
-                self._active_pipeline_index = maybe_pipeline_index
-                break
-
-            # Try next wake word select
-            maybe_pipeline_index += 1
+        # Run the appropriate pipeline. v1.0.43：挑索引逻辑移入
+        # _pick_wake_word_pipeline_index（原内联环在实体无状态时不推进索引
+        # →冻结事件循环，见该方法 docstring）。
+        self._active_pipeline_index = self._pick_wake_word_pipeline_index(
+            wake_word_phrase
+        )
 
         _LOGGER.debug(
             "Running pipeline %s from %s to %s",
