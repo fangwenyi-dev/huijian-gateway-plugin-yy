@@ -31,7 +31,12 @@ def _voices_status(ctx) -> dict:
             return ctx.tts.voices_status()
         except Exception as e:
             logger.warning("[音色] 面板读数失败：%s", e)
-    official_n = int(ctx.store.voices_count_for(_KEY) or 0) if getattr(ctx, "store", None) else 0
+    official_n = 0
+    if getattr(ctx, "store", None):
+        try:
+            official_n = int(ctx.store.voices_count_for(_KEY) or 0)
+        except Exception:
+            official_n = 0
     return {"official_count": official_n, "per_voice_bytes": 0,
             "dir": str(const.TTS_VOICES_DIR), "injected": {}, "preview": [],
             "degraded": True}

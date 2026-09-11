@@ -109,7 +109,8 @@ def merge_custom_voices(official, custom_dir, out, voices_count: int):
     if not custom_dir or not custom_dir.is_dir() or per_voice <= 0:
         return official, {}, skipped
     bins = sorted(p for p in custom_dir.glob("*.bin")
-                  if p.is_file() and not p.name.startswith("."))
+                  if p.is_file() and not p.name.startswith(".")
+                  and not p.name.startswith("voices_custom_merged"))   # 合并产物误落投递口时不得自吞
     usable: list[Path] = []
     for p in bins:
         size = p.stat().st_size
@@ -180,10 +181,14 @@ class TtsEngine:
         if const.TTS_VOICES_DIR.is_dir():
             i = 0
             for p in sorted(const.TTS_VOICES_DIR.glob("*.bin")):
-                if p.name.startswith("."):
+                if p.name.startswith(".") or p.name.startswith("voices_custom_merged"):
+                    continue                       # 隐藏文件与合并产物（误落投递口）不进预览
+                try:
+                    sz = p.stat().st_size          # 上传中途被替换/删除属瞬态，跳过即可
+                except OSError:
                     continue
-                ok = per > 0 and p.stat().st_size == per
-                preview.append({"name": p.stem, "size": p.stat().st_size, "valid": ok,
+                ok = per > 0 and sz == per
+                preview.append({"name": p.stem, "size": sz, "valid": ok,
                                 "sid": official_n + i if ok else None})
                 if ok:
                     i += 1

@@ -173,3 +173,30 @@ def test_store_without_voices_count_never_kills_load(tmp_path):
     assert eng._voices_count("tts_kokoro_multilang") == 0
     st = eng.voices_status()                        # 面板同样不得抛
     assert st["official_count"] == 0 and st["preview"] == []
+
+
+def test_merge_artifact_never_self_devours(tmp_path, monkeypatch):
+    """合并产物误落投递口（voices_custom_merged.bin，尺寸=官方+注入>per）：
+    merge 与面板预览都必须无视它，不得报「尺寸不符」噪音、更不得吞进尾表。"""
+    cdir = tmp_path / "cv"
+    cdir.mkdir()
+    (cdir / "voices_custom_merged.bin").write_bytes(bytes(200))
+    (cdir / "真.bin").write_bytes(bytes(64))
+    monkeypatch.setattr(const, "TTS_VOICES_DIR", cdir)
+    official = tmp_path / "voices.bin"
+    official.write_bytes(bytes(192))                  # 3×64
+    merged, names, skipped = merge_custom_voices(official, cdir, tmp_path / "out.bin", 3)
+    assert names == {"真": 3} and skipped == []       # 产物文件连 skip 噪音都不该有
+    st = _engine(tmp_path).voices_status()
+    assert [p["name"] for p in st["preview"]] == ["真"]
+
+
+def test_api_degraded_view_survives_broken_store():
+    """ctx.tts 缺席 + store 无 voices_count_for：面板必须降级视图 200，绝不 500。"""
+    from types import SimpleNamespace
+    ctx = SimpleNamespace(tts=None, store=object())
+    async def call(s, base):
+        r = await s.get(base + "/api/tts/voices")
+        return r.status, await r.json()
+    status, data = _http(ctx, call)
+    assert status == 200 and data["degraded"] and data["official_count"] == 0
