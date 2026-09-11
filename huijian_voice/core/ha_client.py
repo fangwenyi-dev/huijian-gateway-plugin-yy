@@ -240,21 +240,107 @@ class HAClient:
                 await self._load_registries()
 
     async def _load_registries(self) -> None:
+        # v1.0.44 根治：现代 HA（2024.4 起）已**删除** /api/config/* REST——区域/
+        # 实体注册表只剩 WebSocket 通道。旧实现 `if r.status == 200` 静默吞 404，
+        # _areas 恒空 → 查询族永远走「还没同步到房间信息」降级（多颗温度传感器
+        # 拒答，且用户绑定区域也无效——现场 2026-09-11 15:10 实证，klar 同机
+        # 走 WS 读到 7 个房间为对照）。新次序：WS 主通道（Bearer header /
+        # auth_required 消息双形态）→ REST 兼容老 HA；双双失败不再静默：
+        # WARN + last_error（状态页可见），杜绝"恒空但看似正常"。
+        try:
+            areas, ent_map = await self._ws_registries()
+            self._apply_registries(areas, ent_map)
+            return
+        except Exception as e:
+            logger.warning("[HA] 注册表 WebSocket 拉取失败，回落 REST（老 HA 形态）: %s", e)
+        areas, ent_map, err = await self._rest_registries()
+        if areas is None:
+            self.last_error = f"registry: ws+rest 均失败（rest: {err}）"
+            return
+        self._apply_registries(areas, ent_map)
+
+    def _apply_registries(self, areas: dict, ent_map: dict) -> None:
+        self._areas = areas
+        self._entity_area = ent_map
+        self._reg_ts = time.time()
+
+    def _ws_endpoints(self) -> list[str]:
+        """由 base 派生 WS 端点候选（_url 唯一真源同款定式）。官方实证两形态
+        （developers.home-assistant.io/docs/add-ons/communication/）：
+        supervisor http://supervisor/core/api → http://supervisor/core/websocket
+          （专用代理，SUPERVISOR_TOKEN 走 auth_required 消息认证）；
+        直连     http://h:8123(/api)          → http://h:8123/api/websocket。
+        多候选顺序试探，端点差异不赌形态。
+        """
+        b = self.base[:-4] if self.base.endswith("/api") else self.base.rstrip("/")
+        eps = []
+        if "supervisor" in b:
+            eps.append(f"{b}/websocket")          # 官方 supervisor WS 代理（实证形态）
+        eps.append(f"{b}/api/websocket")          # 直连 HA core 形态
+        return eps
+
+    async def _ws_cmd(self, ws, mtype: str) -> Any:
+        self._ws_id = getattr(self, "_ws_id", 0) + 1
+        mid = self._ws_id
+        await ws.send_json({"id": mid, "type": mtype})
+        while True:
+            m = await ws.receive_json()
+            if m.get("id") == mid:
+                if m.get("type") == "result" and m.get("success"):
+                    return m.get("result")
+                raise RuntimeError(f"{mtype} → {str(m)[:200]}")
+            # 其余帧为 event 推送（订阅制下不该出现），忽略继续等本命令结果
+
+    async def _ws_registries(self) -> tuple[dict, dict]:
+        """一次连接拉区域+实体注册表。auth 双形态：新版 HA 接受 ws 请求携带
+        Authorization header（服务端静默不发首帧）；老式连接首帧 auth_required →
+        消息认证。首帧 1s 探测区分两态。
+        """
+        last_err: Optional[Exception] = None
+        for url in self._ws_endpoints():
+            try:
+                async with self._session.ws_connect(url, timeout=10) as ws:
+                    try:
+                        first = await asyncio.wait_for(ws.receive_json(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        first = {}
+                    if first.get("type") == "auth_required":
+                        await ws.send_json({"type": "auth", "access_token": self.token})
+                        a = await ws.receive_json()
+                        if a.get("type") != "auth_ok":
+                            raise RuntimeError(f"WS 认证失败: {str(a)[:120]}")
+                    elif first.get("type") in ("auth_invalid", "auth_error"):
+                        raise RuntimeError(f"WS 认证被拒: {str(first)[:120]}")
+                    areas = {a["area_id"]: (a.get("name") or a["area_id"])
+                             for a in (await self._ws_cmd(ws, "config/area_registry/list") or [])}
+                    ent_map = {}
+                    for e in (await self._ws_cmd(ws, "config/entity_registry/list") or []):
+                        aid = e.get("area_id")
+                        if aid:
+                            ent_map[e["entity_id"]] = areas.get(aid, aid)
+                    return areas, ent_map
+            except Exception as e:  # 端点形态差异：换下一个候选
+                last_err = e
+                continue
+        raise last_err or RuntimeError("无可用 WS 端点")
+
+    async def _rest_registries(self) -> tuple[Optional[dict], Optional[dict], str]:
+        """老 HA（<2024.4）REST 兼容通道。非 200 不再静默——回传原因入 last_error。"""
         try:
             async with self._session.get(self._url("/api/config/area_registry/list")) as r:
-                if r.status == 200:
-                    self._areas = {a["area_id"]: a.get("name", a["area_id"]) for a in await r.json()}
+                if r.status != 200:
+                    return None, None, f"areas {r.status}"
+                areas = {a["area_id"]: a.get("name", a["area_id"]) for a in await r.json()}
+            ent_map = {}
             async with self._session.get(self._url("/api/config/entity_registry/list")) as r:
                 if r.status == 200:
-                    ent_map = {}
                     for e in await r.json():
                         aid = e.get("area_id")
                         if aid:
-                            ent_map[e["entity_id"]] = self._areas.get(aid, aid)
-                    self._entity_area = ent_map
-            self._reg_ts = time.time()
+                            ent_map[e["entity_id"]] = areas.get(aid, aid)
+            return areas, ent_map, ""
         except Exception as e:
-            logger.debug("[HA] registry 加载失败: %s", e)
+            return None, None, str(e)
 
     async def states(self) -> dict[str, dict]:
         await self.refresh_states()

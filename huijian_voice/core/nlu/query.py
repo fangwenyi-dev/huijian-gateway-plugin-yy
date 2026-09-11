@@ -199,8 +199,18 @@ class QueryZone:
         if not candidates:
             return None
         if len(candidates) > 1 and not have_area_data:
-            # 无区域信息且多颗同类传感器：答哪颗都是猜。诚实引导。
-            return f"家里有多个{cn}传感器，但还没同步到房间信息，请给传感器所在区域绑定设备后重试。"
+            # v1.0.44 名称兜底：区域注册表拿不到时，实体名含所说区域词且唯一
+            # 命中 → 照答（现场「办公室温度传感器多少」，传感器名往往就叫
+            # 「办公室温度」——命名规范的现场不该被"未同步房间"拒掉）。
+            if area:
+                named = [c for c in candidates if area in (c[0] or "")]
+                if len(named) == 1:
+                    candidates = named
+                else:
+                    # 无区域信息且多颗同类传感器：答哪颗都是猜。诚实引导。
+                    return f"家里有多个{cn}传感器，但还没同步到房间信息，请给传感器所在区域绑定设备后重试。"
+            else:
+                return f"家里有多个{cn}传感器，但还没同步到房间信息，请给传感器所在区域绑定设备后重试。"
         name, val = candidates[0]
         unit = {"temperature": "度", "humidity": "%", "illuminance": "勒克斯"}[device_class]
         val_s = f"{val:.1f}".rstrip("0").rstrip(".")   # 26.5→「26.5」，26.0→「26」
