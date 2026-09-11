@@ -39,7 +39,7 @@ class FakeTts:
     def ready(self):
         return True
 
-    async def stream_opus(self, text):
+    async def stream_opus(self, text, engine_out=None):
         for i in range(self.packets):
             yield self.prefix + str(i).encode()
             await asyncio.sleep(self.delay)

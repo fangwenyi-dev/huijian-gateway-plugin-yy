@@ -1,3 +1,4 @@
+import contextlib
 import logging
 
 import opuslib_next as opuslib
@@ -82,36 +83,42 @@ class HuijianTtsEntity(BaseEntity):
         # 卫星端必「Only WAV」早退，台架×固件协议审计实锤）。无 preferred 时
         # 保持旧行为 mp3。
         fmt = options.get("preferred_format") or options.get("audio_format") or "mp3"
-        await transport.send_message(
-            {
-                "type": "tts",
-                "state": "detect",
-                "text": message,
-            }
-        )
 
         async def data_gen():
-            decoder = opuslib.Decoder(self.opus_sample_rate, self.opus_channels)
-            async for resp in transport.await_message():
-                if isinstance(resp, bytes):
-                    try:
-                        resp = decoder.decode(resp, self.opus_frame_samples)
-                    except Exception as e:
-                        # v1.0.34（审查 L9）：解码失败绝不 yield 原始 opus 包——
-                        # 此前混流让卫星播噪声；丢帧保静音，日志留痕。
-                        _LOGGER.error("Decode opus failed, frame dropped: %s", e)
-                        continue
-                    _LOGGER.info("Received bytes: %s %s", len(resp), resp.hex()[0:64])
-                    yield resp
-                else:
-                    if getattr(resp, "error", None):
-                        raise RuntimeError(resp.error)
-                    _LOGGER.info("Received response: %s", resp)
+            # v1.0.45（缺字/静音错位毒化根治）：detect 发送、整流消费、收口
+            # 判定整体下沉到 TtsTransport.stream()——同连接并发请求在传输层
+            # 串行，且本轮若未以 stop 收口（本函数被取消/出错）即断连清算，
+            # 残帧绝不拖进下一次播报。此处只负责解码。finally 显式 aclose：
+            # 外层取消时确定性关停内层对话生成器，不赌 GC 时机。
+            stream = transport.stream(message)
+            try:
+                decoder = opuslib.Decoder(self.opus_sample_rate, self.opus_channels)
+                async for resp in stream:
+                    if isinstance(resp, bytes):
+                        try:
+                            resp = decoder.decode(resp, self.opus_frame_samples)
+                        except Exception as e:
+                            # v1.0.34（审查 L9）：解码失败绝不 yield 原始 opus 包——
+                            # 此前混流让卫星播噪声；丢帧保静音，日志留痕。
+                            _LOGGER.error("Decode opus failed, frame dropped: %s", e)
+                            continue
+                        _LOGGER.info(
+                            "Received bytes: %s %s", len(resp), resp.hex()[0:64]
+                        )
+                        yield resp
+                    else:
+                        if getattr(resp, "error", None):
+                            raise RuntimeError(resp.error)
+                        _LOGGER.info("Received response: %s", resp)
+            finally:
+                with contextlib.suppress(BaseException):
+                    await stream.aclose()
 
         audio = b""
+        gen = data_gen()
         converting = async_convert_audio(
             self.hass,
-            data_gen(),
+            gen,
             "s16le",
             to_extension=fmt,
             input_params=[
@@ -125,8 +132,12 @@ class HuijianTtsEntity(BaseEntity):
                 "to_sample_bytes": int(options.get("preferred_sample_bytes") or 2)}
                if fmt == "wav" else {}),
         )
-        async for chunk in converting:
-            audio += chunk
+        try:
+            async for chunk in converting:
+                audio += chunk
+        finally:
+            with contextlib.suppress(BaseException):
+                await gen.aclose()
         # v1.0.25 fail-loud：空音频是「灯开了不播报」的直接病灶，此前静默返回
         # 空 WAV 一路无声；现在两端日志各留一行，链路可逐跳对账。
         if not audio:

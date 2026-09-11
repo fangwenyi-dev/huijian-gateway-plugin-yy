@@ -43,6 +43,8 @@ def make_admin_app(ctx) -> web.Application:
     app.router.add_post("/api/automations/test", _auto_test)
     app.router.add_post("/api/automations/edit", _auto_edit)
     app.router.add_post("/api/system/reload_models", _reload_models)
+    from . import tts_voices_api          # 自定义音色端点独立成模块（并行热区避让）
+    tts_voices_api.setup(app, ctx)
     return app
 
 

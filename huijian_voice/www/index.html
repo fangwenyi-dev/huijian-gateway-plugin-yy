@@ -14,8 +14,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#1d1750">
 <title>慧尖HA语音插件</title>
-<link rel="stylesheet" href="css/huijian.css?v=1.0.45">
-<link rel="stylesheet" href="css/voice.css?v=1.0.45">
+<link rel="stylesheet" href="css/huijian.css?v=1.0.46">
+<link rel="stylesheet" href="css/voice.css?v=1.0.46">
 </head>
 <body>
 <!-- 「星辰大海」背景层（与网关加载项同一设计标准/同一固定种子＝同一片天）：
@@ -98,14 +98,21 @@
       <div><label class="hj-field">音色（本地）</label><select id="tts_sid"></select></div>
       <div style="flex:0 1 140px"><label class="hj-field">语速 0.6–2.0</label><input id="tts_speed" type="number" step="0.05" min="0.6" max="2"></div>
     </div>
+    <div class="hj-row" style="align-items:flex-end">
+      <div style="flex:1 1 240px"><label class="hj-field">自定义音色上传（单路 .bin，尺寸自动校验；v1.1 RAW 音色库直接可用）</label><input id="tv_file" type="file" accept=".bin"></div>
+      <div style="flex:0 0 auto"><button type="button" class="act gray" id="tv_upload">上传</button></div>
+      <div style="flex:0 0 auto"><button type="button" class="act gray" id="tv_scan">重扫生效</button></div>
+      <div style="flex:1 1 100%"><span class="hint" id="tv_panel"></span></div>
+    </div>
     <div id="ttsCloudBox" style="display:none">
       <div class="hj-row"><div style="flex:1 1 100%"><label class="hj-field">平台预设（选完只需粘贴 API Key）</label><select id="tts_preset"></select></div></div>
       <div id="tts_preset_hint" class="hint" style="display:none"></div>
       <div class="hj-row">
         <div><label class="hj-field">Base URL</label><input id="tts_cloud_base"></div>
         <div><label class="hj-field">模型名</label><input id="tts_cloud_model" placeholder="tts-1"></div>
-        <div><label class="hj-field">音色名</label><input id="tts_cloud_voice" placeholder="alloy"></div>
+        <div><label class="hj-field">音色名</label><input id="tts_cloud_voice" placeholder="可选（如 anna；留空=平台默认嗓）"></div>
       </div>
+      <div class="hint">音色归属：本地=本页所选音色；云=云端+此音色名（留空用平台默认，部分平台默认是英文男声）；云失败回落本地时用**本地默认音色 sid18**（会换嗓，日志逐句点名引擎）</div>
       <label class="hj-field">API Key</label><input id="tts_cloud_key" type="password">
     </div>
   </div>
@@ -128,7 +135,7 @@
       <div><label><input id="dlg_chain" type="checkbox" style="width:auto"> 复合句链发（"开灯再关窗帘"分步执行）</label></div>
       <div><label><input id="dlg_confirm" type="checkbox" style="width:auto"> 风险确认（解锁/删场景先问再办）</label></div>
     </div>
-    <label class="hj-field">自定义纠错词条（JSON，一行一组；在内置 58 条之上叠加）</label>
+    <label class="hj-field">自定义纠错词条（JSON，一行一组；在内置 61 条之上叠加）</label>
     <textarea id="nlu_corr" placeholder='{"西顶灯": "吸顶灯"}'></textarea>
     <label class="hj-field">卫星→区域映射（JSON；"开灯"类无目标句落在说话卫星所在区域。例：{"192.168.1.31": "卧室"}）</label>
     <textarea id="sat_areas" placeholder='{"192.168.1.31": "卧室"}'></textarea>
@@ -263,7 +270,7 @@
 
 <script>
 "use strict";
-const CURRENT_VERSION = "1.0.45";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
+const CURRENT_VERSION = "1.0.46";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
 // 音色表 = kokoro-multi-lang-v1_1 官方 103 sid 全表（k2-fsa docs sid 表实证；
 // 标注=对用户上传试听样本的 CAM++ 声纹溯源榜：v1_1 不含晓晓/云扬，
 // sid18=zf_026 女声最似晓晓(0.454 全场最近)，sid81=zm_055 最似云扬）
@@ -435,7 +442,9 @@ async function loadSettings(){
   try { S = await api("/api/settings"); } catch(e){ toast("读取设置失败："+e.message); return; }
   const sid = $("#tts_sid");
   if (sid.options.length===0) VOICES.forEach(([v,n])=>sid.add(new Option(n,v)));
+  await refreshVoicesPanel();
   sid.value = String(S.tts.sid ?? 18);
+  if (sid.selectedIndex < 0) sid.value = "18";   // 自定义项已撤/未注入 → 防把空值存回
   $("#tts_speed").value = S.tts.speed ?? 1.0;
   $("#stt_provider").value = S.stt.provider==="cloud" ? "cloud" : "local_paraformer";
   $("#tts_provider").value = S.tts.provider==="cloud" ? "cloud" : "local_kokoro";
@@ -475,10 +484,52 @@ $("#nlu_enabled").onchange = syncNluWarn;
 // 关掉本地理解 = 场景触发词/本地建改删/查询族/音乐带一起停（防手滑：保存前显式确认）
 function llmReady(){ return $("#llm_enabled").checked && !!$("#llm_base").value.trim(); }
 wirePresets();
+/* ── 自定义音色（投递口 /data/tts_voices；机制：官方 voices.bin 尾部定长追加，
+   sid 自官方音色数起；尺寸权威=面板读数）── */
+let _tvmeta = null;
+async function refreshVoicesPanel(keepSel) {
+  const sid = $("#tts_sid"); const cur = keepSel ? sid.value : null;
+  [...sid.options].forEach(o => { if (o.dataset.custom) o.remove(); });
+  try {
+    const v = _tvmeta = await api("/api/tts/voices");
+    const bad = (v.preview || []).filter(p => !p.valid);
+    (v.preview || []).filter(p => p.valid).forEach(p => {
+      const o = new Option(`\u{1F3A4} ${p.name}（自定义 sid${p.sid}）`, p.name);
+      o.dataset.custom = "1"; sid.add(o);
+    });
+    $("#tv_panel").textContent =
+      `官方 ${v.official_count} 路 · 单音尺寸 ${v.per_voice_bytes || "?"} B · `
+      + `已注入 ${Object.keys(v.injected || {}).length} 路`
+      + (bad.length ? ` · ⚠ ${bad.length} 个尺寸不符文件被忽略` : "")
+      + ` · 投递目录 ${v.dir}`;
+    if (cur) { sid.value = cur; }
+  } catch (e) { $("#tv_panel").textContent = "音色面板读数失败：" + e.message; }
+}
+$("#tv_upload").onclick = async () => {
+  const f = $("#tv_file").files[0]; if (!f) { toast("先选择 .bin 文件"); return; }
+  const name = f.name.replace(/\.bin$/i, "").trim();
+  if (!name) { toast("文件名（去 .bin）即音色主名，不能为空"); return; }
+  if (!_tvmeta || !_tvmeta.per_voice_bytes) { toast("官方模型未就绪，无法校验单音尺寸"); return; }
+  if (f.size !== _tvmeta.per_voice_bytes) { toast(`尺寸不符：需恰好 ${_tvmeta.per_voice_bytes} B，当前 ${f.size} B`); return; }
+  try {
+    const r = await fetch(U("/api/tts/voices/upload?name=" + encodeURIComponent(name)), { method: "POST", body: f });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.message || ("HTTP " + r.status));
+    await post("/api/system/reload_models", {});
+    await refreshVoicesPanel(true);
+    $("#tts_sid").value = name;               // 上传成功即选中新嗓（保存后播报生效）
+    toast(`「${name}」已投递并重载`);
+  } catch (e) { toast("上传失败：" + e.message); }
+};
+$("#tv_scan").onclick = async () => {
+  try { const r = await post("/api/system/reload_models", {}); toast(r.note || "已重新扫描"); await refreshVoicesPanel(true); }
+  catch (e) { toast(e.message); }
+};
 $("#saveBtn").onclick = async ()=>{
+  const _sv = $("#tts_sid").value;   // 自定义音色主名（非数字）原样保存
   const body = {
     stt:{ provider:$("#stt_provider").value, cloud:{ base_url:$("#stt_cloud_base").value, model:$("#stt_cloud_model").value, ...( $("#stt_cloud_key").value?{api_key:$("#stt_cloud_key").value}:{}) } },
-    tts:{ provider:$("#tts_provider").value, sid:parseInt($("#tts_sid").value,10), speed:parseFloat($("#tts_speed").value)||1,
+    tts:{ provider:$("#tts_provider").value, sid:/^-?\d+$/.test(_sv)?parseInt(_sv,10):_sv, speed:parseFloat($("#tts_speed").value)||1,
           cloud:{ base_url:$("#tts_cloud_base").value, model:$("#tts_cloud_model").value, voice:$("#tts_cloud_voice").value, ...(ttsFmt?{response_format:ttsFmt}:{}), ...(ttsRate?{sample_rate:ttsRate}:{}), ...( $("#tts_cloud_key").value?{api_key:$("#tts_cloud_key").value}:{}) } },
     nlu:{ enabled:$("#nlu_enabled").checked, textcnn_enabled:$("#nlu_textcnn").checked, query_local:$("#nlu_query").checked, creation_enabled:$("#nlu_creation").checked, corrections_extra: safeJson($("#nlu_corr").value, {}) },
     llm:{ enabled:$("#llm_enabled").checked, base_url:$("#llm_base").value, model:$("#llm_model").value, stream:$("#llm_stream").checked, allow_scene_write:$("#llm_scene_write").checked, allow_automation_write:$("#llm_auto_write").checked, ...( $("#llm_key").value?{api_key:$("#llm_key").value}:{}) },
@@ -687,6 +738,6 @@ $("#regenBtn").onclick = async ()=>{
   try { await post("/api/token/regenerate",{}); toast("已重置"); loadEndpoints(); } catch(e){ toast(e.message); }
 };
 </script>
-<script src="js/starsky.js?v=1.0.45"></script>
+<script src="js/starsky.js?v=1.0.46"></script>
 </body>
 </html>

@@ -1,16 +1,28 @@
-"""58 条 ASR 热词纠错表钉桩（口径裁定：061701 代码版=严格超集，条目数=58）。"""
+"""61 条 ASR 热词纠错表钉桩（口径裁定：061701 代码版=严格超集，58 条为移植基线；
+2026-09-16 现场增补「平×窗」插音族 3 条，计数以本钉为准）。"""
 from core.nlu import corrector
 
 
-def test_table_has_58_entries():
-    assert len(corrector.BASE_CORRECTIONS) == 58
+def test_table_has_61_entries():
+    assert len(corrector.BASE_CORRECTIONS) == 61
 
 
 def test_core_pairs():
     for wrong, right in [("内导", "内倒"), ("站厅", "展厅"), ("统灯", "筒灯"),
                          ("办公系统", "办公室"), ("办公事", "办公室"), ("平推车", "平推窗"),
-                         ("放量大一点", "风量大一点"), ("汇江", "慧尖")]:
+                         ("放量大一点", "风量大一点"), ("汇江", "慧尖"),
+                         ("平台窗", "平开窗"), ("平抬窗", "平开窗"), ("平胎窗", "平开窗")]:
         assert corrector.BASE_CORRECTIONS[wrong] == right
+
+
+def test_pingchuang_insertion_realworld():
+    """现场日志实锤句（2026-09-16）：复合句里的「平台窗」必须纠回「平开窗」。"""
+    raw = "关闭办公室空调打开办公室平台窗"
+    out = corrector.apply(raw)
+    assert out == "关闭办公室空调打开办公室平开窗"
+    # 不伤及邻词：真·平推窗句不被新键误触
+    assert corrector.apply("把平推窗关上") == "把平推窗关上"
+    assert corrector.apply("羊台的窗") == "阳台的窗"
 
 
 def test_apply_longest_first():

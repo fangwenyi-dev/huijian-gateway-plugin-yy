@@ -64,6 +64,15 @@ class ModelStore:
     def keys(self):
         return list(self._manifest.keys())
 
+    def voices_count_for(self, key: str) -> int:
+        """TTS 包官方音色数（lock 的 voices_count 字段；缺省 0=不启用自定义注入）。
+        单音尺寸由它推导：官方 voices.bin 字节数 ÷ 音色数（纯张量拼接、无 magic，
+        v1_1 fp32 本机实测 53,790,720÷103=522,240B 整除）。"""
+        try:
+            return int((self._manifest.get(key) or {}).get("voices_count") or 0)
+        except (TypeError, ValueError):
+            return 0
+
     def model_dir_for(self, key: str) -> Optional[Path]:
         """返回已就绪模型的解包目录（含 top_dir 探测）。未就绪返回 None。"""
         entry = self._manifest.get(key)

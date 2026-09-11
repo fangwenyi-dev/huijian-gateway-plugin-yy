@@ -7,7 +7,7 @@ from pathlib import Path
 APP_NAME = "huijian_voice"
 # 裸 docker build 会把 ENV 烘成占位值 0.0.0：毒值不得穿透成对外版本
 _env_ver = os.environ.get("HUIJIAN_VERSION", "")
-APP_VERSION = _env_ver if _env_ver and _env_ver != "0.0.0" else "1.0.45"
+APP_VERSION = _env_ver if _env_ver and _env_ver != "0.0.0" else "1.0.46"
 
 
 def addon_version() -> str:
@@ -27,6 +27,9 @@ def addon_version() -> str:
 DATA_DIR = Path(os.environ.get("HUIJIAN_DATA", "/data"))            # Supervisor 持久卷
 MODELS_DIR = Path(os.environ.get("HUIJIAN_MODELS_DIR", str(DATA_DIR / "models")))
 MODEL_IMPORT_DIR = MODELS_DIR / "import"                             # 手动导入投递口
+TTS_VOICES_DIR = Path(os.environ.get("HUIJIAN_TTS_VOICES", str(DATA_DIR / "tts_voices")))
+# ↑ 自定义音色投递口：每 .bin=一路纯 float32 风格向量（尺寸=官方单音尺寸），
+#   sid 从官方音色数起编号，tts.sid 可填文件主名（见 core/tts.py merge_custom_voices）
 SETTINGS_FILE = Path(os.environ.get("HUIJIAN_SETTINGS", str(DATA_DIR / "settings.json")))
 INSTALL_DIR = Path(os.environ.get("HUIJIAN_INSTALL_DIR", str(Path(__file__).resolve().parent.parent)))
 NLU_DATA_DIR = Path(os.environ.get("HUIJIAN_NLU_DATA", str(INSTALL_DIR / "nlu_data")))

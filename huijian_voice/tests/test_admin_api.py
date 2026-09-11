@@ -54,7 +54,7 @@ class TtsFake:
     def unload(self): return True
     async def synthesize_pcm(self, text):
         return b"\x00\x01" * 8000
-    async def stream_opus(self, text):
+    async def stream_opus(self, text, engine_out=None):
         yield b"x"
 
 

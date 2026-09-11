@@ -46,6 +46,7 @@
     "sha256": "a3f4c73d043860e3fd2e5b06f36795eb81de0fc8e8de6df703245edddd87dbad",
     "top_dir": "kokoro-multi-lang-v1_1",
     "required_files": ["model.onnx", "voices.bin", "tokens.txt", "lexicon-zh.txt", "dict/jieba.dict.utf8"],
+    "voices_count": 103,
     "size_mb": 348,
     "_file_note": "2026-09-13 用户拍板升级 v1.1（本机直下实测 sha a3f4c73d…，364816464B）。结构同 v1_0：model.onnx + voices.bin 53.8MB(**103 音色**，官方表 0-2 英文具名/3-57 女 zf_*/58-102 男 zm_*，无晓晓/云扬——声纹溯源已告知用户并获确认) + lexicon-{zh,us-en,gb-en} + dict/(jieba) + espeak-ng-data/ + {date,number,phone}-zh.fst。选 fp32 不选 int8 v1_1：int8 量化噪声实测 3.9×（用户已试听否决 int8 音质）+ RTF v1.1-fp32 0.300 vs v1.1-int8 0.720。旧包 v1_0 fp32(c5f7e2d2…)/两代 int8 均在 E:/AI/_dl 留存可导入口回退。",
     "urls": [

@@ -291,9 +291,11 @@ class WsTransport:
             async for msg in self._current_ws:
                 self.update_activity_time()
                 if msg.type == aiohttp.WSMsgType.TEXT:
-                    await self._process_text_message(msg)
+                    if not await self._process_text_message(msg):
+                        break
                 elif msg.type == aiohttp.WSMsgType.BINARY:
-                    await self._recv_writer.send(msg.data)
+                    if not await self._deliver(self._recv_writer, msg.data):
+                        break
                 elif msg.type == aiohttp.WSMsgType.CLOSE:
                     self.logger.error("WebSocket closed: %s", msg.extra)
                     break
@@ -358,17 +360,54 @@ class WsTransport:
             except Exception as err:
                 self.logger.error("Error closing WebSocket: %s", err)
 
-    async def _process_text_message(self, msg: aiohttp.WSMessage):
-        """Process a text message from WebSocket."""
+    # v1.0.45（reader 僵尸断根）：buffer-0 内存流的 send 在**没有消费者**时会
+    # 无限阻塞。TTS 消费端中途被取消（管线打断/超时/页面切换）后，加载项仍在
+    # 吐帧，reader 任务就永久卡在 `sw.send`——永远读不到对端 CLOSE，任务组拆不
+    # 干净，连接循环停在 teardown，之后每条播报都 "Timed out waiting for
+    # WebSocket connection"，直到 HA 重启（台架实锤：一次中途取消毒死整条连接
+    # 循环；同 v1.0.40 僵尸连接的同族，那条修的是 send 侧，这是 recv 侧）。
+    # 交付超时 = 判据：正常消费在进程内微秒级完成，永不触发；一旦触发消费者
+    # 必已消失 → 丢帧并主动 break 走收口重连，让"下一次对话在全新连接上开始"
+    # 的承诺真正成立。
+    # ⚠ 默认关闭（None=无限等，与历史行为逐比特一致）：stt/llm/mcp 通道在
+    # "连接即收到 hello/echo、消费端尚未挂上"的窗口里必须允许 reader 任务
+    # 排队等待——5s 判死会引发永断永重的风暴。只在 TtsTransport 启用：其服务
+    # 端契约是无请求不推帧（detect 应答才有帧/stop），且 stream() 以锁保证
+    # 恰好一个消费者，交付超时唯一的可能就是消费端已消失。
+    _CONSUMER_HANDOFF_TIMEOUT_S: float | None = None
+
+    async def _deliver(self, writer, item) -> bool:
+        """把一条消息交给消费端；返回 False = 消费端已消失，调用方须收口。"""
+        try:
+            if self._CONSUMER_HANDOFF_TIMEOUT_S is None:
+                await writer.send(item)
+                return True
+            await asyncio.wait_for(
+                writer.send(item), self._CONSUMER_HANDOFF_TIMEOUT_S)
+            return True
+        except asyncio.TimeoutError:
+            self.logger.warning(
+                "%s 通道消息交付超时 %.0fs——上一轮请求已消失，主动断开本连接自愈"
+                "（残帧不得毒化下一轮）",
+                self._transport_type or self.__class__.__name__,
+                self._CONSUMER_HANDOFF_TIMEOUT_S,
+            )
+            return False
+        except (anyio.BrokenResourceError, anyio.ClosedResourceError):
+            return False
+
+    async def _process_text_message(self, msg: aiohttp.WSMessage) -> bool:
+        """Process a text message from WebSocket. False = 消费端已消失。"""
         try:
             if msg.data[0:2] == '"{':
                 json_data = Dict(json.loads(msg.json()))
             else:
                 json_data = Dict(msg.json())
             self.logger.debug("Process incoming msg: %s", json_data)
-            await self._recv_writer.send(json_data)
         except Exception as err:
             self.logger.error("Invalid incoming msg: %s", msg)
+            return True   # 解析失败与交付无关，链接保持
+        return await self._deliver(self._recv_writer, json_data)
 
     async def await_message(self, timeout: int = 120):
         """Wait response message"""
@@ -392,6 +431,25 @@ class WsTransport:
                 await self._current_ws.ping()
         except Exception as err:
             self.ws_log("heartbeat ping failed: %s", err)
+
+    async def restart_connection(self, reason: str = "") -> None:
+        """拆掉当前连接、保留自动重连并立即续连（v1.0.45）。
+
+        介于"不动"与 stop() 之间：调用方判定本连接的对话状态已被污染
+        （典型：TTS 消费被取消，残帧/残 stop 可能挂在 reader 上毒化下一轮
+        请求），与其在旧流上猜，不如换连接——重连后 `_create_streams` 给出
+        全新 stream 对，残留物理归零。`_connect_now` 同时叫醒正处于退避的
+        循环，下一请求不必空等 3~60s。
+        """
+        self.logger.warning("Restarting websocket connection: %s", reason)
+        ws = self._current_ws
+        self._is_connected = False
+        self._connect_now.set()
+        if ws is not None and not ws.closed:
+            try:
+                await ws.close()
+            except Exception as err:
+                self.logger.debug("restart close ignored: %s", err)
 
     async def stop(self, reason: str = ""):
         if self.stop_event.is_set():

@@ -240,27 +240,46 @@ class TtsSession(BaseSession):
         deadline = time.monotonic() + const.TTS_STREAM_BUDGET_S
         sent_any = False
         n_frames = n_bytes = 0
+        engine: dict = {}
         try:
             # F5：预算必须覆盖「生成器挂起」——逐包用剩余预算做 wait_for，
             # native 合成卡死也能按点收束（finally 的 stop 义务不变）。
-            it = self.ctx.tts.stream_opus(text).__aiter__()
+            it = self.ctx.tts.stream_opus(text, engine_out=engine).__aiter__()
             while True:
                 remain = deadline - time.monotonic()
-                if gen != self._gen or remain <= 0:
-                    return                       # 被顶替/超预算：静默终止（stop 由 finally 统一收束）
+                if gen != self._gen:
+                    # v1.0.45：顶替截断必须留痕——现场"播报下发 N 帧"里 N 小于
+                    # 整句应有帧数、又无别的告警行时，唯一解释就是这条。
+                    logger.warning("[TTS] 旧流被新播报顶替截断：已发 %d 帧 / %r",
+                                   n_frames, text[:30])
+                    return
+                if remain <= 0:
+                    logger.warning("[TTS] 整流超预算截断：已发 %d 帧 / %r",
+                                   n_frames, text[:30])
+                    return
                 try:
                     pkt = await asyncio.wait_for(it.__anext__(), timeout=remain)
                 except StopAsyncIteration:
                     break
                 except asyncio.TimeoutError:
-                    logger.warning("[TTS] 合成流停滞超预算，截断收束")
+                    logger.warning("[TTS] 合成流停滞超预算，截断收束（已发 %d 帧）: %r",
+                                   n_frames, text[:30])
                     return
                 if not await self.send_bytes(pkt):
+                    # v1.0.45：连接中断同样点名——半截音频在此对账（对端多半
+                    # 正在重连，本端 stop 也会失败，只有这行 WARN 说明真相）。
+                    logger.warning("[TTS] 播报连接中断，停止下发：已发 %d 帧 / %r",
+                                   n_frames, text[:30])
                     return
                 sent_any = True
                 n_frames += 1
                 n_bytes += len(pkt)
         except asyncio.CancelledError:
+            # 顶替的常态路径：_start_stream 直接 cancel，旧 task 死在任意
+            # await 点上、根本走不到循环顶的 gen 检查——不留痕就永远查无此人。
+            if gen != self._gen:
+                logger.warning("[TTS] 旧流被新播报顶替截断：已发 %d 帧 / %r",
+                               n_frames, text[:30])
             raise
         except Exception:
             logger.exception("[TTS] 合成流异常（以 stop 收束）")
@@ -271,7 +290,10 @@ class TtsSession(BaseSession):
                 # v1.0.25：成功也留一行——「灯开了不播报」必须能逐跳对账
                 # （加载项下发 → 集成收帧 → 卫星推流 → 设备出声），此前成功全静默。
                 if sent_any:
-                    logger.info("[TTS] 播报下发：%d 帧 / %d 字节 / %r",
+                    # 引擎名必上日志：云⇄本地回落=换嗓（云端可配男声、本地
+                    # sid18 女声），"第一句男声第二句女声"要一眼可辨。
+                    logger.info("[TTS] 播报下发：%s / %d 帧 / %d 字节 / %r",
+                                engine.get("engine", "?"),
                                 n_frames, n_bytes, text[:30])
                 elif text:
                     logger.warning("[TTS] 空音频收束（模型未就绪？）: %r", text[:30])

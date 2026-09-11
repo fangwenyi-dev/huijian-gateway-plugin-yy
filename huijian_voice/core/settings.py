@@ -49,7 +49,7 @@ DEFAULTS: dict[str, Any] = {
         "query_local": True,                   # 查询族（"客厅多少度"）本地读回（M1 定案）
         "creation_enabled": True,              # 场景/自动化语音句本地承接总开关（零 LLM）
         "thresholds_override": {},             # 按类阈值微调（默认用 intent.thresholds.json）
-        "corrections_extra": {},               # 用户自定义热词纠错（追加到 58 条基础表）
+        "corrections_extra": {},               # 用户自定义热词纠错（追加到 61 条基础表）
     },
     "klar": {
         # 一级确定性 NLU（klar-ha-nlu 引擎，容器内 s6 服务 loopback :10520）。
