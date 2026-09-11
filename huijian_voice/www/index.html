@@ -14,8 +14,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#030712">
 <title>慧尖HA语音插件</title>
-<link rel="stylesheet" href="css/huijian.css?v=1.0.40">
-<link rel="stylesheet" href="css/voice.css?v=1.0.40">
+<link rel="stylesheet" href="css/huijian.css?v=1.0.41">
+<link rel="stylesheet" href="css/voice.css?v=1.0.41">
 </head>
 <body>
 <!-- 「星辰大海」背景层（与网关加载项同一设计标准/同一固定种子＝同一片天）：
@@ -263,7 +263,7 @@
 
 <script>
 "use strict";
-const CURRENT_VERSION = "1.0.40";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
+const CURRENT_VERSION = "1.0.41";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
 // 音色表 = kokoro-multi-lang-v1_1 官方 103 sid 全表（k2-fsa docs sid 表实证；
 // 标注=对用户上传试听样本的 CAM++ 声纹溯源榜：v1_1 不含晓晓/云扬，
 // sid18=zf_026 女声最似晓晓(0.454 全场最近)，sid81=zm_055 最似云扬）
@@ -329,15 +329,25 @@ document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{
 });
 
 /* ── 状态 ── */
+/* v1.0.41（F7）：status.json 是核心心跳写出的静态文件（nginx 直出）——核心进程
+   死掉后文件冻结，页面会永远显示"正常"。纯客户端时效判据：连续 ≥3 次轮询
+   （4s×3≈12s）拿到同一个 ts 即认定状态停更；不用本地时钟与 ts 作差（无时钟
+   假设），只比较 ts 是否推进。 */
+let _stTs = null, _stSame = 0;
 async function refreshStatus(){
   try {
     const st = await api("/status.json", {});
+    const _ts = (st && st.ts != null) ? st.ts : null;
+    _stSame = (_ts !== null && _ts === _stTs) ? _stSame + 1 : 0;
+    _stTs = _ts;
+    const frozen = _stSame >= 3;   // ts 停更（核心可能已退出），会话数一并按陈旧处理
     $("#ver").textContent = st.version || CURRENT_VERSION;
     $("#footerVer").textContent = "v" + (st.version || CURRENT_VERSION);
     $("#haver").textContent = (st.version===CURRENT_VERSION) ? "核心正常" : "前端/核心版本不一致";
     const up = st.uptime_s>=0 ? (st.uptime_s>86400 ? (st.uptime_s/86400).toFixed(1)+" 天" : Math.floor(st.uptime_s/3600)+" 时 "+ (st.uptime_s%3600/60|0)+" 分") : "–";
     $("#statusGrid").innerHTML = [
-      statRow("服务运行", `<span class="pill ok">正常 ${up}</span>`),
+      statRow("服务运行", frozen ? pill("状态停更（核心可能已退出）","warn")
+                                 : `<span class="pill ok">正常 ${up}</span>`),
       statRow("HA 桥接", st.ha_bridge?pill("在线","ok")
         :pill("不可达","bad")+(st.ha_error?`<span class="hint" style="margin-left:8px">${esc0(String(st.ha_error).slice(0,60))}</span>`:"")),
       statRow("STT 引擎", st.stt_loaded?pill("已加载","ok"):pill("未就绪","warn")),
@@ -346,9 +356,10 @@ async function refreshStatus(){
       statRow("本地理解", st.nlu_enabled!==false?pill("已启用","ok")
         :pill("已关闭（只剩大模型）","bad")),
       statRow("LLM 兜底", st.llm_enabled?pill("已启用","ok"):pill("关闭","warn")),
-      statRow("活动会话", `<span class="pill ${st.sessions>0?'ok':'warn'}">${st.sessions}</span>`),
+      statRow("活动会话", `<span class="pill ${(st.sessions>0&&!frozen)?'ok':'warn'}">${st.sessions}${frozen?" · 停更":""}</span>`),
     ].join("");
-  } catch(e) { $("#haver").textContent = "核心未就绪"; }
+  } catch(e) { _stTs = null; _stSame = 0;   // 拉不到文件=另一条真实失败路径，重新起算
+              $("#haver").textContent = "核心未就绪"; }
   try {
     const ms = await api("/models_status.json", {});
     // v1.0.35 修复三连：①事实文件外壳是 {updated, models}（model_store 双写者
@@ -495,15 +506,26 @@ $("#saveBtn").onclick = async ()=>{
 function safeJson(t, d){ if(!t||!t.trim()) return d; try{ return JSON.parse(t);}catch(e){ return null; } }
 
 /* ── 模型 ── */
+/* v1.0.41（F6）：后端 /api/models 发的是 model_store.snapshot() 形态
+   {state,pct,detail,ready}（states: pending/checking/downloading/extracting/
+   ready/failed/manual/incomplete）——旧实现读 v.status/v.size_mb/v.path 三个
+   不存在的键，状态列永远"未下载"、进度列永远空。与「状态」页模型卡同一映射。 */
+const MODEL_STATE_CN = {pending:"排队",checking:"校验",downloading:"下载中",
+                        extracting:"解包中",ready:"就绪",failed:"失败",
+                        manual:"待手动",incomplete:"不完整"};
 async function loadModels(){
   let snap={}; try { snap = await api("/api/models"); } catch(e){ toast(e.message); return; }
   const tb = $("#modelTable tbody"); tb.innerHTML="";
   for (const [k,v] of Object.entries(snap)) {
     const tr = document.createElement("tr");
-    const st = v.ready?pill("就绪","ok"):(v.status?pill(v.status,"warn"):pill("未下载","bad"));
+    const o = (v && typeof v === "object") ? v : {};
+    const s = String(o.state || "");
+    const cls = (o.ready || s==="ready") ? "ok" : (s==="failed" ? "bad" : "warn");
+    const cn = MODEL_STATE_CN[s] || (o.ready ? "就绪" : "未下载");
+    const prog = (o.pct != null && s === "downloading") ? o.pct+"%" : "";
     tr.innerHTML = `<td>${MODEL_NAMES[k]||k}<br><span class="mut code">${k}</span></td>
-      <td>${st}</td><td>${v.size_mb? Math.round(v.size_mb)+" MB":"–"}<br><span class="mut">${v.path||""}</span></td>
-      <td>${v.ready?"":`<button class="act" data-dl="${k}">下载</button>`}</td>`;
+      <td>${pill(cn,cls)}</td><td>${prog}<br><span class="mut">${esc0(String(o.detail||"").slice(0,60))}</span></td>
+      <td>${o.ready?"":`<button class="act" data-dl="${esc0(k)}">下载</button>`}</td>`;
     tb.appendChild(tr);
   }
   tb.querySelectorAll("button[data-dl]").forEach(b=>b.onclick=async()=>{
@@ -560,16 +582,27 @@ async function loadScenes(){
   } catch(e){ $("#sceneList").textContent = "读取失败："+e.message; }
 }
 $("#sceneBtn").onclick = loadScenes;
+/* v1.0.41（F9）：行操作在飞守卫——操作列全是 <span class="copy">，连点即并行
+   POST（改名后写覆盖先写、删除重复触发）。同一 op 键在飞只许一发，期间给该
+   span 挂 .busy（pointer-events:none），finally 释放。 */
+const _opBusy = new Set();
+function opGuard(key, el, fn){
+  if (_opBusy.has(key)) return;
+  _opBusy.add(key); if (el && el.classList) el.classList.add("busy");
+  Promise.resolve().then(fn).finally(()=>{
+    _opBusy.delete(key); if (el && el.classList) el.classList.remove("busy");
+  });
+}
 $("#sceneList").addEventListener("click", ev=>{
   const op=(ev.target.dataset||{}).op; if(!op) return;
   const [k,i]=op.split(":"); const s=_sc[+i]; if(!s) return;
-  if(k==="scTest") sceneOp("/api/scenes/test",{trigger_phrase:s.trigger});
+  if(k==="scTest") opGuard(op, ev.target, ()=>sceneOp("/api/scenes/test",{trigger_phrase:s.trigger}));
   if(k==="scDel" && confirm(`删除语音场景「${s.trigger}」？`))
-    sceneOp("/api/scenes/delete",{trigger_phrase:s.trigger});
+    opGuard(op, ev.target, ()=>sceneOp("/api/scenes/delete",{trigger_phrase:s.trigger}));
   if(k==="scRename"){
     const nw = prompt(`把触发词「${s.trigger}」改成：`, s.trigger);
     if(nw && nw.trim() && nw.trim()!==s.trigger)
-      sceneOp("/api/scenes/rename",{scene_id:s.scene_id, new_phrase:nw.trim()});
+      opGuard(op, ev.target, ()=>sceneOp("/api/scenes/rename",{scene_id:s.scene_id, new_phrase:nw.trim()}));
   }
 });
 async function sceneOp(path, body){
@@ -606,9 +639,9 @@ $("#autoBtn").onclick = loadAutomations;
 $("#autoBody").addEventListener("click", ev=>{
   const op=(ev.target.dataset||{}).op; if(!op) return;
   const [k,i]=op.split(":"); const a=_au[+i]; if(!a) return;
-  if(k==="auTest") autoOp("/api/automations/test",{automation_id:a.id},"已触发执行，看设备动作");
+  if(k==="auTest") opGuard(op, ev.target, ()=>autoOp("/api/automations/test",{automation_id:a.id},"已触发执行，看设备动作"));
   if(k==="auDel" && confirm(`删除自动化「${a.alias}」？`))
-    autoOp("/api/automations/delete",{automation_id:a.id});
+    opGuard(op, ev.target, ()=>autoOp("/api/automations/delete",{automation_id:a.id}));
   if(k==="auEdit"){
     const t=a.trigger_raw||{};
     const inp = prompt(`改「${a.alias}」阈值：输入高于值（如 28），或 高于,低于（如 20,28 表示区间）`,
@@ -619,7 +652,7 @@ $("#autoBody").addEventListener("click", ev=>{
     const nt = {entity_id:t.entity_id};
     if(ps.length===1){ nt.above=ps[0]; if(t.below!=null) nt.below=t.below; }
     else { nt.above=ps[0]; nt.below=ps[1]; }
-    autoOp("/api/automations/edit",{automation_id:a.id, trigger:nt});
+    opGuard(op, ev.target, ()=>autoOp("/api/automations/edit",{automation_id:a.id, trigger:nt}));
   }
 });
 async function autoOp(path, body, msg){
@@ -633,12 +666,15 @@ async function autoOp(path, body, msg){
 async function loadEndpoints(){
   try {
     const r = await api("/api/endpoints");
+    // v1.0.41（F10）：端点/token 由 settings 用户可写——raw 插 innerHTML 与 data-c
+    // 一律过 esc0（属性双引号语境下 & < > " 四个转义即闭合；复制消费走
+    // dataset.c，浏览器解码后拿回原值，不受影响）。
     const MAP = [["stt_endpoint","识别 STT"],["tts_endpoint","播报 TTS"],["llm_endpoint","对话 LLM"]];
     $("#epTable").innerHTML = MAP.filter(([k])=>r[k]).map(([k,n])=>
       `<tr><td style="width:80px"><b>${n}</b></td>
-       <td class="mono">${r[k]}</td><td style="width:50px"><span class="copy" data-c="${r[k]}">复制</span></td></tr>`).join("")
+       <td class="mono">${esc0(r[k])}</td><td style="width:50px"><span class="copy" data-c="${esc0(r[k])}">复制</span></td></tr>`).join("")
       + `<tr><td>校验</td><td colspan="2">${r.require_token?pill("强制 token 校验中","ok"):pill("局域网免 token（可在设置页开启强制）","warn")}
-         <span class="mut">· 当前 token：</span><span class="mono">${r.token}</span> <span class="copy" data-c="${r.token}">复制</span></td></tr>`
+         <span class="mut">· 当前 token：</span><span class="mono">${esc0(r.token)}</span> <span class="copy" data-c="${esc0(r.token)}">复制</span></td></tr>`
       + `<tr><td>发现</td><td colspan="2" class="mono">_huijian-voice._tcp.local（mDNS，固件自动发现）</td></tr>`;
     document.querySelectorAll("#tab-pair .copy").forEach(x=>x.onclick=async()=>{
       try { await navigator.clipboard.writeText(x.dataset.c); toast("已复制"); }
@@ -651,6 +687,6 @@ $("#regenBtn").onclick = async ()=>{
   try { await post("/api/token/regenerate",{}); toast("已重置"); loadEndpoints(); } catch(e){ toast(e.message); }
 };
 </script>
-<script src="js/starsky.js?v=1.0.40"></script>
+<script src="js/starsky.js?v=1.0.41"></script>
 </body>
 </html>

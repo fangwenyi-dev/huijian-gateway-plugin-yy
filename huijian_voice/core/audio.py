@@ -155,8 +155,26 @@ def read_wav_pcm16(data: bytes) -> tuple[bytes, int]:
             sw = w.getsampwidth()
             ch = w.getnchannels()
             raw = w.readframes(n)
-        if sw != 2:
-            raw = (np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2147483647.0 * 32767).astype(np.int16).tobytes()
+        # v1.0.41 审查 S17-3：旧实现把所有非 16bit 一律按 int32 重排——8bit WAV
+        # （长度常不 %4）与 24bit WAV（3 字节对齐）直接 ValueError 掉进 except，
+        # **整个文件含 44 字节头被当裸 PCM 塞给 ASR/TTS（爆音+假识别）**；长度恰好
+        # %4 的更糟：静默按 int32 解出错乱波形。按位深精确换算，未知位深透传样本体
+        # （头已被 wave 剥掉，不再整文件回吐）。
+        if sw == 4:
+            raw = (np.frombuffer(raw, dtype=np.int32).astype(np.float32)
+                   / 2147483647.0 * 32767).astype(np.int16).tobytes()
+        elif sw == 1:
+            # WAV 8bit 为无符号，128 居中 → 16bit 满幅
+            raw = ((np.frombuffer(raw, dtype=np.uint8).astype(np.int16) - 128)
+                   << 8).astype(np.int16).tobytes()
+        elif sw == 3:
+            b = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 3)
+            v = (b[:, 0].astype(np.int32) | (b[:, 1].astype(np.int32) << 8)
+                 | (b[:, 2].astype(np.int32) << 16))
+            v = np.where(v & 0x800000, v - (1 << 24), v)
+            raw = (v >> 8).astype(np.int16).tobytes()
+        elif sw != 2:
+            return raw, rate
         if ch == 2:
             samples = np.frombuffer(raw, dtype=np.int16).reshape(-1, 2).mean(axis=1).astype(np.int16)
             raw = samples.tobytes()

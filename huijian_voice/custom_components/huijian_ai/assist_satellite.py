@@ -93,6 +93,7 @@ _CONFIG_TIMEOUT_SEC = 5
 # 宁可丢开头也不丢刚说的话，且绝不无界涨。
 _MAX_AUDIO_QUEUE_CHUNKS = 160
 _AUDIO_DROP_LOG_EVERY = 100       # 丢包告警限频（1 次 + 每 100 块）
+_STREAM_END_POLL_S = 0.5          # v1.0.41 审查 S4：哨兵被挤丢后"pending+排空"兜底的观察节拍
 
 
 def _queue_audio_chunk(queue: "asyncio.Queue[bytes | None]", item) -> bool:
@@ -164,6 +165,7 @@ class EsphomeAssistSatellite(
         self._audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue(
             maxsize=_MAX_AUDIO_QUEUE_CHUNKS
         )
+        self._stream_end_pending = False   # v1.0.41 审查 S4：哨兵兜底标记（随新流清零）
         self._audio_dropped_chunks: int = 0
         self._tts_streaming_task: asyncio.Task | None = None
         self._udp_server: VoiceAssistantUDPServer | None = None
@@ -537,6 +539,7 @@ class EsphomeAssistSatellite(
     ) -> int | None:
         """Handle pipeline run request."""
         # Clear audio queue
+        self._stream_end_pending = False   # v1.0.41 审查 S4：新一轮流，清上轮兜底标记
         while not self._audio_queue.empty():
             await self._audio_queue.get()
 
@@ -795,7 +798,20 @@ class EsphomeAssistSatellite(
     async def _wrap_audio_stream(self) -> AsyncIterable[bytes]:
         """Yield audio chunks from the queue until None."""
         while True:
-            chunk = await self._audio_queue.get()
+            try:
+                chunk = await asyncio.wait_for(
+                    self._audio_queue.get(), _STREAM_END_POLL_S)
+            except asyncio.TimeoutError:
+                # v1.0.41 审查 S4：「哨兵绝不丢」只在入队瞬间成立——哨兵已入队后
+                # 若消费者（管线）停摆且又灌入 ≥160 个数据块，哨兵自己会作为最旧
+                # 被踢出（探针实证），`get()` 将永挂：僵尸 pipeline task 与下一轮
+                # 唤醒管线交替分食同一队列（音频劈裂→STT 乱码）。收尾判据：
+                # 已请求停止/中止（pending）且队列排空 ≡ 哨兵要表达的"数据终"，
+                # 等价收束，多付一个 poll 周期的延迟。
+                if self._stream_end_pending and self._audio_queue.empty():
+                    self._stream_end_pending = False
+                    break
+                continue
             if not chunk:
                 break
 
@@ -804,12 +820,14 @@ class EsphomeAssistSatellite(
     def _stop_pipeline(self) -> None:
         """Request pipeline to be stopped by ending the audio stream and continue processing."""
         _queue_audio_chunk(self._audio_queue, None)   # 哨兵保入队（满则腾最旧）
+        self._stream_end_pending = True               # v1.0.41 审查 S4：哨兵可能被挤丢的兜底标记
         _LOGGER.debug("Requested pipeline stop")
 
     def _abort_pipeline(self) -> None:
         """Request pipeline to be aborted (no further processing)."""
         _LOGGER.debug("Requested pipeline abort")
         _queue_audio_chunk(self._audio_queue, None)   # 哨兵保入队（满则腾最旧）
+        self._stream_end_pending = True               # v1.0.41 审查 S4：同上
         if self._pipeline_task is not None:
             self._pipeline_task.cancel()
 

@@ -533,7 +533,15 @@ class AutomationManager:
         )
         await self._execute_actions(actions)
 
-    async def _execute_actions(self, actions: list[dict]):
+    async def _execute_actions(
+        self, actions: list[dict]
+    ) -> list[tuple[str, bool, str]]:
+        """逐动作执行，返回 [(intent, 是否成功, 错误信息)]。
+
+        v1.0.41（F4）：旧版把每个动作的异常就地吞掉只留日志、返回无形，调用方
+        无从得知"全部失败"——TestAutomationView 据此对页面报假成功。实时触发
+        路径行为不变：仍只记日志、忽略结果。"""
+        results: list[tuple[str, bool, str]] = []
         for action in actions:
             intent_name = action.get("intent") or action.get("name")
             params = action.get("params") or action.get("parameters", {})
@@ -548,6 +556,7 @@ class AutomationManager:
                 "SetDeviceMode",
             ]:
                 _LOGGER.error("Unsupported intent: %s", intent_name)
+                results.append((str(intent_name), False, f"不支持的意图: {intent_name}"))
                 continue
 
             normalized_name = intent_name
@@ -565,8 +574,11 @@ class AutomationManager:
                     device_id=None,
                 )
                 _LOGGER.info("Automation action success: %s", intent_name)
+                results.append((str(intent_name), True, ""))
             except Exception as e:
                 _LOGGER.error("Automation action failed: %s: %s", intent_name, e)
+                results.append((str(intent_name), False, str(e)))
+        return results
 
 
 def get_automation_manager(hass: HomeAssistant) -> AutomationManager:

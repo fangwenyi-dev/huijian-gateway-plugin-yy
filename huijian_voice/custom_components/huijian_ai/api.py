@@ -1,6 +1,7 @@
 import asyncio
 import html as html_mod
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -26,6 +27,20 @@ def _load_template(filename: str) -> str:
         template_path = _TEMPLATES_DIR / filename
         _TEMPLATE_CACHE[filename] = template_path.read_text(encoding="utf-8")
     return _TEMPLATE_CACHE[filename]
+
+
+def _js(s) -> str:
+    """嵌入 onclick='f(\'…\')' 的字符串：先 JS 单引号层转义（反斜杠/单引号/换行），
+    再 HTML 属性层转义（& < > " '）。顺序不可反。
+
+    v1.0.41（F1）：onclick 属性值要过**两层解析器**（HTML 属性 → JS 词法）。
+    只做 html 转义时，`'` 解码回 JS 单引号直接把字符串截断（XSS 注入面）；
+    而"先 html 转义再嵌、页面上再 escape 一次"的双层转义会让浏览器解码
+    一层后 JS 拿到 `a&#x27;b` 字面量——编辑弹窗回写即数据污染。
+    凡进 onclick 的值一律 _js(原始值)；纯展示上下文（id 属性/正文 span）仍用
+    html_mod.escape(原始值)，两不相干。"""
+    t = str(s).replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r")
+    return html_mod.escape(t, quote=True)
 
 
 async def async_setup_api(hass: HomeAssistant):
@@ -91,6 +106,40 @@ def _get_action_summary(action: dict) -> str:
                 summaries.append("/".join(domains) if domains else "")
 
     return f"{intent_name} {', '.join(filter(None, summaries))}"
+
+
+_TRIGGER_ENTITY_RE = re.compile(r"[a-z0-9_]{1,64}\.[a-z0-9_]{1,64}")
+
+
+def _validate_trigger(trigger) -> str:
+    """PUT 形态闸（v1.0.41 F2）：过闸返回 ""，违规返回字段名。
+
+    局域网任意客户端可 PUT 任意 trigger dict：不带闸时 `above:"a',alert(
+    document.cookie),('"` 原样入库（喂给渲染层的 XSS 面），非数值 junk 又让
+    trigger_eval 误判恒不触发。规则（与仓内既有 trigger 形态兼容）：
+      · trigger 必须是 dict；
+      · entity_id（若给）必须是标准小写 HA id：``[a-z0-9_]{1,64}\\.[a-z0-9_]{1,64}``；
+      · above/below（若给）必须 int/float 且不得是 bool（JSON true 不是阈值）；
+      · to/attribute/platform（若给）只许 str(≤128)/bool/int/float；
+      · 未知键：标量放行（at/for 等合法形态要过），dict/list 拒。
+    """
+    if not isinstance(trigger, dict):
+        return "trigger"
+    for key, val in trigger.items():
+        if key == "entity_id":
+            if not isinstance(val, str) or not _TRIGGER_ENTITY_RE.fullmatch(val):
+                return "entity_id"
+        elif key in ("above", "below"):
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                return key
+        elif key in ("to", "attribute", "platform"):
+            if isinstance(val, (dict, list)):
+                return key
+            if isinstance(val, str) and len(val) > 128:
+                return key
+        elif isinstance(val, (dict, list)):
+            return key
+    return ""
 
 
 class VoiceScenesListView(HomeAssistantView):
@@ -269,9 +318,22 @@ class TestAutomationView(HomeAssistantView):
                 return self.json({"success": False, "error": "Automation not found"}, status_code=404)
             mgr = get_automation_manager(request.app[KEY_HASS])
             async with asyncio.timeout(30):
-                await mgr._execute_actions(automation.get("actions", []))
+                outcomes = await mgr._execute_actions(automation.get("actions", []))
+            # v1.0.41（F4）：动作级折算——上方 TestSceneView 已是诚实口径，这里
+            # 不再"全失败也报成功"（旧版 _execute_actions 吞异常，success 恒 True）。
+            # 保持 HTTP 200，靠 success 旗标 + error 文案如实上报。
+            ntotal = len(outcomes)
+            fails = [(intent, err) for intent, ok, err in outcomes if not ok]
+            if fails:
+                first_err = next((e for _i, e in fails if e), "动作执行失败")
+                return self.json(
+                    {
+                        "success": False,
+                        "error": f"{len(fails)}/{ntotal} 个动作执行失败：{first_err[:120]}",
+                    }
+                )
             mgr._add_trigger_log(automation_id, "", "test", "手动测试触发")
-            return self.json({"success": True})
+            return self.json({"success": True, "executed": ntotal})
         except Exception as e:
             return self.json({"success": False, "error": str(e)}, status_code=500)
 
@@ -293,8 +355,10 @@ class CombinedManageView(HomeAssistantView):
         auto_cards_html = ""
 
         for scene in scenes_raw:
-            scene_id = html_mod.escape(str(scene.get("scene_id", "")))
-            trigger = html_mod.escape(str(scene.get("trigger_phrase", "")))
+            scene_id_raw = str(scene.get("scene_id", ""))
+            trigger_raw = str(scene.get("trigger_phrase", ""))
+            scene_id = html_mod.escape(scene_id_raw)
+            trigger = html_mod.escape(trigger_raw)
             created = scene.get("created_at", "")
             created_display = ""
             if created:
@@ -316,9 +380,9 @@ class CombinedManageView(HomeAssistantView):
     <div class="card-header">
         <div><span class="card-trigger scene">"{trigger}"</span><span class="card-tag scene">语音场景</span></div>
         <div>
-            <button class="delete-btn" onclick="deleteScene('{scene_id}', '{html_mod.escape(trigger)}')">删除</button>
-            <button class="edit-btn" onclick="openEditScene('{scene_id}', '{html_mod.escape(trigger)}')">编辑</button>
-            <button class="test-btn" onclick="testScene('{html_mod.escape(trigger)}')">测试</button>
+            <button class="delete-btn" onclick="deleteScene('{_js(scene_id_raw)}', '{_js(trigger_raw)}', event)">删除</button>
+            <button class="edit-btn" onclick="openEditScene('{_js(scene_id_raw)}', '{_js(trigger_raw)}')">编辑</button>
+            <button class="test-btn" onclick="testScene('{_js(trigger_raw)}', event)">测试</button>
         </div>
     </div>
     <div class="info">创建时间: {created_display}</div>
@@ -329,7 +393,8 @@ class CombinedManageView(HomeAssistantView):
 </div>"""
 
         for auto in automations_raw:
-            auto_id = html_mod.escape(str(auto.get("automation_id", "")))
+            auto_id_raw = str(auto.get("automation_id", ""))
+            auto_id = html_mod.escape(auto_id_raw)
             trigger_entity = auto.get("trigger", {}).get("entity_id", "")
             friendly = _entity_id_to_friendly(hass, trigger_entity)
             above = auto.get("trigger", {}).get("above")
@@ -356,11 +421,14 @@ class CombinedManageView(HomeAssistantView):
                 kind_tag = "状态自动化" if to_val is not None else "传感器自动化"
                 # 编辑弹窗只认 entity+above/below——to/at 形态给了会误导
                 # （保存即覆盖成丢 to 的形态），一律以删除重建为准（v1.0.32）
+                # v1.0.41（F1）：onclick 内四个实参全部 _js(原始值)。旧实现
+                # above/below 裸插值（JS+HTML 双层皆穿），entity 只 html 转义
+                # （单引号解码后照样截断 JS 字符串）。
+                above_js = _js("" if above is None else above)
+                below_js = _js("" if below is None else below)
                 edit_btn_html = "" if to_val is not None else (
-                    f"""<button class="edit-btn" onclick="openEditAuto('{auto_id}', """
-                    f"""'{html_mod.escape(trigger_entity)}', """
-                    f"""'{above if above is not None else ""}', """
-                    f"""'{below if below is not None else ""}')">编辑</button>"""
+                    f"""<button class="edit-btn" onclick="openEditAuto('{_js(auto_id_raw)}', """
+                    f"""'{_js(trigger_entity)}', '{above_js}', '{below_js}')">编辑</button>"""
                 )
 
             created = auto.get("created_at", "")
@@ -394,9 +462,9 @@ class CombinedManageView(HomeAssistantView):
 <div class="card auto" id="auto-{auto_id}">
     <div class="card-header">
         <div><span class="card-trigger auto">{html_mod.escape(trigger_display)}</span><span class="card-tag auto">{kind_tag}</span></div>
-        <button class="delete-btn" onclick="deleteAutomation('{auto_id}', '{html_mod.escape(trigger_display)}')">删除</button>
+        <button class="delete-btn" onclick="deleteAutomation('{_js(auto_id_raw)}', '{_js(trigger_display)}', event)">删除</button>
         {edit_btn_html}
-        <button class="test-btn" onclick="testAutomation('{auto_id}')">测试</button>
+        <button class="test-btn" onclick="testAutomation('{_js(auto_id_raw)}', event)">测试</button>
     </div>
     <div class="info">创建时间: {created_display}{trigger_info}</div>
     <div class="actions-box">
@@ -592,6 +660,14 @@ class AutomationDeleteView(HomeAssistantView):
                 return self.json(
                     {"success": False, "error": "请提供要修改的trigger或actions"}, 400
                 )
+            # v1.0.41（F2）：入库前形态闸——渲染层 _js 只是最后一道防御，
+            # junk entity_id / 非数值阈值这类 trigger 从一开始就不该进 .storage。
+            if trigger is not None:
+                bad = _validate_trigger(trigger)
+                if bad:
+                    return self.json(
+                        {"success": False, "error": f"trigger 字段不合规: {bad}"}, 400
+                    )
 
             success, message = await store.update_automation(
                 automation_id, trigger, actions

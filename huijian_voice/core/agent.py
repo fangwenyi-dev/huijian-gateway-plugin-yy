@@ -125,6 +125,16 @@ SYSTEM_PROMPT = (
 )
 
 
+# v1.0.41 安全（审查 S2 第一层）：LLM 回吐的工具名不可信——模型可被话术/friendly_names
+# 诱导吐出含 `../` 的名字，而下游 legacy 回落把名字裸拼进 URL 路径（yarl 归一化
+# dot-segment → 携 Supervisor 全权 token 可打任意 HA REST 写端点）。白名单唯一真源=
+# 工具 schema 本身（TOOLS 增删自动同步，单点维护）。
+_TOOL_NAMES = frozenset(
+    t["function"]["name"] for t in TOOLS
+    if isinstance(t, dict) and isinstance(t.get("function"), dict)
+    and isinstance(t["function"].get("name"), str))
+
+
 class Agent:
     def __init__(self, settings, ha, executor):
         self.settings = settings
@@ -327,6 +337,11 @@ class Agent:
 
     async def _tool(self, name: str, args: dict) -> tuple[bool, str]:
         from .nlu.fast_path import Plan
+        # v1.0.41 安全（审查 S2 第一层）：白名单外的工具名直接拒（含一切路径形态），
+        # 永不带入执行/回落链。非 str 名也在此拦下（LLM 可吐任意 JSON）。
+        if not isinstance(name, str) or name not in _TOOL_NAMES:
+            logger.warning("[Agent] LLM 回吐非法工具名，已拒绝: %r", str(name)[:80])
+            return False, "工具名不合法"
         if name == "huijianGetLiveContext":
             result = await self.ha.handle_intent(name, {})
             raw = json.dumps(result.get("raw", result), ensure_ascii=False)[:2000]

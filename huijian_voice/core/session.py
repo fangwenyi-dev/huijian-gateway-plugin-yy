@@ -105,11 +105,16 @@ class BaseSession:
 class SttSession(BaseSession):
     channel = "stt"
 
+    # v1.0.41 审查 S16：单会话 PCM 累积顶（16k×2B/s≈32KB/s，取 5 分钟 ≈9.4MB）。
+    # 正常语句远小于此；触顶即异常流（无 stop 狂发），丢最旧保顶不再无界涨。
+    _MAX_PCM_BYTES = 32000 * 300
+
     def __init__(self, ws, ctx):
         super().__init__(ws, ctx)
         self._pcm = bytearray()
         self._decoder: Optional[audio.OpusPcmDecoder] = None
         self._dec_err = False
+        self._pcm_overflow_warned = False
         self._task: Optional[asyncio.Task] = None
 
     async def on_text(self, raw: str) -> None:
@@ -138,6 +143,16 @@ class SttSession(BaseSession):
         if self._decoder:
             try:
                 self._pcm += self._decoder.decode(data)
+                # v1.0.41 审查 S16：单会话硬上限——16k s16 ≈32KB/s，开放局域网
+                # （require_token=false）下设备狂发二进制帧且不发 stop 时，旧实现
+                # 内存无界涨（WS 帧大小上限对分帧累加无效）。溢出丢最旧保最新
+                # （与 assist_satellite 音频队列同语义），每会话留痕一次。
+                if len(self._pcm) > self._MAX_PCM_BYTES:
+                    del self._pcm[:len(self._pcm) - self._MAX_PCM_BYTES]
+                    if not self._pcm_overflow_warned:
+                        self._pcm_overflow_warned = True
+                        logger.warning("[STT] 单会话语音超上限 %dKB，丢最旧保顶（异常长流？）",
+                                       self._MAX_PCM_BYTES // 1024)
             except Exception:
                 logger.debug("[STT] 解码异常帧 len=%d", len(data), exc_info=True)
 

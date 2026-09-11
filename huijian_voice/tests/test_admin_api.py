@@ -20,7 +20,11 @@ from core.ws_server import AppContext
 
 
 class StoreSnap:
-    def snapshot(self): return {"asr_paraformer_bilingual": {"status": "ready", "ready": True}}
+    # v1.0.41：快照键形对齐 model_store.snapshot() 真形态 {state,pct,detail,ready}
+    # （F6 前端就按此消费；旧的 {"status":…} 假形曾让页面字段错位无人察觉）。
+    def snapshot(self):
+        return {"asr_paraformer_bilingual": {"state": "ready", "pct": 100,
+                                             "detail": "已就绪", "ready": True}}
     def is_ready(self, k): return True
     def keys(self): return ["asr_paraformer_bilingual", "tts_kokoro_multilang"]
     def ensure_async(self, key, cb=None): pass
@@ -28,7 +32,8 @@ class StoreSnap:
 
 class ScenesFake:
     triggers = ["观影模式"]
-    async def refresh(self, force=False): pass
+    async def refresh(self, force=False):
+        return True        # v1.0.41（F5）：refresh 契约改为返回成败 bool
     def all(self):
         return [{"trigger_phrase": "观影模式", "name": "观影", "scene_id": "s1",
                  "created_at": "2026-09-01T00:00:00",
@@ -81,7 +86,10 @@ def admin():
         rest={"/api/config/automations/config": {"automations": [
             {"id": "auto1", "alias": "回家开灯", "description": "地理围栏到家",
              "last_triggered": "2026-09-12T10:00:00"},
-            {"id": "auto2", "alias": "YAML 未重载"}]}})
+            {"id": "auto2", "alias": "YAML 未重载"}]},
+            # v1.0.41（F5）：语音自动化通道显式给空表——缺键=集成未装，
+            # _automations 现在会如实挂 note，本 fixture 测的是双引擎"皆正常"路径。
+            "/api/huijian-ai/automations": {"automations": []}})
     ctx = AppContext(settings=SettingsFake(), ha=ha, asr=None, tts=TtsFake(),
                      pipeline=PipelineFake(), scenes=ScenesFake(), textcnn=None,
                      store=StoreSnap(), started_at=time.time())

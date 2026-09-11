@@ -220,18 +220,32 @@ class Settings:
                 c["api_key"] = "****"
         if d["llm"].get("api_key"):
             d["llm"]["api_key"] = "****"
-        if d["security"].get("ws_token"):
-            t = d["security"]["ws_token"]
-            d["security"]["ws_token"] = t[:4] + "…" + t[-4:]
-        if d["security"].get("pairing_token"):
-            # v1.0.40（D10）：配对 token 同样是凭据，按同纪律脱敏（旧实现原文返回）
-            t = d["security"]["pairing_token"]
-            d["security"]["pairing_token"] = t[:4] + "…" + t[-4:]
+        # v1.0.41 审查 S9：脏叶子（repair 只查节点顶层类型，dict/int 可藏在 ws_token 位）
+        # 会在切片处 TypeError → GET /api/settings 恒 500。非 str 一律按 **** 封顶
+        # （异常形态的凭据本来就更不能出门）。
+        for k in ("ws_token", "pairing_token"):
+            t = d["security"].get(k)
+            if not t:
+                continue
+            if isinstance(t, str):
+                d["security"][k] = t[:4] + "…" + t[-4:]
+            else:
+                d["security"][k] = "****"
         return d
 
     def update(self, patch: dict) -> dict:
         """深合并写入（Web 保存）。拒绝把脱敏占位 **** 回写成 api_key。"""
         with self._lock:
+            # v1.0.41 审查 S3：`{"security": null}` 这类非 dict 脏节点经 _deep_merge
+            # 覆盖后会被 _repair_nodes 重置默认 → _ensure_secrets 静默重生成
+            # ws_token/pairing_token → **全部已配对卫星/小程序握手失效且零提示**。
+            # 写入侧直接丢弃脏节点（保住既有值并大声告警）；读侧 repair 兜底不变。
+            dirty = [k for k, v in list(patch.items())
+                     if isinstance(DEFAULTS.get(k), dict) and not isinstance(v, dict)]
+            if dirty:
+                logger.error("[配置] 丢弃非 dict 脏节点写入（保护既有凭据）: %s",
+                             ", ".join(f"{k}({type(patch[k]).__name__})" for k in dirty))
+                patch = {k: v for k, v in patch.items() if k not in dirty}
             self._scrub_masked(patch)
             self._data = _deep_merge(self._data, patch)
             self._repair_nodes()          # v1.0.40：patch 也可能把节点写成非 dict

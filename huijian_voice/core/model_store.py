@@ -116,6 +116,10 @@ class ModelStore:
         self._write_status(snap)
 
     def _write_status(self, snap: dict):
+        # v1.0.41 审查 S17-2：旧实现中途异常会留孤儿——fchmod/fdopen 抛错时 fd 泄漏
+        # （慢性耗尽 select fd 表），写/换名失败时 .mst-*.tmp 永久堆积在数据盘。
+        # 统一 finally 兜底：fd 未移交必关、tmp 未转正必删。
+        fd, tmp = None, None
         try:
             self.status_file.parent.mkdir(parents=True, exist_ok=True)
             # F6：tmp 名必须唯一——与主循环 _atomic_write 共用固定 .tmp 名时，
@@ -127,10 +131,23 @@ class ModelStore:
             # _atomic_write 的 fchmod 同源教训——事实文件必须世界可读）。
             os.fchmod(fd, 0o644)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
+                fd = None          # 所有权移交 fdopen，finally 不再关
                 f.write(json.dumps({"updated": time.time(), "models": snap}, ensure_ascii=False, indent=2))
             os.replace(tmp, self.status_file)
+            tmp = None             # 已转正，不再是孤儿
         except Exception as e:  # 状态文件写失败不该阻断下载
             logger.debug("[模型] 状态文件写入失败: %s", e)
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
 
     # ── 下载/解包 ───────────────────────────────────────────────
     def ensure(self, key: str, force: bool = False) -> bool:

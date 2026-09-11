@@ -35,20 +35,25 @@ class SceneCache:
         稳态一律走后台，语音路径零等待。"""
         return (not self._loaded) and (time.time() - self._last_attempt >= TTL_S)
 
-    async def refresh(self, force: bool = False) -> None:
+    async def refresh(self, force: bool = False) -> bool:
+        """v1.0.41（F5）：返回显式成败。handle_intent 恒折叠不抛，上层 try/except
+        是死代码——「集成掉线如实说明」必须看返回值：True=拉取成功（或缓存尚在
+        TTL 内被跳过）；False=本轮拉取失败（旧缓存照常保留，HA 重启窗口不误清）。"""
         async with self._lock:
             now = time.time()
             if not force and now - self._last_refresh < TTL_S:
-                return
+                return True
             self._last_attempt = now
-            result = await self.ha.handle_intent("HassListVoiceScenes", {}, timeout=5.0)
+            result = await self.ha.handle_intent("HassListVoiceScenes", {}, timeout=5.0) or {}
             if result.get("success") and isinstance(result.get("scenes"), list):
                 self._scenes = [s for s in result["scenes"] if isinstance(s, dict)]
                 self._triggers = [s.get("trigger_phrase", "") for s in self._scenes if s.get("trigger_phrase")]
                 self._last_refresh = now
                 self._loaded = True
                 logger.debug("[场景] 缓存 %d 个触发词", len(self._triggers))
+                return True
             # 失败保留旧缓存（HA 重启窗口期不误清空）
+            return False
 
     def refresh_soon(self) -> None:
         """TTL 到期 → 后台单飞刷新（不 await，不抛，主路径立即用陈旧缓存）。"""

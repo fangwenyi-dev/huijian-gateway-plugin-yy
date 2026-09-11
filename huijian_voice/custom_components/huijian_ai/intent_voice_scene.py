@@ -407,12 +407,23 @@ class HassTriggerVoiceSceneIntent(intent.IntentHandler):
                 )
 
         all_success = all(a.get("result") != "error" for a in executed_actions)
-        return {
+        out = {
             "success": all_success,
             "scene_id": scene.get("scene_id"),
             "executed_actions": executed_actions,
-            "message": f"已执行场景：{trigger_phrase}",
         }
+        if all_success:
+            out["message"] = f"已执行场景：{trigger_phrase}"
+        else:
+            # v1.0.41 审查 S1：部分失败时 message 不能再带「已执行场景」成功话术——
+            # core/executor 失败分支取 error or message 折叠播报，设备离线等失败会被
+            # 播成"已执行"（与 v1.0.39 逐实体折算同病灶的场景路径漏网）。error 优先，
+            # message 同步置失败文案，防直呼 message 的旧消费方二次踩雷。
+            nfail = sum(1 for a in executed_actions if a.get("result") == "error")
+            fail_msg = f"场景「{trigger_phrase}」{nfail}/{len(executed_actions)} 个动作没执行成功"
+            out["error"] = fail_msg
+            out["message"] = fail_msg
+        return out
 
     async def _execute_action_with_timeout(
         self, intent_obj: intent.Intent, intent_name: str, params: dict[str, Any]

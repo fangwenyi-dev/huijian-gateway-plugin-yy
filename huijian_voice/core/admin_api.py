@@ -174,16 +174,22 @@ def _scene_row(sc: dict) -> dict:
         # 慧尖现役形态判据：target 为 list；或意图自带语义（无目标也成人话）。
         # 不满足即走下方平铺兜底——`_hv_action_cn` 对未知意图只会回吐裸英文
         # 意图名（非空），若按"非空即用"会把平铺形态的 entity_id 一起吞掉。
-        if isinstance(tgt, list) or intent in ("SetDeviceMode",
-                                               "AdjustDeviceAttribute",
-                                               "ControlWindow"):
+        # v1.0.41（F14）：同理会吞掉**平铺 dict** target 的 area/name（旧/LLM 形
+        # {"area":…,"name":…}）——_hv_action_cn 只认 list 形态，平铺形被 hv 分支
+        # 劫持后只剩裸动词。自带语义意图遇 dict 平铺 target 时不进 hv 分支，
+        # 由下方兜底内联渲染 area+name。
+        if isinstance(tgt, list) or (intent in ("SetDeviceMode",
+                                                "AdjustDeviceAttribute",
+                                                "ControlWindow")
+                                     and not isinstance(tgt, dict)):
             cn = _hv_action_cn(a)
             if cn:
                 sums.append(cn)
                 continue
         # ── 兜底：非慧尖形态（平铺 params/entity_id）保持原渲染，兼容历史数据 ──
         area = tgt.get("area") if isinstance(tgt, dict) else ""
-        bits = [str(x) for x in (pr.get("entity_id"), area, pr.get("state"),
+        name = tgt.get("name") if isinstance(tgt, dict) else ""
+        bits = [str(x) for x in (pr.get("entity_id"), area, name, pr.get("state"),
                                  pr.get("brightness"), pr.get("temperature"))
                 if x not in (None, "")]
         sums.append((f"{intent} {' '.join(bits[:3])}").strip())
@@ -199,8 +205,10 @@ async def _scenes(request):
     ctx = request.app[CTX_KEY]
     error = ""
     try:
-        await ctx.scenes.refresh(force=True)
-    except Exception as e:                       # 集成掉线/超时：页面如实说明
+        ok = await ctx.scenes.refresh(force=True)
+        if not ok:            # v1.0.41（F5）：refresh 恒不抛（handle 折叠），成败看返回值
+            error = "场景列表拉取失败（集成未装/未响应），下方为上次缓存"
+    except Exception as e:                       # 假件/未来实现抛异常：同样如实标注
         error = f"场景列表拉取失败：{str(e)[:120]}"
     rows = [_scene_row(sc) for sc in
             (ctx.scenes.all() if hasattr(ctx.scenes, "all") else [])
@@ -292,29 +300,36 @@ async def _automations(request):
     note = ""
     try:
         data = await ctx.ha.rest_get("/api/huijian-ai/automations")
-        for a in ((data or {}).get("automations", [])
-                  if isinstance(data, dict) else []):
-            if not isinstance(a, dict):
-                continue
-            out.append({
-                "kind": "huijian",
-                "id": str(a.get("automation_id") or ""),
-                "alias": _hv_trigger_cn(a.get("trigger") or {}),
-                "trigger_raw": a.get("trigger") if isinstance(a.get("trigger"),
-                                                              dict) else {},
-                "description": "；".join(
-                    x for x in (_hv_action_cn(act)
-                                for act in (a.get("actions") or [])[:3]) if x),
-                "last_triggered": str(a.get("last_triggered") or ""),
-                "state": "语音引擎",
-            })
+        if not isinstance(data, dict):
+            # v1.0.41（F5）：rest_get 一切失败折叠 None、恒不抛——旧 except 是死路，
+            # 集成未装/未响应时 note 永远为空。按折叠结果显式标注。
+            note = "语音自动化读取失败（集成未装/未响应）"
+        elif data.get("success") is False:
+            note = f"语音自动化读取失败：{str(data.get('error') or '')[:80]}"
+        else:
+            for a in (data.get("automations") or []):
+                if not isinstance(a, dict):
+                    continue
+                out.append({
+                    "kind": "huijian",
+                    "id": str(a.get("automation_id") or ""),
+                    "alias": _hv_trigger_cn(a.get("trigger") or {}),
+                    "trigger_raw": a.get("trigger") if isinstance(a.get("trigger"),
+                                                                  dict) else {},
+                    "description": "；".join(
+                        x for x in (_hv_action_cn(act)
+                                    for act in (a.get("actions") or [])[:3]) if x),
+                    "last_triggered": str(a.get("last_triggered") or ""),
+                    "state": "语音引擎",
+                })
     except Exception as e:                        # 集成缺席不拦核心列表
         note = f"语音自动化读取失败（集成未装/未响应）：{str(e)[:80]}"
     cfg = await ctx.ha.rest_get("/api/config/automations/config")
     items = cfg.get("automations") if isinstance(cfg, dict) else None
     if not isinstance(items, list):
+        core_err = "读不到自动化配置（HA API 不可达或未鉴权）"
         return web.json_response({"automations": out,
-                                  "error": note or "读不到自动化配置（HA API 不可达或未鉴权）"})
+                                  "error": f"{note}；{core_err}" if note else core_err})
     states = await ctx.ha.states()
     for a in items:
         if not isinstance(a, dict):
@@ -363,7 +378,9 @@ def _op_response(j) -> web.Response:
 _ID_RE = re.compile(r"[A-Za-z0-9_-]+")
 # 触发词字符集与语音侧同一纪律（creation 正则全部排除这些字符）——网页改名
 # 出去含空格/标点的触发词，语音既触发不了也永远删不到（审查 L4）。
-_PHRASE_RE = re.compile(r"[^「」\"』，。;；\s]{1,12}")
+# v1.0.41（F8）：补 ASCII `,`——creation.py 的句式字符类排除 `，,` 两个逗号，
+# 本类此前只排全角，「你好,世界」能从网页改出来、语音「删除句式」永远删不掉。
+_PHRASE_RE = re.compile(r"[^「」\"』，,。;；\s]{1,12}")
 
 
 def _bad_id(v: str) -> bool:
@@ -469,6 +486,10 @@ async def _auto_edit(request):
                 # 审查 L6：NaN/inf 过闸后进 JSON 体在集成侧炸不透明错误。
                 return web.json_response({"ok": False, "error": f"{k} 不是有效数值"})
             new_trig[k] = f
+    if "above" not in new_trig and "below" not in new_trig:
+        # v1.0.41（F3）：docstring 承诺"非数值形态拒绝"，旧实现却放行 entity-only
+        # 载荷——PUT 是全量替换，静默把自动化改回「任何状态变化都触发」语义。
+        return web.json_response({"ok": False, "error": "需至少一个数值阈值（高于/低于）"})
     if "above" in new_trig and "below" in new_trig and \
             new_trig["above"] >= new_trig["below"]:
         return web.json_response({"ok": False, "error": "高于值必须小于低于值（区间）"})

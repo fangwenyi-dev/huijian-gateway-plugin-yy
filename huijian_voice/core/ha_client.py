@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from typing import Any, Optional
 
@@ -23,6 +24,11 @@ import aiohttp
 from . import const
 
 logger = logging.getLogger("huijian.ha")
+
+# v1.0.41 安全（审查 S2）：意图名合法形态（HA 意图均为 CamelCase 标识符）。
+# 一切含 `.`/`/`/空格/控制字符的名字在入口即拒——封死 legacy 回落的
+# /api/intent/<name> 拼接被 dot-segment 归一化穿越的路径。
+_INTENT_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
 
 
 class HAClient:
@@ -86,6 +92,14 @@ class HAClient:
     async def handle_intent(self, name: str, data: dict, timeout: float = 10.0) -> dict:
         """执行一个慧尖意图。返回归一化 dict：{success, message?, data?, raw}。
         永不抛异常——失败折叠成 {success:False, message:...}（供话术层用）。"""
+        # v1.0.41 安全（审查 S2 第二层，全调用方兜底）：意图名必须是纯标识符。
+        # legacy 回落把名字**裸拼进 URL 路径**（_url 是字符串拼接，yarl 会归一化
+        # dot-segment），携 Supervisor 全权 token 即可被诱导打任意 HA REST 写端点
+        # （实测 `x/../../services/light/turn_on` → /api/services/light/turn_on）。
+        # 第一层在 agent._tool 白名单；这里覆盖 executor/管理页等一切直呼路径。
+        if not isinstance(name, str) or not _INTENT_NAME_RE.fullmatch(name):
+            logger.warning("[HA] 非法意图名已拒绝: %r", str(name)[:80])
+            return {"success": False, "message": "意图名不合法", "raw": None}
         if not self.ok or self._session is None:
             return {"success": False, "message": "HA 通道未就绪", "raw": None}
         body = {"name": name, "data": data}

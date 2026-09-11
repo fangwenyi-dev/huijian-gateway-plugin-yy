@@ -1,4 +1,5 @@
 import logging
+import time
 
 import voluptuous as vol
 from homeassistant.core import HomeAssistant, callback
@@ -96,8 +97,13 @@ class HuijianControlAPI(llm.API):
                 # Exception 并列，后者已覆盖前者）。暴露判定一旦出问题（注册表结构变化
                 # 等），这里会按"可见"放行且**不留任何痕迹** ⇒ LLM 可能看到用户刻意隐藏
                 # 的实体，而现场无从归因。保持 fail-open 语义，但必须留痕。
-                _LOGGER.debug("实体暴露判定失败，按可见处理: %s", state.entity_id,
-                              exc_info=True)
+                # v1.0.41 审查 S11：debug 在 HA 默认 INFO 档位下等于仍不留痕——判定
+                # 持续坏时现场不可见。升 warning 并 60s 限流一次（语义不变，运维可见）。
+                now = time.monotonic()
+                if now - getattr(self, "_expose_warn_ts", 0.0) >= 60.0:
+                    self._expose_warn_ts = now
+                    _LOGGER.warning("实体暴露判定失败，按可见处理（60s 限流留痕）: %s",
+                                    state.entity_id, exc_info=True)
         entry = entity_reg.async_get(state.entity_id)
         if not entry or entry.hidden_by or entry.disabled_by:
             return False, None

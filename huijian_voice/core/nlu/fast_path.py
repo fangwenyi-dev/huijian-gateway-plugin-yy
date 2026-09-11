@@ -267,8 +267,22 @@ def _is_complex_query(text: str) -> bool:
     t = text.lower()
     if re.search(r"(创建|自动(化|场景)|修改|删除|添加|配对的?)", t):
         return True
-    if re.search(r"(状态|情况|哪些|所有.*(?:灯|设备|开关)|列表)", t):
+    if re.search(r"(状态|情况|哪些|列表)", t):
         return True
+    if re.search(r"所有.*(?:灯|设备|开关)", t):
+        # v1.0.41（F13）：「所有…」分支原先不分位置——「把所有灯都关掉」这类
+        # 全屋祈使句被当查询交上层，无 LLM 的用户只剩兜底话术（真机主诉）。
+        # 收紧：句尾落控制动词（_WH_TRAIL_RE，$ 锚定）且**无疑问标记**才算祈使
+        # 放行（全屋分支在守卫之前已裁决，此处同口径兜底）；疑问标记一票否决。
+        # 裁决：豁免只认疑问标记（什么|多少|几|吗|呢|怎么|？），「都/啦/了」
+        # 不豁免——「所有灯都关啦」是命令不是问句。放行条件与 _wholehouse_plan
+        # 尾动分支同判据（**句首即全屋标记**）：「客厅所有灯都打开」是区域句，
+        # 守卫照旧拦——放行会让它在真模型下被 T1 接成全屋，误开全家灯。
+        if _WH_TRAIL_RE.search(t) and _WH_HEAD_RE.match(t) and not re.search(
+                r"(什么|多少|几|吗|呢|怎么|[?？])", t):
+            pass
+        else:
+            return True
     if re.search(r"(为什么|怎么|如何|是不是|有没有|能否|可以.*吗)", t):
         return True
     if re.match(r"^(why|what|how|which|who|can you|could you)\b", t):
@@ -327,8 +341,12 @@ def _scan_window_action(text: str) -> Optional[str]:
 # 于是"拉上/合上/收起窗帘"这类关闭向说法被模型判成 OpenCover(0.86~0.97) 后原样
 # 映射 TurnDeviceOn → **反向执行**（用户要关、设备去开）。按方向词就地纠正：
 # 出现关闭向词且无开启向词 → 翻成 TurnDeviceOff。
-_COVER_CLOSE_WORDS = ("拉上", "合上", "收起", "收拢", "放下", "降下", "关闭", "关上", "关掉", "关")
-_COVER_OPEN_WORDS = ("打开", "拉开", "开启", "开一下", "升起", "升起", "抬", "开")
+# v1.0.41 修复（F12）：真模型实测「拉下窗帘」0.959/「窗帘拉下来」0.858/「闭合窗帘」
+# 0.937 全部过阈值却不在词表 → 原样执行成"开帘"（方向反转，用户可感最重残留洞）。
+# 补入 拉下/拉下来/闭合/拉严；顺带去重 open 表里误写的两个「升起」。
+_COVER_CLOSE_WORDS = ("拉上", "合上", "收起", "收拢", "放下", "降下", "关闭", "关上",
+                      "关掉", "关", "拉下", "拉下来", "闭合", "拉严")
+_COVER_OPEN_WORDS = ("打开", "拉开", "开启", "开一下", "升起", "抬", "开")
 
 
 def _cover_intent(text: str, intent: str) -> str:
@@ -342,6 +360,39 @@ def _cover_intent(text: str, intent: str) -> str:
     except Exception:
         return intent
     return intent
+
+
+# ── v1.0.41（F11）：帘/窗语序归一 ─────────────────────────────────
+# SOV「(把)客厅窗帘拉上」「窗帘拉上」「卧室窗户关上」与 SVO「拉上客厅窗帘」
+# 「关上窗户」——原动作表只有动词前置引导词（^打开/^关闭…），这些形态 T0 全部
+# 落空（裸「拉上窗帘」只靠 T1 方向纠正侥幸救回，无资产/关闭 T1 即真落空）。
+# 就地归一成「关闭客厅窗帘」标准动形，复用既有目标提取、区域扫描、窗型纠正与
+# cover 域推断：窗帘/纱帘→Turn*+domains=[cover]；窗户→「关闭卧室窗户」既有
+# 链路→窗型纠正 ControlWindow。**不收裸 关/开**（「关一下客厅窗帘」的裸关会与
+# 后续杂字误拼）；等值判定前置，场景触发词不受改写影响。
+_COVER_V_CLOSE = "拉上|合上|闭合|收起|收拢|拉下来|拉下|降下|关上|关闭|关了"
+_COVER_V_OPEN = "拉开|打开|开了"
+_COVER_HEAD = r"[\u4e00-\u9fff]{0,6}?(?:窗帘|纱帘|窗户)"
+_COVER_SOV_RE = re.compile(
+    rf"^(?P<head>{_COVER_HEAD})(?:(?P<close>{_COVER_V_CLOSE})"
+    rf"|(?P<open>{_COVER_V_OPEN}))(?:了|啦)?$")
+_COVER_SVO_RE = re.compile(
+    rf"^(?:(?P<close>{_COVER_V_CLOSE})|(?P<open>{_COVER_V_OPEN}))(?:了|啦)?"
+    rf"(?P<head>{_COVER_HEAD})$")
+
+
+def _cover_wordorder(text: str) -> Optional[str]:
+    """SOV/SVO 帘窗句 → 「关闭/打开＋目标」标准形；不匹配或已是标准形→None。永不抛。"""
+    try:
+        for m in (_COVER_SOV_RE.match(text), _COVER_SVO_RE.match(text)):
+            if not m:
+                continue
+            cand = ("打开" if m.group("open") else "关闭") + m.group("head")
+            if cand != text:
+                return cand
+    except Exception:
+        return None
+    return None
 
 
 class FastPath:
@@ -363,11 +414,37 @@ class FastPath:
             m = pattern.match(text)
             if not m:
                 continue
-            word = _wholehouse_word(text[m.end():].strip() or text)
+            rest = text[m.end():].strip()
+            # v1.0.41 审查 S12：动词后的**残句必须以全屋标记起头**——
+            # 「打开客厅所有灯」这类动词+区域+全屋混合句是**区域句**（客厅的灯），
+            # 旧实现剥标记后拿 domain_hint 直产 whole_house，把「客厅」静默吞掉
+            # = 扩大作用域开全家灯（真机可感，比落空更糟）。与尾动分支的
+            # _WH_HEAD_RE 判据同口径：区域句交回上层（T1/LLM 能接就接，
+            # 接不住也只是不执行，绝不冒然全屋）。
+            if rest and not _WH_HEAD_RE.match(rest):
+                continue
+            word = _wholehouse_word(rest or text)
             doms = [str(d) for d in (T.domain_hint(word) if word else [])]
             if not doms:
                 return None
             trace.append(f"全屋显式:{word}→domains={doms}")
+            return Plan(intent=intent_type,
+                        args={"target": [{"devices": [{"name": "", "domains": doms}]}]},
+                        source="t0", utterance=text, trace=trace, whole_house=True)
+        # v1.0.41（F13）：动词在尾的全屋命令（「所有灯打开」「家里的灯全部关掉」
+        # 「帮我把所有灯都关掉」剥把字后=「所有灯都关掉」）——旧表只认动词前置，
+        # 这类真机高频形态只能靠 T1/LLM。同判据同产物（认不出域不冒然全屋全动）。
+        # 只接**句首即全屋标记**的形态：「客厅所有灯都打开」是区域句不是全屋句，
+        # 误产 whole_house 会打开全家灯——静默做错比落空更糟，交回上层。
+        m_tw = _WH_TRAIL_RE.search(text)
+        if m_tw and _WH_HEAD_RE.match(text):
+            intent_type = ("TurnDeviceOff" if m_tw.group(1)[0] == "关"
+                           else "TurnDeviceOn")
+            word = _wholehouse_word(text[:m_tw.start()].strip() or text)
+            doms = [str(d) for d in (T.domain_hint(word) if word else [])]
+            if not doms:
+                return None
+            trace.append(f"全屋尾动:{word}→domains={doms}")
             return Plan(intent=intent_type,
                         args={"target": [{"devices": [{"name": "", "domains": doms}]}]},
                         source="t0", utterance=text, trace=trace, whole_house=True)
@@ -421,6 +498,16 @@ class FastPath:
             trace.append("复杂查询守卫→交上层")
             # 等值触发词已在最前面裁决过（同 text 同 check），此处不再重复判定
             return self._miss(trace)
+
+        # v1.0.41（F11）：帘窗 SOV/SVO 语序归一（「客厅窗帘拉上」「拉上客厅窗帘」
+        # 「卧室窗户关上了」）。放在两道等值判定之间：触发词写成倒装形已在 L481
+        # 等值裁决；写成标准形而用户说倒装形的，由下方第二道等值（锁具归一后那
+        # 道）接住。裸 关/开 不在改写词表——「关一下客厅窗帘」「睡觉关窗帘」等
+        # 既有形态一律不碰。
+        cov = _cover_wordorder(text)
+        if cov:
+            trace.append(f"帘窗语序→{cov}")
+            text = cov
 
         # 体验批 E2E 补洞：SOV 语序锁令「大门开锁/把门锁上(门+锁上)」动作前置归一。
         # 否定/疑问字（没不别谁哪）不参与——「还没上锁」是陈述不是命令。
@@ -705,7 +792,12 @@ class FastPath:
         # 显式全屋（余下语序："全屋的灯打开"等）：目标不带区域、不带设备名，只留域
         # 过滤（集成端 name 空 + area 无 = 不过滤，全屋同域设备一起动），并打
         # whole_house 标，让卫星空间化/创建侧区域继承一律让路。
-        if intent in ("TurnDeviceOn", "TurnDeviceOff") and _WHOLEHOUSE_RE.search(text):
+        # v1.0.41 审查 S12：本"余下语序"全屋兜底同样不得吞区域——rest_text 必须
+        # 以全屋标记起头。否则「打开卧室全部窗帘」(rest=卧室全部窗帘) 会剥掉
+        # 「全部」得「卧室窗帘」→ domain cover → whole_house=True，把「卧室」静默
+        # 丢弃开全家窗帘。区域句落回下方 :803 正常 area/name 处理（卧室+窗帘）。
+        if (intent in ("TurnDeviceOn", "TurnDeviceOff") and _WHOLEHOUSE_RE.search(text)
+                and _WH_HEAD_RE.match(rest_text or "")):
             word = _wholehouse_word(rest_text or text)
             doms = [str(d) for d in (T.domain_hint(word) if word else [])]
             if doms:
@@ -750,6 +842,13 @@ _AC_KEYWORDS = ("空调", "空調", "aircondition")
 # 显式全屋说法（2026-09-15 用户令）：只有用户明说"所有/全部/全屋/整个家/家里/每个"
 # 才是全屋语义；没写区域的"开灯"由创建侧继承触发条件的区域（客厅温度→客厅的灯）。
 _WHOLEHOUSE_RE = re.compile(r"所有|全部|全屋|整屋|整个家|家里|全家|各个|每个")
+# v1.0.41（F13）：全屋句的**句尾**控制动词（$ 锚死——「家里灯都开着吗」的 吗、
+# 「所有灯现在什么状态」的名词尾都不落位；裁决：「都」只作可选前缀、句尾只容
+# 完成态助词 了/啦——「所有灯都关啦」是命令，疑问字仍不豁免）。长形态排前。
+_WH_TRAIL_RE = re.compile(r"(?:全都|全部|都|全)?"
+                          r"(关闭|关掉|关了|打开|开了|开启|开一下|开|关)(?:了|啦)?$")
+# 全屋句的合法句首（守卫与尾动分支共用）：句首即全屋标记才算全屋句。
+_WH_HEAD_RE = re.compile(r"^(所有|全部|全屋|整屋|整个家|家里|全家|各个|每个)")
 
 # 连排残渣检测（2026-09-10）：区域名里出现这些动作动词＝parse_target 把第二个动作
 # 子句当成了区域（见 _build_plan 守卫）。与 creation._SERIAL_VERB 同表。

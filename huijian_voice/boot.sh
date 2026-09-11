@@ -102,10 +102,16 @@ else
       if tar -xzf /data/klar/tmp.tar.gz -C /data/klar/x 2>/dev/null; then
         bin=$(find /data/klar/x -maxdepth 1 -type f \( -name klar -o -name 'klar-linux-*' \) | head -1)
         if [ -n "$bin" ]; then
-          mv -f "$bin" /data/klar/klar && chmod 755 /data/klar/klar
-          echo "$KLAR_VER" > /data/klar/.version
-          klar_ok=1
-          bashio::log.info "Klar 引擎 v${KLAR_VER} 落位 /data/klar/klar（sha256 已核验；s6 服务将拉起 loopback :10520）"
+          # v1.0.41 审查 S10：旧写法 mv 失败（同设备跨文件系统 EXDEV 之外的权限/满盘等）
+          # 仍继续往下写 .version+klar_ok=1+成功日志 → **假成功**：下次启动因
+          # [ .version == KLAR_VER ] 直接跳过安装，引擎永远缺席且无人知。mv 必须门控。
+          if mv -f "$bin" /data/klar/klar && chmod 755 /data/klar/klar; then
+            echo "$KLAR_VER" > /data/klar/.version
+            klar_ok=1
+            bashio::log.info "Klar 引擎 v${KLAR_VER} 落位 /data/klar/klar（sha256 已核验；s6 服务将拉起 loopback :10520）"
+          else
+            bashio::log.warning "Klar 引擎落位 mv/chmod 失败（磁盘满/权限?）→ 不写 .version，下次启动重试"
+          fi
         fi
       fi
     fi
