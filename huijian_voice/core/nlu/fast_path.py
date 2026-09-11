@@ -450,6 +450,61 @@ class FastPath:
                         source="t0", utterance=text, trace=trace, whole_house=True)
         return None
 
+    # ── v1.0.42 家电族：扫地机/吸尘器/拖地机 专有动作层 ─────────────────
+    # 集成侧 TurnDeviceOn/Off 已有 vacuum 映射（on→vacuum.start 开扫、
+    # off→vacuum.return_to_base 回充），本层只把字面表不认的形态（启动/
+    # 开始清扫/暂停/回充，含设备词前置的 SOV 语序）收束到既有意图；
+    # 「打开/关闭扫地机器人」等标准形不带专有词，照旧走原表零扰动。
+    _VAC_DEV_RE = re.compile(r"(?:扫地机器人|扫拖机器人|扫地机|吸尘器|拖地机)")
+    _VAC_START = re.compile(r"(启动|开始|清扫|打扫|扫地|吸尘|拖地|工作|出发|出动)")
+    _VAC_RETURN = re.compile(r"(回充|回巢|回去|回来|回家|结束|收工|充电)")
+    _VAC_PAUSE = re.compile(r"(暂停|停一下|先停|停止)")
+    # pre 侧区域提取前的动词/介词残渣清除（「让客厅的扫地机器人…」pre=「让客厅的」→「客厅」）
+    _VAC_PRE_CLEAN = re.compile(r"(让|把|给|帮我把|帮我|请|的|去|马上|现在|立即|一下|吧|"
+                                r"启动|开始|暂停|停一下|先停|停止|回充|回巢|回去|回来|回家|"
+                                r"结束|收工|充电|清扫|打扫|扫地|吸尘|拖地|工作)")
+    # 无设备词的裸令（"开始扫地/去打扫"）→ 通用名「扫地机器人」+ domains=[vacuum]，
+    # 集成侧单台 vacuum 按域即中。
+    _VAC_BARE = re.compile(r"^(?:开始|去|马上|现在|立即)?(?:扫地|吸尘|拖地|打扫)(?:一下|吧|了)?$")
+    _VAC_NOGO = re.compile(r"[吗呢？?]|什么|多少|几|怎|哪|状态|怎样|如何|是不是|有没有|"
+                           r"[不别勿莫没]")
+
+    def _vacuum_plan(self, text: str, trace: list) -> Optional[Plan]:
+        if self._VAC_NOGO.search(text):        # 疑问/否定绝不冒动设备
+            return None
+        m = self._VAC_DEV_RE.search(text)
+        if m:
+            pre, post = text[:m.start()], text[m.end():]
+            # 动作词在设备短语**两侧合找**，设备词本身不参与——「关闭扫地机器人」
+            # 的"扫地"二字藏在设备名里，整句检测会把关闭误判成开扫（意图反转）。
+            rest = pre + post
+            name = m.group(0)
+            area = None
+            if pre:
+                # 剥动词/介词残渣后走 _area_of_prefix（parse_target 对裸区域名
+                # 回 area=None——「让客厅的扫地机器人开始」pre 段只剩「客厅」）。
+                clean = self._VAC_PRE_CLEAN.sub("", pre).strip()
+                if clean and len(clean) <= 6:
+                    area = T._area_of_prefix(clean)
+        elif self._VAC_BARE.match(text):
+            rest, name, area = "扫地", "扫地机器人", None
+        else:
+            return None
+        if self._VAC_PAUSE.search(rest):
+            intent, tag = "PauseDevice", "家电暂停"
+        elif self._VAC_RETURN.search(rest):
+            intent, tag = "TurnDeviceOff", "家电回充→TurnDeviceOff"
+        elif self._VAC_START.search(rest):
+            intent, tag = "TurnDeviceOn", "家电清扫→TurnDeviceOn"
+        else:
+            return None                        # 打开/关闭等标准形交回原表
+        entry: dict = {"devices": [{"name": name, "domains": ["vacuum"]}]}
+        if area:
+            entry["area"] = area
+        trace.append(f"{tag}:{area or ''}{name}")
+        return Plan(intent=intent, args={"target": [entry]}, source="t0",
+                    utterance=text, trace=trace)
+
     # ── 主入口 ──────────────────────────────────────────────────
     async def match(self, raw_text: str) -> Optional[Plan]:
         trace: list[str] = []
@@ -535,6 +590,13 @@ class FastPath:
         # 边任一段听不懂会拒绝，这里同样拒（交上层），宁可如实说没听懂。
         if creation.serial_clauses(text):
             return self._miss(trace, "连排句→交链发/上层")
+
+        # v1.0.42 家电族：两道场景等值与连排闸之后、动作表扫描之前——
+        # 「暂停扫地机器人」必须先于此层的暂停(窗户)表项，SOV 形「扫地机器人
+        # 开始清扫」也是动作表够不到的语序。
+        vp = self._vacuum_plan(text, trace)
+        if vp is not None:
+            return vp
 
         matched_intent: Optional[str] = None
         extra_args: dict[str, Any] = {}

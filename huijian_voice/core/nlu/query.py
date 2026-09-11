@@ -76,13 +76,24 @@ class QueryZone:
             return await self._state_answer(area, word.strip() or None)
         return None
 
+    # v1.0.42（Q1）：区域名前面的时间/礼貌/查询引导词。旧版正则 {2,4}?+后缀 从
+    # 句首起窗，「现在办公室的温度多少」提出「现在办公室」——查无此区域，整条
+    # 温度查询落兜底（真机日志 2026-09-11）。先剥前缀再抽区域。
+    _AREA_PREFIX_NOISE = re.compile(
+        r"^(?:现在|此刻|目前|眼下|今天|今晚|昨天|昨晚|刚才|刚刚|此时|请问|麻烦|"
+        r"帮我看看|帮我查(?:一下|下)?|查一下|查看一下|查下|查看|看一下|看下|"
+        r"告诉我|我想知道|想问下|问一下)+[的]?")
+
     def _find_area(self, text: str) -> Optional[str]:
-        """区域词提取：优先注册区域名（ha._areas），退化为后缀启发。"""
+        """区域词提取：剥时间/引导前缀 → 优先注册区域名（ha._areas）→ 后缀启发。"""
+        t = self._AREA_PREFIX_NOISE.sub("", text) or text
         names = sorted(set(self.ha._areas.values()), key=len, reverse=True) if self.ha._areas else []
         for n in names:
-            if n and n in text:
+            if n and (n in t or n in text):
                 return n
-        m = re.search(r"([\u4e00-\u9fff]{2,4}?(?:" + "|".join(_AREA_SUFFIX) + r"))", text)
+        # {1,4}?：「客厅/书房」这类两字区域（1字+后缀）也要能抽出（旧 {2,4}? 最少三字，
+        # 两字区域只在注册表命中时可用——registry 拿不到时静默丢区域）
+        m = re.search(r"([\u4e00-\u9fff]{1,4}?(?:" + "|".join(_AREA_SUFFIX) + r"))", t)
         return m.group(1) if m else None
 
     async def _time_answer(self) -> Optional[str]:
@@ -163,26 +174,34 @@ class QueryZone:
         return f"{prefix}开着{len(on_ents)}{noun}，比如{'、'.join(names[:2])}。"
 
     async def _sensor_answer(self, area: Optional[str], device_class: str, cn: str) -> Optional[str]:
-        states = await self.ha.states()
-        best = None
+        states = await self.ha.states()   # 此调用顺带触发 registry 懒同步（refresh_states 内）
+        # v1.0.42（Q2）：区域注册表整体拿不到时（老HA端点404/权限缺失/token无
+        # config读），不再"按区域过滤→全被滤光→返回None"，降级为全量找同量纲
+        # 传感器唯一命中；多颗则宁缺勿滥不猜。
+        have_area_data = bool(getattr(self.ha, "_areas", None)
+                              or getattr(self.ha, "_entity_area", None))
+        candidates: list[tuple[str, float]] = []
         for eid, ent in states.items():
             attrs = ent.get("attributes") or {}
             if attrs.get("device_class") != device_class:
                 continue
             name = (attrs.get("friendly_name") or "")
             ent_area = self.ha._entity_area.get(eid, "")
-            if area and ent_area != area and area not in name:
+            if area and have_area_data and ent_area != area and area not in name:
                 continue
             try:
                 val = float(ent.get("state"))
             except (TypeError, ValueError):
                 continue
-            best = (name, val)
-            if area and ent_area == area:
+            candidates.append((name, val))
+            if area and have_area_data and ent_area == area:
                 break
-        if not best:
+        if not candidates:
             return None
-        name, val = best
+        if len(candidates) > 1 and not have_area_data:
+            # 无区域信息且多颗同类传感器：答哪颗都是猜。诚实引导。
+            return f"家里有多个{cn}传感器，但还没同步到房间信息，请给传感器所在区域绑定设备后重试。"
+        name, val = candidates[0]
         unit = {"temperature": "度", "humidity": "%", "illuminance": "勒克斯"}[device_class]
         val_s = f"{val:.1f}".rstrip("0").rstrip(".")   # 26.5→「26.5」，26.0→「26」
         prefix = f"{area}的" if area else ""

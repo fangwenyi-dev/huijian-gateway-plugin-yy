@@ -12,10 +12,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#030712">
+<meta name="theme-color" content="#1d1750">
 <title>慧尖HA语音插件</title>
-<link rel="stylesheet" href="css/huijian.css?v=1.0.41">
-<link rel="stylesheet" href="css/voice.css?v=1.0.41">
+<link rel="stylesheet" href="css/huijian.css?v=1.0.42">
+<link rel="stylesheet" href="css/voice.css?v=1.0.42">
 </head>
 <body>
 <!-- 「星辰大海」背景层（与网关加载项同一设计标准/同一固定种子＝同一片天）：
@@ -263,7 +263,7 @@
 
 <script>
 "use strict";
-const CURRENT_VERSION = "1.0.41";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
+const CURRENT_VERSION = "1.0.42";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
 // 音色表 = kokoro-multi-lang-v1_1 官方 103 sid 全表（k2-fsa docs sid 表实证；
 // 标注=对用户上传试听样本的 CAM++ 声纹溯源榜：v1_1 不含晓晓/云扬，
 // sid18=zf_026 女声最似晓晓(0.454 全场最近)，sid81=zm_055 最似云扬）
@@ -329,7 +329,7 @@ document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{
 });
 
 /* ── 状态 ── */
-/* v1.0.41（F7）：status.json 是核心心跳写出的静态文件（nginx 直出）——核心进程
+/* v1.0.42（F7）：status.json 是核心心跳写出的静态文件（nginx 直出）——核心进程
    死掉后文件冻结，页面会永远显示"正常"。纯客户端时效判据：连续 ≥3 次轮询
    （4s×3≈12s）拿到同一个 ts 即认定状态停更；不用本地时钟与 ts 作差（无时钟
    假设），只比较 ts 是否推进。 */
@@ -506,7 +506,7 @@ $("#saveBtn").onclick = async ()=>{
 function safeJson(t, d){ if(!t||!t.trim()) return d; try{ return JSON.parse(t);}catch(e){ return null; } }
 
 /* ── 模型 ── */
-/* v1.0.41（F6）：后端 /api/models 发的是 model_store.snapshot() 形态
+/* v1.0.42（F6）：后端 /api/models 发的是 model_store.snapshot() 形态
    {state,pct,detail,ready}（states: pending/checking/downloading/extracting/
    ready/failed/manual/incomplete）——旧实现读 v.status/v.size_mb/v.path 三个
    不存在的键，状态列永远"未下载"、进度列永远空。与「状态」页模型卡同一映射。 */
@@ -582,7 +582,7 @@ async function loadScenes(){
   } catch(e){ $("#sceneList").textContent = "读取失败："+e.message; }
 }
 $("#sceneBtn").onclick = loadScenes;
-/* v1.0.41（F9）：行操作在飞守卫——操作列全是 <span class="copy">，连点即并行
+/* v1.0.42（F9）：行操作在飞守卫——操作列全是 <span class="copy">，连点即并行
    POST（改名后写覆盖先写、删除重复触发）。同一 op 键在飞只许一发，期间给该
    span 挂 .busy（pointer-events:none），finally 释放。 */
 const _opBusy = new Set();
@@ -666,7 +666,7 @@ async function autoOp(path, body, msg){
 async function loadEndpoints(){
   try {
     const r = await api("/api/endpoints");
-    // v1.0.41（F10）：端点/token 由 settings 用户可写——raw 插 innerHTML 与 data-c
+    // v1.0.42（F10）：端点/token 由 settings 用户可写——raw 插 innerHTML 与 data-c
     // 一律过 esc0（属性双引号语境下 & < > " 四个转义即闭合；复制消费走
     // dataset.c，浏览器解码后拿回原值，不受影响）。
     const MAP = [["stt_endpoint","识别 STT"],["tts_endpoint","播报 TTS"],["llm_endpoint","对话 LLM"]];
@@ -687,6 +687,6 @@ $("#regenBtn").onclick = async ()=>{
   try { await post("/api/token/regenerate",{}); toast("已重置"); loadEndpoints(); } catch(e){ toast(e.message); }
 };
 </script>
-<script src="js/starsky.js?v=1.0.41"></script>
+<script src="js/starsky.js?v=1.0.42"></script>
 </body>
 </html>

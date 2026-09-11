@@ -385,6 +385,8 @@ class Executor:
             return f"好的，{head}{names}打开了"
         if intent == "TurnDeviceOff":
             return f"好的，{head}{names}关了"
+        if intent == "PauseDevice":            # v1.0.42 家电族（扫地机器人/电视/窗帘）
+            return f"好的，{head}{names}暂停了"
         if intent == "ControlWindow":
             act = ACT_CN.get(str(args.get("action", "")).lower(), "调节")
             return f"好的，{head}{names}已{act}"

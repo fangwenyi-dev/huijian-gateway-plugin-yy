@@ -42,6 +42,11 @@ TOOLS: list[dict] = [
         "name": "TurnDeviceOff", "description": "关闭设备", "parameters": {
             "type": "object", "properties": {"target": _TARGET_SCHEMA}, "required": ["target"]}}},
     {"type": "function", "function": {
+        # v1.0.42 家电族：暂停运行中的设备（扫地机器人/电视音响/窗帘停走）。
+        "name": "PauseDevice", "description": "暂停正在运行的设备：扫地机器人暂停清扫、电视/音箱暂停播放、窗帘停止移动",
+        "parameters": {
+            "type": "object", "properties": {"target": _TARGET_SCHEMA}, "required": ["target"]}}},
+    {"type": "function", "function": {
         "name": "ControlWindow", "description": "控制窗户：open 开 / close 关 / pause 暂停 / a 内倒",
         "parameters": {"type": "object", "properties": {
             "action": {"type": "string", "enum": ["open", "close", "pause", "a"]},

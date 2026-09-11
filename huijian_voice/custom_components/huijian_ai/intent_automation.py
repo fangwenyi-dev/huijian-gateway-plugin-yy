@@ -14,6 +14,9 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util.json import JsonObjectType
 
 from .const import CONF_DEBOUNCE_MINUTES, DEFAULT_DEBOUNCE_MINUTES, DOMAIN
+from .entity_resolve_cn import cn_classes as _cn_classes
+from .entity_resolve_cn import norm as _cn_norm
+from .entity_resolve_cn import pick as _cn_pick
 from .intent_device_shared import split_actions_by_device
 from .trigger_eval import state_trigger_met, time_trigger_due
 
@@ -21,6 +24,51 @@ _LOGGER = logging.getLogger(__name__)
 
 STORAGE_KEY = "huijian_automations"
 STORAGE_VERSION = 1
+
+
+def _collect_area_index(hass: HomeAssistant, eids: list[str]) -> tuple[dict[str, str], dict[str, str]]:
+    """真实区域注册表：{归一化名/别名: 规范名} + entity→规范区域名。
+
+    注册表不可用（单测 fake hass / 精简环境）→ 双空，调用方自动退回
+    名字/类别匹配，不炸。entity 的区域先查实体注册表，再顺设备归属。
+    """
+    try:
+        from homeassistant.helpers import (
+            area_registry as _ar,
+            device_registry as _dr,
+            entity_registry as _er,
+        )
+
+        ar = _ar.async_get(hass)
+        alist = list(ar.async_list_areas())
+        areas: dict[str, str] = {}
+        by_id: dict[str, str] = {}
+        for a in alist:
+            canon = _cn_norm(a.name)
+            if not canon:
+                continue
+            by_id[str(a.area_id)] = canon
+            areas.setdefault(canon, canon)
+            for alias in getattr(a, "aliases", ()) or ():
+                n = _cn_norm(str(alias))
+                if n:
+                    areas.setdefault(n, canon)
+        er = _er.async_get(hass)
+        dr = _dr.async_get(hass)
+        out: dict[str, str] = {}
+        for eid in eids:
+            ent = er.async_get(eid)
+            if ent is None:
+                continue
+            aid = getattr(ent, "area_id", None)
+            if not aid and getattr(ent, "device_id", None):
+                dev = dr.async_get(ent.device_id)
+                aid = getattr(dev, "area_id", None) if dev else None
+            if aid and str(aid) in by_id:
+                out[eid] = by_id[str(aid)]
+        return areas, out
+    except Exception:
+        return {}, {}
 
 
 async def _resolve_entity_id(
@@ -42,6 +90,67 @@ async def _resolve_entity_id(
         return entity_id, None
 
     _LOGGER.info("Entity '%s' not found, searching for matching sensor...", entity_id)
+
+    # v1.0.42：中文描述（「办公室的温度」）旧逻辑按单 token 整串子串匹配且从不看
+    # 区域注册表——带「的」必失、传感器名为「温度」挂在办公室下也必失，还会
+    # 跨区域错绑（说办公室绑到卧室）。先走纯函数收束（tests 直钉），
+    # 未形成结论再落入下方英文历史路径。
+    sensor_states = [
+        s
+        for s in hass.states.async_all()
+        if getattr(s, "domain", None) in ("sensor", "binary_sensor")
+    ]
+    # v1.0.42 家电族：状态触发（to=）的宿主实体不限传感器域——扫地机器人
+    # (cleaning/paused/returning)、电视/插座 (on/off)、门锁 (locked/unlocked)
+    # 都能当条件。排除 automation/scene/script 等可被触发反噬的执行域，
+    # 防「当场景X打开就…」自触发回路。数值阈值触发仍限传感器池；
+    # 下方英文历史路径一律沿用 sensor_states 零改动。
+    state_mode = trigger.get("to") is not None
+    if state_mode:
+        pool = [
+            s for s in hass.states.async_all()
+            if getattr(s, "domain", None) not in (
+                "automation", "scene", "script", "group", "timer",
+                "persistent_notification", "sun", "weather", "zone",
+                "input_boolean", "input_number", "input_select",
+                "calendar", "todo", "notify",
+            )
+        ]
+    else:
+        pool = sensor_states
+    areas, area_of = _collect_area_index(hass, [s.entity_id for s in pool])
+    cn_cands = [
+        {
+            "entity_id": s.entity_id,
+            "name": s.attributes.get("friendly_name", "") or "",
+            "dc": s.attributes.get("device_class", "") or "",
+            "area": area_of.get(s.entity_id, ""),
+        }
+        for s in pool
+    ]
+    name_by_eid = {
+        s.entity_id: (s.attributes.get("friendly_name") or s.entity_id)
+        for s in pool
+    }
+    noun = "设备" if state_mode else "传感器"
+    r = _cn_pick(entity_id, cn_cands, areas)
+    if r["best"]:
+        _LOGGER.info(
+            "CN resolve: '%s' → %s (area=%s classes=%s)",
+            entity_id, r["best"], r["area_hit"], r["classes"],
+        )
+        return r["best"], f"已将{noun}修正为：{name_by_eid.get(r['best'], r['best'])}"
+    if r["no_in_area"]:
+        others = "、".join(name_by_eid.get(e, e) for e in r["others"])
+        return None, (
+            f"未在「{r['area_hit']}」区域找到{_cn_classes(r['classes'])}{noun}"
+            + (f"（其他区域有：{others}）" if others else "")
+            + f"，请把{noun}归入该区域或换个说法"
+        )
+    if r["ambiguous"]:
+        return None, (
+            f"找到多个{noun}：{', '.join(r['ambiguous'])}，请指定正确的{noun}名称"
+        )
 
     raw_entity_id = (
         entity_id.replace("sensor.", "").replace("binary_sensor.", "").lower()
@@ -601,11 +710,14 @@ class HassCreateAutomationIntent(ha_intent.IntentHandler):
         "Creates a voice automation: sensor threshold/state crossing or a daily "
         "schedule that executes an action list. "
         "Use when user says things like '当温度大于30度就打开窗户', "
-        "'当书房检测到有人就开灯', '每天早上7点帮我打开客厅窗帘'. "
+        "'当书房检测到有人就开灯', '当电视被打开就拉上窗帘', "
+        "'当扫地机器人开始清扫就关闭电视', '每天早上7点帮我打开客厅窗帘'. "
         "DO NOT use for voice-triggered scenes (use HassCreateVoiceScene for that). "
         "Parameters: "
         "trigger (object): sensor={entity_id:中文名或实体, above/below:数值} 或 "
-        "{entity_id, to:'on'/'off'(有人/无人)} 或 时间={at:'HH:MM', days:[1-7]可选}; "
+        "{entity_id, to:'on'/'off'(有人/无人/设备开关)} 或 "
+        "{entity_id, to:'cleaning'/'paused'/'returning'(扫地机器人状态)} 或 "
+        "时间={at:'HH:MM', days:[1-7]可选}; "
         "actions (array of {intent, params} objects, same format as voice scene actions). "
         "Examples: "
         "trigger={entity_id:'客厅温度', above:29}, "

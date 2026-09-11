@@ -11,7 +11,7 @@ from .intent_automation import (HassCreateAutomationIntent,
 from .intent_live_context import HuijianGetLiveContextIntent
 from .intent_lock import HassLockIntent, HassUnlockIntent
 from .intent_set_mode import SetDeviceModeIntent
-from .intent_turn import TurnDeviceOffIntent, TurnDeviceOnIntent
+from .intent_turn import PauseDeviceIntent, TurnDeviceOffIntent, TurnDeviceOnIntent
 from .intent_voice_scene import (HassCreateVoiceSceneIntent,
                                  HassDeleteVoiceSceneIntent,
                                  HassListVoiceScenesIntent,
@@ -27,6 +27,8 @@ async def async_setup_intents(hass: HomeAssistant):
     intent.async_register(hass, HuijianGetLiveContextIntent())
     intent.async_register(hass, TurnDeviceOnIntent())
     intent.async_register(hass, TurnDeviceOffIntent())
+    # v1.0.42 家电族：暂停运行中的设备（扫地机器人/电视/窗帘停走）
+    intent.async_register(hass, PauseDeviceIntent())
     intent.async_register(hass, SetDeviceModeIntent())
     intent.async_register(hass, AdjustDeviceAttributeIntent())
     intent.async_register(hass, ControlWindowIntent())

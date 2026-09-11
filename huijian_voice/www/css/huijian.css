@@ -28,8 +28,9 @@
     --accent: #06b6d4;
     --glow: #7dd3fc;            /* 深空提亮专用（logo 光环/高亮文字），非紫 */
     --secondary: #f59e0b;       /* 琥珀——仅告警/进度点缀 */
-    --bg-main: #030712;
-    --surface: #0a0f1e;
+    --bg-main: #1d1750;         /* v1.0.42 用户令「星辰大海白天太黑，加紫提亮」：近黑
+                                   #030712 → 深靛紫；白字对比度仍 ~15:1，夜间不刺眼 */
+    --surface: #241d5c;         /* 下拉选项底随基底同系提亮 */
     --bg-card: rgba(255, 255, 255, .07);
     --bg-elevated: rgba(255, 255, 255, .10);
     --card-border: rgba(255, 255, 255, .14);
@@ -61,7 +62,8 @@ body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
     color: var(--text-primary);
     min-height: 100vh;
-    /* 深空基底：标准 .sky 纯色 #030712，此处作为最底层铺满（star-bg 的星云/星点浮于其上） */
+    /* 深空基底：v1.0.42 起为深靛紫 --bg-main（原标准 .sky 纯色 #030712），
+       作为最底层铺满（star-bg 的星云/星点浮于其上） */
     background: var(--bg-main);
     -webkit-font-smoothing: antialiased;
     /* Web 移植：内容层横向留白与最大宽从此处移到 .page（body 需全宽铺星空） */
@@ -80,16 +82,17 @@ body {
     z-index: 0;
     overflow: hidden;
     pointer-events: none;
-    /* 三档氛围底 + 纯色（用户定案保留紫）：左上蓝角云 α.18 收 .06、
-       右上角弱青叠靛紫、底部靛云——全部大柔边 radial，禁内核白雾。
-       v1.6.30 用户令"背景加一点紫色"：底靛 .12→.16 且中心回收可见区，
-       右上新增 #8b5cf6 靛紫云 .09（小程序标准：紫仅限氛围底色层，
-       宁淡勿浓；星点/星云/按钮一律不加紫） */
+    /* 三档氛围底 + 纯色（用户定案保留紫）：全部大柔边 radial，禁内核白雾。
+       v1.6.30 首加紫（右上 #8b5cf6 靛紫云 .09，宁淡）。
+       v1.0.42 用户令「白天看不清，加紫提亮」：靛紫云 .09→.22 并移心扩面、
+       中上新增薰衣草紫大云 .16、底靛 .16→.24、左上蓝角 .18→.22、弱青 .10→.12。
+       紫仍限氛围底色层——星点/行星/按钮一律不加紫（口径不变）。 */
     background:
-        radial-gradient(60% 48% at 12% 4%, rgba(14, 165, 233, .18), rgba(14, 165, 233, .06) 42%, transparent 72%),
-        radial-gradient(50% 42% at 88% 12%, rgba(6, 182, 212, .10), transparent 66%),
-        radial-gradient(52% 40% at 84% 22%, rgba(139, 92, 246, .09), transparent 68%),
-        radial-gradient(76% 58% at 50% 104%, rgba(99, 102, 241, .16), transparent 72%),
+        radial-gradient(60% 48% at 12% 4%, rgba(14, 165, 233, .22), rgba(14, 165, 233, .08) 42%, transparent 72%),
+        radial-gradient(50% 42% at 88% 12%, rgba(6, 182, 212, .12), transparent 66%),
+        radial-gradient(58% 48% at 78% 16%, rgba(139, 92, 246, .22), transparent 70%),
+        radial-gradient(62% 44% at 36% 8%, rgba(167, 139, 250, .16), transparent 70%),
+        radial-gradient(76% 58% at 50% 104%, rgba(99, 102, 241, .24), transparent 72%),
         var(--bg-main);
 }
 /* 星云团：逐字移植官网母本 v0.0.1（www/index.html L104-117）的
@@ -100,17 +103,17 @@ body {
 .nebula { position: absolute; top: 0; left: 0; right: 0; bottom: 0; overflow: hidden; pointer-events: none; }
 .nebula::before {
     content: ''; position: absolute; top: -30%; left: -10%; width: 60%; height: 80%;
-    background: radial-gradient(ellipse at center, rgba(14, 165, 233, .10) 0%, transparent 60%);
+    background: radial-gradient(ellipse at center, rgba(14, 165, 233, .14) 0%, transparent 60%);
     animation: aurora-move1 45s ease-in-out infinite;
 }
 .nebula::after {
     content: ''; position: absolute; bottom: -20%; right: -10%; width: 50%; height: 70%;
-    background: radial-gradient(ellipse at center, rgba(6, 182, 212, .08) 0%, transparent 60%);
+    background: radial-gradient(ellipse at center, rgba(6, 182, 212, .12) 0%, transparent 60%);
     animation: aurora-move2 50s ease-in-out infinite;
 }
 .nebula3 {
     position: absolute; top: 5%; left: 50%; width: 40%; height: 50%;
-    background: radial-gradient(ellipse at center, rgba(245, 158, 11, .07) 0%, transparent 55%);
+    background: radial-gradient(ellipse at center, rgba(245, 158, 11, .10) 0%, transparent 55%);
     animation: aurora-move3 60s ease-in-out infinite; pointer-events: none;
 }
 @keyframes aurora-move1 { 0%, 100% { transform: translate(0, 0) scale(1); } 33% { transform: translate(50px, 25px) scale(1.08); } 66% { transform: translate(-30px, 40px) scale(0.95); } 50% { transform: translate(60px, 30px) scale(1.1); } }

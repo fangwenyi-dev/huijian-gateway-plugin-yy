@@ -46,14 +46,14 @@ class TurnDeviceIntentBase(intent.IntentHandler):
         self,
         intent_obj: intent.Intent,
         slots: dict[str, Any],
-        service: Literal["turn_on", "turn_off"],
+        service: Literal["turn_on", "turn_off", "huijian_pause"],
     ) -> JsonObjectType:
-        """Handle TurnDeviceOn or TurnDeviceOff intent.
+        """Handle TurnDeviceOn/TurnDeviceOff or PauseDevice (huijian_pause) intent.
 
         Args:
             intent_obj: Home Assistant intent object.
             slots: Intent slots containing target information.
-            service: Either "turn_on" or "turn_off".
+            service: "turn_on", "turn_off", or v1.0.42 "huijian_pause".
 
         Returns:
             JSON object with success status and control targets.
@@ -71,7 +71,9 @@ class TurnDeviceIntentBase(intent.IntentHandler):
             for device in target.get("devices", []):
                 domains = device.get("domains", [])
                 name = device.get("name")
-                if self._is_window_target(domains, name):
+                # v1.0.42：暂停走通用实体路径（cover 停走由 _handle_pause_match 处理），
+                # 不进窗户按钮按压逻辑。
+                if self._is_window_target(domains, name) and service != "huijian_pause":
                     window_devices.append(device)
                 else:
                     non_window_devices.append(device)
@@ -158,25 +160,72 @@ class TurnDeviceIntentBase(intent.IntentHandler):
 
         control_targets = list(window_control_targets)
         entity_key_map = set()
+        unsupported: list[str] = []
         for item in candidate_entities:
             _LOGGER.info(
                 f"Operate target: area={item.area_name} name={item.name} id={item.entity.id}"
             )
-            await self.handle_match_target(intent_obj, item.state, service)
+            ok = await self.handle_match_target(intent_obj, item.state, service)
+            if ok is False:
+                # v1.0.42 PauseDevice：不可暂停的域（灯/开关/锁…）不冒动、不谎报。
+                unsupported.append(item.name or item.state.entity_id)
+                continue
             entity_key = f"{item.area_name}-{item.name}"
             if entity_key not in entity_key_map:
                 entity_key_map.add(entity_key)
                 control_targets.append({"name": item.name, "area": item.area_name})
 
+        if not control_targets and unsupported:
+            return {
+                "success": False,
+                "error": "暂不支持暂停该设备：" + "、".join(unsupported[:3]),
+            }
         return {
             "success": True,
             "control_targets": control_targets,
         }
 
+    # v1.0.42 家电族：暂停语义的域→服务表（"停下当前动作"而非关机回舱）。
+    _PAUSE_CALLS = {
+        "vacuum": ("vacuum", "pause"),
+        "media_player": ("media_player", "media_pause"),
+        "cover": ("cover", "stop_cover"),
+    }
+
+    async def _handle_pause_match(
+        self, intent_obj: intent.Intent, state: State
+    ) -> bool:
+        """True=已派发暂停；False=该域无暂停语义（调用方不执行、计入失败面）。"""
+        pair = self._PAUSE_CALLS.get(state.domain)
+        if pair is None:
+            _LOGGER.info(
+                "Pause unsupported for %s (domain=%s)", state.entity_id, state.domain
+            )
+            return False
+        hass = intent_obj.hass
+        await self._run_then_background(
+            hass.async_create_task(
+                hass.services.async_call(
+                    pair[0],
+                    pair[1],
+                    {ATTR_ENTITY_ID: state.entity_id},
+                    context=intent_obj.context,
+                    blocking=True,
+                )
+            )
+        )
+        return True
+
     async def handle_match_target(
         self, intent_obj: intent.Intent, state: State, service: str
-    ):
+    ) -> bool | None:
         hass = intent_obj.hass
+        # v1.0.42 PauseDevice：暂停语义只对有"暂停"概念的设备成立
+        # （vacuum.pause / media_player.media_pause / cover.stop_cover）。
+        # 其余域返回 False——上层既不执行也不谎报成功（显式 False 是唯一
+        # 失败信号，既有分支隐式 None 一律视为成功，零回归）。
+        if service == "huijian_pause":
+            return await self._handle_pause_match(intent_obj, state)
         if state.domain in (BUTTON_DOMAIN, INPUT_BUTTON_DOMAIN):
             await self._run_then_background(
                 hass.async_create_task(
@@ -725,3 +774,32 @@ class TurnDeviceOffIntent(TurnDeviceIntentBase):
         _LOGGER.info("TurnDeviceOff slots=%s", slots)
         slots = TurnDeviceOnIntent._normalize_slots_device_names(slots)
         return await super()._async_handle(intent_obj, slots, "turn_off")
+
+
+class PauseDeviceIntent(TurnDeviceIntentBase):
+    """v1.0.42 家电族：暂停正在运行的设备（扫地机器人/电视/窗帘）。
+
+    复用 TurnDevice 的目标解析与实体匹配链，只把动作换成各域的 pause/stop
+    服务；灯/开关/锁等无"暂停"语义的域由 handle_match_target 显式判 False，
+    上层据此回 success:False（话术层如实告知不支持），不会误当成功。"""
+
+    intent_type = "PauseDevice"
+    description = (
+        "Pauses a running device: vacuum pause, media_player media_pause, "
+        "cover stop. Use for '暂停扫地机器人'/'电视暂停'/'窗帘停下'. "
+        "Target format: same as TurnDeviceOn."
+    )
+    service_timeout = 10
+
+    @property
+    def slot_schema(self) -> dict | None:
+        return {
+            vol.Required("target"): target_parameter_type(),
+        }
+
+    async def async_handle(self, intent_obj: intent.Intent) -> JsonObjectType:  # type: ignore
+        """Pause a running device (vacuum/media_player/cover)."""
+        slots = self.async_validate_slots(intent_obj.slots)
+        _LOGGER.info("PauseDevice slots=%s", slots)
+        slots = TurnDeviceOnIntent._normalize_slots_device_names(slots)
+        return await super()._async_handle(intent_obj, slots, "huijian_pause")

@@ -152,6 +152,29 @@ _AUTO_STATE_RE = re.compile(
     r"(?:活动|经过|移动|走动)?(?:的)?(?:时候|时|后)?[，,、\s]*"
     r"(?:就|帮我|请|要|给)(?P<y>.+)$")
 
+# ③b v1.0.42 自动化·设备状态（支持 HA 全品类当触发）：当<电视|扫地机器人|门|
+# X> <状态词>（时）就Y —— 任意实体状态值触发（触发实体由集成侧中文名/区域解析）。
+# 状态词按 HA 各域 state 值折叠：通用开关域 on/off；vacuum cleaning/paused/
+# returning/idle/docked；掉线统一 unavailable。交替式**长词在前**（最左优先）。
+_AUTO_DEVSTATE_RE = re.compile(
+    r"^(?:当|如果|要是|假如)(?P<d>[^，,。;；就]{1,14}?)"
+    r"(?P<s>开始清扫|正在清扫|清扫中|开始打扫|打扫完|清扫完成|回充电|回去充电|回家充电"
+    r"|回充|回巢|充电中|在充电|暂停|被打开|打开了|打开|开着|开了"
+    r"|被关闭|关掉了|关掉|关闭|关了|关机|停止|离线|掉线|断网)"
+    r"(?:的)?(?:时候|时|后)?[，,、\s]*(?:就|帮我|请|要|给)(?P<y>.+)$")
+
+_DEVSTATE_TO = {
+    "开始清扫": "cleaning", "正在清扫": "cleaning", "清扫中": "cleaning",
+    "开始打扫": "cleaning", "打扫完": "idle", "清扫完成": "idle",
+    "回充电": "returning", "回去充电": "returning", "回家充电": "returning",
+    "回充": "returning", "回巢": "returning",
+    "充电中": "docked", "在充电": "docked", "暂停": "paused",
+    "被打开": "on", "打开了": "on", "打开": "on", "开着": "on", "开了": "on",
+    "被关闭": "off", "关掉了": "off", "关掉": "off", "关闭": "off",
+    "关了": "off", "关机": "off", "停止": "off",
+    "离线": "unavailable", "掉线": "unavailable", "断网": "unavailable",
+}
+
 # ④ 自动化·时间：每天（早上）7点（半/15分）（都）就/帮我Y
 _AUTO_TIME_RE = re.compile(
     r"^每天(?P<am>早上|上午|中午|凌晨|下午|晚上)?\s*"
@@ -444,6 +467,17 @@ def parse(text: str) -> Optional[dict[str, Any]]:
             d = d + "人体"
         to = "off" if s in ("无人", "没人") else "on"
         return {"kind": "automation", "desc": d, "trigger": {"entity_id": d, "to": to}, "y": y}
+
+    # ③b v1.0.42 设备状态触发（家电族当条件）：电视被打开/扫地机器人开始清扫/
+    # 门锁关闭/传感器掉线……任意实体状态值，实体由集成侧中文名+区域解析。
+    m = _AUTO_DEVSTATE_RE.match(t)
+    if m:
+        d = m.group("d").strip().strip("的")
+        to = _DEVSTATE_TO.get(m.group("s"))
+        y = _clean_y(m.group("y"))
+        if d and to and len(y) >= 2:
+            return {"kind": "automation", "desc": d,
+                    "trigger": {"entity_id": d, "to": to}, "y": y}
 
     m = _AUTO_TIME_RE.match(t)
     if m:
