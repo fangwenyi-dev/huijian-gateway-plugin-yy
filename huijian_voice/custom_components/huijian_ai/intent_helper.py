@@ -400,6 +400,14 @@ async def match_intent_entities(
                 matched_device_ids.add(device_entry.id)
 
         if matched_device_ids:
+            # 移植商店仓 369f8ea（2026-06-17）：回退匹配同样遵守 area 约束，
+            # 否则"把客厅的灯打开"在设备名命中的实体上会跨区域全开。
+            requested_area = None
+            for t in targets:
+                a = t.get("area")
+                if a:
+                    requested_area = a
+                    break
             for entity_entry in list(ent_reg.entities.values()):
                 if entity_entry.device_id not in matched_device_ids:
                     continue
@@ -408,6 +416,11 @@ async def match_intent_entities(
                     and entity_entry.domain not in all_expanded_domains
                 ):
                     continue
+                # 回退匹配时同样遵守 area 约束
+                if requested_area:
+                    entity_area = get_entity_area(hass, entity_entry)
+                    if entity_area and entity_area.name != requested_area:
+                        continue
                 state = hass.states.get(entity_entry.entity_id)
                 if not state or state.state == "unavailable":
                     continue
