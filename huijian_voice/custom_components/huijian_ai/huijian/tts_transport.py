@@ -57,6 +57,18 @@ class TtsTransport(WsTransport):
         # TIMEOUT）。整段对话上锁串行是唯一解；等锁的下一句最迟在前一句
         # 收口（加载项 55s 预算）后出声。
         self._request_lock = asyncio.Lock()
+        # v1.0.48（P5）：服务端音色指纹——tts 通道建连欢迎帧 + web 保存推送
+        # 双通道递送（base._on_server_settings tap）。restart_connection 不换
+        # transport 对象，指纹跨重连存续；与加载项失联期间配置漂移由重连
+        # 欢迎帧补正。
+        self.voice_fp: str | None = None
+
+    def _on_server_settings(self, data) -> None:
+        fp = str(data.get("voice_fp") or "").strip()
+        if fp and fp != self.voice_fp:
+            _LOGGER.info("huijian TTS 音色指纹更新: %s → %s（HA 缓存键轮换）",
+                         self.voice_fp, fp)
+            self.voice_fp = fp
 
     async def _drain_stale(self) -> None:
         """detect 前排净连接上已排队的残帧/残 stop（兜底，见常量注释）。

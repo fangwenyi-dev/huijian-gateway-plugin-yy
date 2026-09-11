@@ -9,7 +9,10 @@ set -u
 bashio::log.info "═══ 慧尖语音助手 boot ═══"
 
 mkdir -p /data/models/import /data/run
-chmod 777 /data/run || true
+# v1.0.48：777→700。/data/run 唯一写/读者是 root 的主进程（endpoints.json 含
+# 真 ws_token）；nginx 静态根在 /usr/share/nginx/html，不触碰本目录——world-
+# writable 纯多余，且令容器内任何低权进程可替换凭据文件（软链劫持面）。
+chmod 700 /data/run || true
 # 版本戳落盘（admin_api._addon_version 与主服务 _version 的权威来源）。
 # 权威源=镜像内 www/version.json（四源一致由钉桩+CI lint 双保）；ENV HUIJIAN_VERSION
 # 只有官方 builder 注入 build-arg 时才有值，裸 docker build 烘进 0.0.0 → 不可依赖。

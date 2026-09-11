@@ -88,6 +88,9 @@ class Service:
         log.warning("═" * 46)
         await self.ha.start()
         self.scenes.refresh_soon()   # 体验批 P0-2：场景契约词表预热（首句零阻塞）
+        # v1.0.48（P5）：音色指纹基线必须在挂监听器之前取好——否则首笔保存
+        # 会被当"初值"吞掉，错过一次缓存键轮换。
+        self._voice_fp = self.tts.voice_fingerprint()
         self.settings.add_listener(self._on_settings_change)
         await self._start_http()
         await asyncio.to_thread(self.mdns.start)  # 构造+register 含阻塞 I/O，禁在 loop 内直调
@@ -197,8 +200,35 @@ class Service:
             self.textcnn.set_thresholds_override(data.get("nlu", {}).get("thresholds_override") or {})
             self._write_endpoints()
             self._warn_local_nlu(data)
+            self._rotate_voice_fp()
         except Exception:
             logger.exception("[配置] 热应用失败")
+
+    def _rotate_voice_fp(self) -> None:
+        """v1.0.48（P5）：换嗓保存 → 推新指纹给全部在连 tts 通道会话（集成
+        实体侧 HA 缓存键轮换）。__init__ 已记初值；无运行循环（冷启动早期
+        /测试直调）只更新值不推送——建连欢迎帧会补送当前值，不丢状态。"""
+        try:
+            fp = self.tts.voice_fingerprint()
+        except Exception:
+            logger.exception("[TTS] 音色指纹生成异常")
+            return
+        if fp == self._voice_fp:
+            return
+        self._voice_fp = fp
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._push_voice_fp(fp))
+
+    async def _push_voice_fp(self, fp: str) -> None:
+        n = 0
+        for sess in list(self.ctx.sessions):
+            if getattr(sess, "channel", "") == "tts":
+                if await sess.send_json({"type": "settings", "voice_fp": fp}):
+                    n += 1
+        logger.info("[TTS] 音色已变更：指纹 %s → 推送 %d 条在连播报连接（HA 缓存键轮换）", fp, n)
 
     def _warn_local_nlu(self, data: dict) -> None:
         """本地理解总开关关掉＝场景触发词/场景自动化本地建・改・删/本地查询/音乐带
@@ -228,7 +258,8 @@ class Service:
                             "version": self._version()})
             dst = const.DATA_DIR / "run" / "endpoints.json"  # 含 token，绝落静态根（infra-F7）
             dst.parent.mkdir(parents=True, exist_ok=True)
-            _atomic_write(dst, json.dumps(payload, ensure_ascii=False, indent=2))
+            _atomic_write(dst, json.dumps(payload, ensure_ascii=False, indent=2),
+                          mode=0o600)  # v1.0.48：凭据文件不世界可读
         except Exception:
             logger.debug("[状态] endpoints.json 回写失败", exc_info=True)
 
@@ -273,16 +304,19 @@ async def ha_health_tick(ha) -> None:
         await ha.refresh_states()
 
 
-def _atomic_write(path: Path, content: str) -> None:
+def _atomic_write(path: Path, content: str, mode: int = 0o644) -> None:
     # F6：tmp 唯一名——固定 .tmp 名在多写者（models_status 双写者）下可把
     # 对方半写文件 rename 转正。mkstemp 原子创建且互不碰撞。
+    # v1.0.48（infra）：默认 0644 是为事实文件（nginx worker 要读）；含凭据的
+    # run/endpoints.json 必须显式 mode=0o600——只有本进程（root python）读写，
+    # nginx worker(nobody) 触碰即泄露面收窄一档。
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix="." + path.name + ".", suffix=".tmp")
     try:
         # mkstemp 默认 0600：rename 后 nginx worker（www-data）读走 403——
         # 事实文件必须世界可读（v1.0.0 CI e2e step7 实锤，Windows 本地不可见面）。
-        os.fchmod(fd, 0o644)
+        os.fchmod(fd, mode)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
         os.replace(tmp, path)

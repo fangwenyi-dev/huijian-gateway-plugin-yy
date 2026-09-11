@@ -56,8 +56,24 @@ class HuijianTtsEntity(BaseEntity):
             "preferred_sample_rate",
             "preferred_sample_channels",
             "preferred_sample_bytes",
+            "huijian_voice_fp",
         ]
         self._attr_extra_state_attributes = {}
+
+    @property
+    def default_options(self) -> dict:
+        """v1.0.48（P5，"多嗓音"第六路径收口）：core 把实体 default_options
+        无条件合进 options 并参与缓存键 sha1(文本)_语言_options_引擎——加载项
+        内部音色对键**不感知**，web 换嗓后同一句永远命中旧嗓缓存。把服务端
+        经 WS settings 推送的音色指纹放进键里：换嗓 → 键轮换 → 必重合成，
+        旧条目 TTL 自然作废。指纹缺席（旧版加载项）→ 空 dict，行为与今一致。"""
+        try:
+            tr = self.hass.data[DOMAIN][self.entry.entry_id].get(
+                tts_transport.ATTR_TRANSPORT)
+            fp = getattr(tr, "voice_fp", None) if tr else None
+        except Exception:
+            fp = None
+        return {"huijian_voice_fp": str(fp)} if fp else {}
 
     async def async_added_to_hass(self):
         _LOGGER.info("huijianTtsEntity.async_added_to_hass")
@@ -66,9 +82,12 @@ class HuijianTtsEntity(BaseEntity):
     async def async_get_tts_audio(
         self, message: str, language: str, options: dict
     ) -> TtsAudioType:
+        # v1.0.48（隐私）：播报文本属家居隐私，INFO 只留前 40 字+长度，
+        # 全文降 DEBUG（现场默认 INFO 级不落全量）。
         _LOGGER.info(
-            "huijianTtsEntity.async_get_tts_audio: message=%s, language=%s, options=%s",
+            "huijianTtsEntity.async_get_tts_audio: message=%.40s…(%d chars), language=%s, options=%s",
             message,
+            len(message),
             language,
             options,
         )

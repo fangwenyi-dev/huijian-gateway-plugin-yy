@@ -350,15 +350,44 @@ def test_status_file_writer_chmod_guard():
     """models_status.json 双写者必须同守「世界可读」：mkstemp 默认 0600，
     rename 转正后 nginx worker 读走 13（v1.0.0 实机开下载后日志刷屏根因——
     model_store._write_status 漏 fchmod，每次进度写把主循环 644 文件刷回 600）。
-    钉桩：两写者源文本 mkstemp 之后、fdopen/rename 之前必须出现 fchmod 0o644。"""
+    v1.0.48：main._atomic_write 改为 mode 形参 fchmod（默认仍 0o644，为
+    endpoints.json 的 0o600 腾位）——断言同步钉死「形参用法 + 默认值不漂移」。"""
     import re
     ms = (_CORE / "model_store.py").read_text(encoding="utf-8")
     main_src = (_CORE / "main.py").read_text(encoding="utf-8")
-    for src, fn in ((ms, "model_store._write_status"), (main_src, "main._atomic_write")):
-        i = src.index("mkstemp")
-        j = src.index("os.replace", i)
-        seg = src[i:j]
-        assert re.search(r"fchmod\([^)]*0o644", seg), f"{fn}: mkstemp 与 replace 之间缺 fchmod(0o644)"
+    i = ms.index("mkstemp")
+    assert re.search(r"fchmod\([^)]*0o644", ms[i:ms.index("os.replace", i)]), \
+        "model_store._write_status: mkstemp 与 replace 之间缺 fchmod(0o644)"
+    i = main_src.index("mkstemp")
+    seg = main_src[i:main_src.index("os.replace", i)]
+    assert re.search(r"fchmod\([^)]*mode\b", seg), "main._atomic_write: fchmod 未走 mode 形参"
+    assert "mode: int = 0o644" in main_src, \
+        "main._atomic_write: 默认 mode 漂移——事实文件必须 0644 世界可读（v1.0.0 CI e2e step7 实锤）"
+
+
+def test_credential_file_mode_guard():
+    """v1.0.48：run/endpoints.json 含真 ws_token，必须 0o600 落盘（回潮成
+    世界可读=容器内 nginx worker(nobody) 可直接读凭据）；/data/run 禁 777
+    （唯一读写者是 root 主进程，world-writable=任何低权进程可劫持凭据文件）。"""
+    main_src = (_CORE / "main.py").read_text(encoding="utf-8")
+    k = main_src.index("endpoints.json")
+    assert "mode=0o600" in main_src[k:k + 400], "endpoints.json 写点缺 mode=0o600"
+    boot = (_CORE.parent / "boot.sh").read_text(encoding="utf-8")
+    assert "chmod 777 /data/run" not in boot, "/data/run 777 回潮"
+
+
+def test_integration_log_redact_guard():
+    """v1.0.48（凭据/隐私面）：translations 指引把 ?token= 粘进 endpoint 后，
+    ws_transport 三处 INFO 全量打 URL 即凭据落 HA 日志；"Send message: %s"/
+    tts entity INFO 全量打播报文本=家居隐私。钉桩：脱敏助手在位 + 旧裸打不回潮。"""
+    src = (_CORE.parent / "custom_components/huijian_ai/huijian/ws_transport.py").read_text(encoding="utf-8")
+    assert "_redact_endpoint" in src, "endpoint 脱敏助手缺席"
+    assert 'self.logger.info("Connecting to: %s", self.endpoint)' not in src, \
+        "含 token 全量 endpoint 回潮 INFO"
+    assert 'self.logger.info("Send message: %s", message)' not in src, \
+        "播报全文回潮 INFO"
+    tts_src = (_CORE.parent / "custom_components/huijian_ai/tts.py").read_text(encoding="utf-8")
+    assert "message=%s, language=%s" not in tts_src, "tts entity 全量播报文本回潮 INFO"
 
 
 def test_aiohttp_access_log_kwarg_guard():

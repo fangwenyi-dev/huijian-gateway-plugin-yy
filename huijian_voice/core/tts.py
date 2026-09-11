@@ -216,6 +216,21 @@ class TtsEngine:
             sid = 18
         return sid
 
+    def voice_fingerprint(self) -> str:
+        """v1.0.48（P5，"多嗓音"第六路径收口）：HA core 的 TTS 缓存键=
+        sha1(文本)_语言_options_实体id——加载项内部音色对它**完全不感知**，
+        web 换嗓后同一句永远命中旧嗓缓存。修复：集成实体把本指纹并入
+        default_options（core 将 default_options 合进 options 参与键计算），
+        指纹变→键轮换→必然重合成；旧条目由 TTL/清理兜底。递送=WS
+        settings 消息（tts 通道建连随欢迎发 + web 保存即推送）。
+        只涵盖会换嗓的变化：provider/云 voice/本地 sid/自定义注入数；
+        speed 不改嗓音，不入。"""
+        prov = str(self.settings.get("tts.provider", "local_kokoro"))
+        if prov.startswith("cloud"):
+            voice = str((self.settings.get("tts.cloud") or {}).get("voice") or "alloy")
+            return f"cloud:{voice}"
+        return f"local:sid{self.resolve_sid()}+c{len(self._custom_sids)}"
+
     # ── 生命周期 ────────────────────────────────────────────────
     def ready(self) -> bool:
         return self._tts is not None

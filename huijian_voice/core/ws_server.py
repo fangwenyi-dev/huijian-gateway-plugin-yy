@@ -76,6 +76,16 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
     session.device_hint = request.remote or ""
     ctx.sessions.add(session)
     logger.info("[WS] %s 通道接入 %s（在线 %d 会话）", channel, session.device_hint, len(ctx.sessions))
+    if channel == "tts":
+        # v1.0.48（P5）：音色指纹随建连欢迎下发——集成在加载项保存后重连等
+        # 场景也必须取到当前值（web 保存侧另有在线推送）。旧集成把此消息按
+        # unknown message 仅 INFO 一条、不break，向后兼容无副作用。
+        # fail-open：指纹只是缓存键轮换增强，任何异常不得杀掉播报主链。
+        try:
+            await session.send_json({"type": "settings",
+                                     "voice_fp": ctx.tts.voice_fingerprint()})
+        except Exception:
+            logger.exception("[WS] tts 欢迎指纹发送失败（不影响播报）")
     try:
         async for msg in ws:
             if msg.type == web.WSMsgType.TEXT:

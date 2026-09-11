@@ -241,6 +241,7 @@ class TtsSession(BaseSession):
         sent_any = False
         n_frames = n_bytes = 0
         engine: dict = {}
+        it = None
         try:
             # F5：预算必须覆盖「生成器挂起」——逐包用剩余预算做 wait_for，
             # native 合成卡死也能按点收束（finally 的 stop 义务不变）。
@@ -284,6 +285,13 @@ class TtsSession(BaseSession):
         except Exception:
             logger.exception("[TTS] 合成流异常（以 stop 收束）")
         finally:
+            # v1.0.48：四条早退（顶替/超预算/停滞/断连）与 cancel 路径统一在此
+            # 确定性关停合成生成器——stream_opus 靠自身 finally 收束本地合成/
+            # 云端资源，此前只赌 CPython GC 终值回调，违反自家纪律
+            # （tts.py「确定性关停，不赌 GC 时机」）。
+            if it is not None:
+                with contextlib.suppress(Exception):
+                    await it.aclose()
             # 仅当自己仍是当前代时才收束（防被顶替后发孤儿 stop）
             if gen == self._gen:
                 await self.send_json({"type": "tts", "state": "stop"})

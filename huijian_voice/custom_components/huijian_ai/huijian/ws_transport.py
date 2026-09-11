@@ -67,6 +67,14 @@ class WsTransport:
         lvl = logging.ERROR if self.reconnect_times >= 3 else logging.INFO
         self.logger.log(lvl, msg, *args, **kwargs)
 
+    @staticmethod
+    def _redact_endpoint(url: str) -> str:
+        """v1.0.48（凭据面收口）：translations 指引 token 强制模式把 ?token=<真
+        token> 粘进 endpoint（translations :94），而本文件把 endpoint 全量写进
+        INFO 日志（每次连接一行）→ 凭据随 HA 日志落盘外流。日志只保留 '?' 前
+        host+path，query 以标记留痕；connect 实参仍用原文。"""
+        return str(url).split("?", 1)[0] + (" ?<masked>" if "?" in str(url) else "")
+
     @property
     def is_connected(self):
         return self._is_connected and self._current_ws and not self._current_ws.closed
@@ -76,7 +84,7 @@ class WsTransport:
             self.logger.info(
                 "Clearing endpoint from config entry data: %s %s",
                 self.attr_endpoint,
-                self.endpoint,
+                self._redact_endpoint(self.endpoint),
             )
             self.hass.config_entries.async_update_entry(
                 self.entry,
@@ -208,7 +216,9 @@ class WsTransport:
             await self._establish_websocket_connection()
         except Exception as err:
             self.logger.exception(
-                "Failed to connect to websocket at %s: %s", self.endpoint, err
+                "Failed to connect to websocket at %s: %s",
+                self._redact_endpoint(self.endpoint),
+                err,
             )
             raise
 
@@ -216,7 +226,7 @@ class WsTransport:
 
     async def _establish_websocket_connection(self):
         """Establish WebSocket connection and run server tasks."""
-        self.logger.info("Connecting to: %s", self.endpoint)
+        self.logger.info("Connecting to: %s", self._redact_endpoint(self.endpoint))
         assert self.endpoint
         timeout = aiohttp.ClientTimeout(total=None, connect=60)
         async with aiohttp.ClientSession(timeout=timeout) as client_session:
@@ -346,7 +356,15 @@ class WsTransport:
                 if isinstance(message, dict):
                     message = json.dumps(message, ensure_ascii=False)
                 if isinstance(message, str):
-                    self.logger.info("Send message: %s", message)
+                    # v1.0.48（隐私/日志噪音）：本行曾把全量出帧 JSON（含播报
+                    # 文本明文）逐条 INFO 落日志。播报内容属家居隐私，只留长度；
+                    # 排障需要全文时用 DEBUG 级（现场默认 INFO 不落盘）。
+                    self.logger.info(
+                        "Send message: %d chars%s",
+                        len(message),
+                        " (full text at DEBUG)" if self.logger.isEnabledFor(logging.DEBUG) else "",
+                    )
+                    self.logger.debug("Send message full: %s", message)
                     await self._current_ws.send_str(message)
                 else:
                     await self._current_ws.send_bytes(message)
@@ -396,6 +414,11 @@ class WsTransport:
         except (anyio.BrokenResourceError, anyio.ClosedResourceError):
             return False
 
+    def _on_server_settings(self, data) -> None:
+        """服务端 type=="settings" 控制消息（v1.0.48 P5：音色指纹推送）。
+        基类忽略；关心配置的子通道覆写。此类消息不进出帧流。"""
+        return None
+
     async def _process_text_message(self, msg: aiohttp.WSMessage) -> bool:
         """Process a text message from WebSocket. False = 消费端已消失。"""
         try:
@@ -407,6 +430,9 @@ class WsTransport:
         except Exception as err:
             self.logger.error("Invalid incoming msg: %s", msg)
             return True   # 解析失败与交付无关，链接保持
+        if json_data.get("type") == "settings":
+            self._on_server_settings(json_data)
+            return True
         return await self._deliver(self._recv_writer, json_data)
 
     async def await_message(self, timeout: int = 120):

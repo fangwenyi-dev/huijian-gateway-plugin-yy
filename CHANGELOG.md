@@ -3,6 +3,20 @@
 所有版本变更记录在此文件中。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [1.0.48] - 2026-09-20
+
+音色切换即时生效 + 安全收口批次：
+
+- **P5 音色指纹轮换**：TTS 音色配置指纹随 WS 建连欢迎帧下发、保存后在线推送；
+  HA core TTS 缓存键经实体 default_options 注入指纹参与计算，改音色不再被
+  300s 缓存窗口吞掉（旧音频不再复读）。
+- 管理面 nginx 移除 docker bridge 全段（172.17/16）放行，仅留回环与 Supervisor 网段。
+- endpoints.json 落盘模式 0600、/data/run 目录 0700（ws_token 不再全局可读）。
+- 集成侧日志脱敏：endpoint 查询串以 `?<masked>` 截断、播报正文 INFO 只留长度
+  （全文降 DEBUG）；加载项 Web 端消息日志同步截断。
+- `session._stream` 生成器 finally 补 aclose()，异常路径不再泄漏上游连接。
+- boot.sh /data/run 权限修正。
+
 ## [1.0.47] - 2026-09-19
 
 按用户要求换号发布：**功能内容与 1.0.46 完全一致**（播报流完整性与可观测、
