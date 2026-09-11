@@ -3,10 +3,12 @@ import logging
 from typing import Any
 
 import voluptuous as vol
+from homeassistant.components import cover
 from homeassistant.components.button.const import DOMAIN as BUTTON_DOMAIN
 from homeassistant.components.button.const import \
     SERVICE_PRESS as SERVICE_PRESS_BUTTON
-from homeassistant.const import ATTR_ENTITY_ID
+from homeassistant.const import (ATTR_ENTITY_ID, ATTR_SUPPORTED_FEATURES,
+                                 SERVICE_SET_COVER_POSITION)
 from homeassistant.helpers import intent
 from homeassistant.util.json import JsonObjectType
 
@@ -14,11 +16,124 @@ from .intent_helper import HaTargetItem, target_parameter_type
 from .intent_window_const import (WINDOW_ACTION_MAPPING, WINDOW_NAME_MAPPING,
                                   extract_window_name, find_action_in_text,
                                   find_all_window_buttons_by_action,
-                                  find_window_buttons, normalize_chinese_numbers)
+                                  find_covers_for_buttons,
+                                  find_window_buttons,
+                                  normalize_chinese_numbers)
 
 _LOGGER = logging.getLogger(__name__)
 
 ACTION_CHINESE = {"open": "开启", "close": "关闭", "pause": "暂停", "a": "内倒"}
+
+
+async def _apply_window_position(
+    intent_obj: intent.Intent,
+    window_name: str | None,
+    area_name: str | None,
+    device_name: str | None,
+    pos_raw,
+) -> dict:
+    """百分比开度定位：解析窗类目标 → 同设备 cover → set_cover_position。
+
+    寻径与开/关/暂停/内倒同源（find_window_buttons 按钮体系），能按按钮
+    找到的窗就有百分比入口；机型是否真支持由 cover 的 SET_POSITION 能力位
+    逐台裁决（网关 v1.7.21 起 5002 等无百分比硬件机型不声明该位并在服务层
+    拒绝）——这里绝不把「不支持」含糊成「成功」（用户 2026-09-15 能力边界
+    铁律：失败必须确定且可复述）。
+    """
+    hass = intent_obj.hass
+    try:
+        position = int(float(str(pos_raw).strip().rstrip("%％")))
+    except (TypeError, ValueError):
+        return {"success": False, "error": f"无法识别的开度数值：{pos_raw!r}"}
+    if not 0 <= position <= 100:
+        return {"success": False, "error": f"开度超出范围(0-100)：{position}"}
+
+    # 1) 定位窗类按钮（区域泛称/无窗型 → 区域内全部窗，与「开所有窗」同口径）
+    button_ids: list[str] = []
+    if window_name:
+        buttons = find_window_buttons(
+            hass, window_name, area_name, original_name=device_name
+        )
+        if not buttons and area_name:
+            buttons = find_window_buttons(
+                hass, window_name, None, original_name=device_name
+            )
+        button_ids = list(buttons.values())
+        generic_all = (not device_name) or str(device_name).strip().lower() in (
+            "窗户", "窗",
+        )
+        if area_name and (generic_all or not button_ids):
+            button_ids = find_all_window_buttons_by_action(hass, area_name, "open")
+    elif area_name:
+        button_ids = find_all_window_buttons_by_action(hass, area_name, "open")
+    else:
+        return {"success": False, "error": "No target specified"}
+    if not button_ids:
+        return {
+            "success": False,
+            "error": f"Could not find window buttons for "
+                     f"{device_name or window_name or area_name}",
+        }
+
+    # 2) 按钮 → 同设备 cover 实体
+    covers = find_covers_for_buttons(hass, button_ids)
+    if not covers:
+        return {
+            "success": False,
+            "error": "no available cover entity — 该窗户没有带位置实体的开窗器，"
+                     "不支持百分比定位",
+        }
+
+    # 3) 逐台下发，成败分收
+    ok_names: list[str] = []
+    bad_msgs: list[str] = []
+    for dev_name, cover_entity_id in covers:
+        state = hass.states.get(cover_entity_id)
+        if state is None:
+            bad_msgs.append(f"{dev_name}实体不可用")
+            continue
+        try:
+            feats = int(state.attributes.get(ATTR_SUPPORTED_FEATURES, 0) or 0)
+        except (TypeError, ValueError):
+            feats = 0
+        if not feats & cover.CoverEntityFeature.SET_POSITION:
+            bad_msgs.append(f"{dev_name}机型不支持百分比定位")
+            continue
+        try:
+            await hass.services.async_call(
+                cover.DOMAIN,
+                SERVICE_SET_COVER_POSITION,
+                {ATTR_ENTITY_ID: cover_entity_id, cover.ATTR_POSITION: position},
+                context=intent_obj.context,
+                blocking=True,
+            )
+            ok_names.append(dev_name)
+            _LOGGER.info("Set position %s%% on %s (%s)", position, cover_entity_id,
+                         dev_name)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.error("set_cover_position %s failed: %s", cover_entity_id, err)
+            bad_msgs.append(f"{dev_name}：{err}")
+
+    label = device_name or window_name or f"{area_name}的所有窗户"
+    if ok_names and not bad_msgs:
+        return {
+            "success": True,
+            "message": f"已将{label}开到{position}%",
+            "covers": [eid for _, eid in covers],
+        }
+    if ok_names:
+        return {
+            "success": True,
+            "message": (
+                f"已将{len(ok_names)}扇窗开到{position}%，"
+                f"但{len(bad_msgs)}扇未成功：{'；'.join(bad_msgs[:3])}"
+            ),
+            "covers": [eid for _, eid in covers],
+        }
+    return {
+        "success": False,
+        "error": f"开到{position}%未成功：{'；'.join(bad_msgs[:3])}",
+    }
 
 
 async def _press_multi_buttons(
@@ -49,8 +164,10 @@ async def _press_multi_buttons(
 class ControlWindowIntent(intent.IntentHandler):
     intent_type = "ControlWindow"
     description = (
-        "Unified entry for ALL window commands (open/close/pause/tilt). "
-        "Action keywords: 开/开启=open, 关/关闭=close, 暂停/停止/停=pause, 内倒/内岛=A(tilt). "
+        "Unified entry for ALL window commands (open/close/pause/tilt) and "
+        "percentage positioning. Action keywords: 开/开启=open, 关/关闭=close, "
+        "暂停/停止/停=pause, 内倒/内岛=A(tilt). Optional slot position(0-100): "
+        "'把推拉窗打开到50%' -> position=50 (定位开度，仅支持百分比的开窗器机型生效). "
         "Examples: '内岛展厅窗户' -> action=A, area=展厅, name=窗户. "
         "'打开平推窗' -> action=open, name=平推窗. "
         "Valid window names: 平推窗,平开窗,推拉窗,内开窗,外开窗,天窗,飘窗,推拉门,内开内倒窗,单内倒窗,外装平开窗,智能窗,窗户."
@@ -61,6 +178,9 @@ class ControlWindowIntent(intent.IntentHandler):
         """Return a slot schema."""
         return {
             vol.Optional("action"): str,
+            # 百分比开度（网关 v1.7.20+ 开窗器）：与 action 二选一，
+            # 携带时走 cover.set_cover_position 定位，不再按按钮。
+            vol.Optional("position"): vol.Any(int, float, str),
             vol.Required("target"): target_parameter_type(),
         }
 
@@ -101,6 +221,16 @@ class ControlWindowIntent(intent.IntentHandler):
             action = find_action_in_text(action_slot)
 
         _LOGGER.info("Extracted: window_name='%s', action='%s'", window_name, action)
+
+        # 百分比开度定位（v1.7.20+ 网关开窗器）：与二值开/关同一套窗类解析，
+        # 命中后按「按钮→同设备 cover」下发 set_cover_position。
+        # 必须在 window_name 缺失的全窗兜底分支之前裁决——位置语义不需要
+        # action（"开到50%"剥掉动词尾巴后无独立动作词）。
+        pos_raw = (slots.get("position") or {}).get("value")
+        if pos_raw is not None:
+            return await _apply_window_position(
+                intent_obj, window_name, area_name, device_name, pos_raw
+            )
 
         if not window_name:
             if area_name and action:

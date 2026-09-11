@@ -432,3 +432,41 @@ def find_all_window_buttons_by_action(
                 break
 
     return result
+
+
+def find_covers_for_buttons(hass, button_entity_ids: list[str]) -> list[tuple[str, str]]:
+    """窗类按钮实体 → 同设备 cover 实体，返回 [(设备名, cover_entity_id)]。
+
+    百分比开度定位专用（网关 v1.7.20+）：开窗器的 button 与 cover 共用
+    identifiers={(DOMAIN, device_sn)}（网关 button.py/cover.py 同源实锤），
+    「能按按钮找到窗」＝「同一台开窗器有百分比入口」。本函数只负责寻径；
+    机型是否真支持百分比由 cover 自身 supported_features 的 SET_POSITION
+    位裁决（5002 等无百分比硬件机型不会声明该位），调用方据此如实报告。
+    """
+    from homeassistant.helpers import device_registry as dr
+    from homeassistant.helpers import entity_registry as er
+
+    entity_registry = er.async_get(hass)
+    device_registry = dr.async_get(hass)
+
+    out: list[tuple[str, str]] = []
+    seen_devices: set[str] = set()
+    seen_entities: set[str] = set()
+    for button_entity_id in button_entity_ids:
+        entry = entity_registry.async_get(button_entity_id)
+        if not entry or not entry.device_id or entry.device_id in seen_devices:
+            continue
+        seen_devices.add(entry.device_id)
+        dev = device_registry.async_get(entry.device_id)
+        dev_name = None
+        if dev is not None:
+            dev_name = getattr(dev, "name_by_user", None) or getattr(dev, "name", None)
+        dev_name = dev_name or entry.device_id
+        for cover_entry in er.async_entries_for_device(entity_registry,
+                                                       entry.device_id):
+            if cover_entry.domain != "cover" or cover_entry.entity_id in seen_entities:
+                continue
+            seen_entities.add(cover_entry.entity_id)
+            out.append((dev_name, cover_entry.entity_id))
+    _LOGGER.info("Position covers for %s buttons → %s", list(button_entity_ids), out)
+    return out

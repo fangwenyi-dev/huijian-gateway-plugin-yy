@@ -221,7 +221,12 @@ class Executor:
         "HassUnlock": ("lock", "unlock"),
         "HassClimateSetTemperature": ("climate", "set_temperature"),
         "HassClimateSetHumidity": ("humidifier", "set_humidity"),
-        "HassSetPosition": ("cover", "set_position"),
+        # 服务名按 HA core 实源核验：cover 域只有 set_cover_position
+        # （homeassistant.const.SERVICE_SET_COVER_POSITION），**没有**
+        # set_position——旧值会让 klar grounded 的开窗器/窗帘定位步骤
+        # 必败 "Service cover.set_position not found"（tests/
+        # test_window_position.py 钉桩，防漂移）。
+        "HassSetPosition": ("cover", "set_cover_position"),
         "HassFanSetSpeed": ("fan", "set_percentage"),
         "HassFanSetPresetMode": ("fan", "set_preset_mode"),
         "HassVacuumStart": ("vacuum", "start"),
@@ -388,6 +393,9 @@ class Executor:
         if intent == "PauseDevice":            # v1.0.42 家电族（扫地机器人/电视/窗帘）
             return f"好的，{head}{names}暂停了"
         if intent == "ControlWindow":
+            if args.get("position") is not None:
+                # 百分比开度（集成端正常会带中文 message 直播；此分支兜底）
+                return f"好的，{head}{names}开到{args['position']}%"
             act = ACT_CN.get(str(args.get("action", "")).lower(), "调节")
             return f"好的，{head}{names}已{act}"
         if intent == "AdjustDeviceAttribute":

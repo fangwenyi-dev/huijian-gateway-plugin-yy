@@ -160,6 +160,67 @@ _WINDOW_ACTION_SCAN = [
     (re.compile(r"开|open"), "open"),
 ]
 
+# ── 百分比开度预检（任何动作表扫描之前裁决）────────────────────────
+# 病灶（开窗器百分比主诉）：设备词以动作词「开窗」起头，`^开窗(?!帘)` 在
+# _ACTION_PATTERNS 里先于位置规则 `^(开到|打开到|关到)\d+` 命中——
+# 「开窗器开到50%」被 ControlWindow(open) 截胡，百分比静默丢、按钮全开
+# （假动作成功）；「打开展厅推拉窗50%」「展厅推拉窗打开50%」两种语序锚定
+# 动作表根本够不到；且位置形态只认阿拉伯数字，「百分之五十/五十/一半」
+# （温度/亮度均支持）此前是空洞。
+# 本预检只接管「句尾显式开度数值 + 目标含窗类词」的句子；窗类走
+# ControlWindow(position)——网关开窗器按钮体系（button/cover 同设备），
+# 集成端按按钮→同设备 cover 下发 set_cover_position，与开/关/暂停/内倒
+# 同源解析。窗帘/纱帘/纱窗/百叶=标准 cover 实体，维持既有
+# AdjustDeviceAttribute 路径，本层一律不碰。
+_POS_TAIL_VERBS = ("打开到|关闭到|关上到|设置到|开到|关到|调到|调为|调成|设为|设到|"
+                   "设成|变成|改为|全开到|全开|打开|关闭|关上|调|设|开|关|到|为|成")
+_POS_TAIL_RE = re.compile(
+    rf"(?:(?P<verb>{_POS_TAIL_VERBS})\s*)?"
+    r"(?P<num>百分之[零一二三四五六七八九十百]+|[0-9]{1,3}\s*[%％]|一半|"
+    r"[零一二三四五六七八九十百]{1,4}|[0-9]{1,3})\s*$")
+_POS_LEAD_RE = re.compile(rf"^(?:{_POS_TAIL_VERBS})\s*(?=[\u4e00-\u9fff0-9])")
+_POS_CURTAIN_WORDS = ("帘", "纱窗", "百叶")
+
+
+def _parse_position(num: str, had_verb: bool) -> Optional[int]:
+    """句尾数值 token → 0-100 开度；None=不接管。
+    无 %/百分之/一半 标记的裸数字必须有相邻动词引导（「窗户50」既不是
+    百分比命令也可能是设备编号，宁可不接管）；越界拒接。永不抛。"""
+    try:
+        n = (num or "").strip()
+        if n == "一半":
+            return 50
+        if n.startswith("百分之"):
+            pos = int(T.cn2num(n[len("百分之"):].strip()))
+            explicit = True
+        elif re.fullmatch(r"[0-9]{1,3}\s*[%％]", n):
+            pos = int(re.sub(r"\D", "", n))
+            explicit = True
+        elif re.fullmatch(r"[0-9]{1,3}", n):
+            pos = int(n)
+            explicit = False
+        else:
+            pos = int(T.cn2num(n))
+            explicit = False
+        if not 0 <= pos <= 100:
+            return None
+        if not explicit and not had_verb:
+            return None
+        return pos
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_window_position_target(target: str) -> bool:
+    """窗类词闸：开窗器/12 窗型/裸「窗」尾缀（"3号窗"）；帘族排除。"""
+    t = (target or "").strip()
+    if not t:
+        return False
+    if any(w in t for w in _POS_CURTAIN_WORDS):
+        return False
+    return ("开窗器" in t or "开合器" in t or _window_type(t) is not None
+            or t.rstrip("的地得").endswith("窗"))
+
 
 @dataclass
 class Plan:
@@ -505,6 +566,32 @@ class FastPath:
         return Plan(intent=intent, args={"target": [entry]}, source="t0",
                     utterance=text, trace=trace)
 
+    def _position_plan(self, text: str, trace: list) -> Optional[Plan]:
+        """百分比开度句 → ControlWindow(position)。永不抛；门不齐返回 None
+        交回原动作表，无数字/帘族/非窗设备的句子行为与改动前完全一致。"""
+        try:
+            m = _POS_TAIL_RE.search(text)
+            if not m:
+                return None
+            verb = m.group("verb") or ""
+            pos = _parse_position(m.group("num"), bool(verb))
+            if pos is None:
+                return None
+            head = text[:m.start()].strip().strip(" 的地得了吧啦，,")
+            # 「打开展厅推拉窗50%」引导动词形：剥掉后再验窗类词（剥完不含
+            # 窗词就不剥，保守回原表）
+            lm = _POS_LEAD_RE.match(head)
+            if lm and _is_window_position_target(head[lm.end():]):
+                head = head[lm.end():].strip()
+            if not _is_window_position_target(head):
+                return None
+            trace.append(f"百分比开度:{head or '全屋窗'}→{pos}%")
+            return self._build_plan("ControlWindow", head, {"position": pos},
+                                    text, "t0", trace)
+        except Exception:  # noqa: BLE001
+            logger.exception("[fastpath] 百分比开度预检异常（视为不接管）")
+            return None
+
     # ── 主入口 ──────────────────────────────────────────────────
     async def match(self, raw_text: str) -> Optional[Plan]:
         trace: list[str] = []
@@ -597,6 +684,12 @@ class FastPath:
         vp = self._vacuum_plan(text, trace)
         if vp is not None:
             return vp
+
+        # v1.0.4x 百分比开度预检：必须在 ① 动作表之前——「开窗器」以动作词
+        # 「开窗」起头，① 的 ^开窗(?!帘) 会先截胡丢数值（见 _POS_TAIL_RE 注释）。
+        pp = self._position_plan(text, trace)
+        if pp is not None:
+            return pp
 
         matched_intent: Optional[str] = None
         extra_args: dict[str, Any] = {}
@@ -877,7 +970,7 @@ class FastPath:
             args["target"] = [entry] if entry else []
         if "action" in extra:
             args["action"] = str(extra["action"]).lower()
-        for k in ("attribute", "delta", "mode"):
+        for k in ("attribute", "delta", "mode", "position"):
             if k in extra:
                 args[k] = extra[k]
         # 温度调节带目标也改道 ClimateSetTemperature（原第二处：name 有而 attribute=temperature 保留 Adjust——仅无设备名改道，已在上分支）
