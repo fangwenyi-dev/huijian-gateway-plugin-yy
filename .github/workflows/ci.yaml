@@ -522,8 +522,11 @@ jobs:
               existing = None
           if existing and existing.get("id"):
               # 405 实锤（df92fa5 CI）：Gitee 更新发行版走 PATCH，PUT 必 405
+              # v1.0.48 CI 实锤：Gitee PATCH 现要求 tag_name/name 同载（只发
+              # body 直接 400 messages:[tag_name is missing, name is missing]）
               r = call(f"{api}/releases/{existing['id']}?access_token={tok}",
-                       {"body": body}, method="PATCH")
+                       {"body": body, "tag_name": f"v{ver}",
+                        "name": f"v{ver}"}, method="PATCH")
               print(f"Gitee Release 已同步正文: id={r.get('id', existing['id'])} tag=v{ver}")
               sys.exit(0)
           r = call(f"{api}/releases?access_token={tok}", {
