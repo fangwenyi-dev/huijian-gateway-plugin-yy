@@ -221,7 +221,12 @@ class TtsSession(BaseSession):
             state = obj.get("state")
             text = str(obj.get("text", "")).strip()
             # 宽容：detect 为主形态；sentence_start/无状态带 text 也接单条合成（stop 回显忽略）
-            if state in ("detect", "sentence_start", None) and text:
+            # 审查修复（2026-09-21）：不再以 `and text` 静默忽略空文本 detect——自家
+            # 契约「每 detect 必有 stop」，旧形态空 detect（tts.speak message=""，
+            # core schema 不拦空串）不出帧不发 stop，客户端 fail_after(60) 白等
+            # 一整分钟且全程持有播报通道 _request_lock。空文本统一走整流：
+            # split 出 0 句 → 零帧 → 干净 stop，顶替语义也一并保住。
+            if state in ("detect", "sentence_start", None):
                 self._start_stream(text)
         # listen stop 等在 tts 通道无义务响应（客户端不收口）
 
@@ -322,6 +327,9 @@ class TtsSession(BaseSession):
                                 n_frames, n_bytes, text[:30])
                 elif text:
                     logger.warning("[TTS] 空音频收束（模型未就绪？）: %r", text[:30])
+                else:
+                    # 审查修复：空文本 detect 的零帧收束也要留痕（旧版静默）
+                    logger.info("[TTS] 空文本 detect：零帧直接收束 stop")
 
     async def on_close(self) -> None:
         if self._task:

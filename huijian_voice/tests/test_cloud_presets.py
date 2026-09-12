@@ -76,7 +76,9 @@ class FakeSession:
 
     def post(self, url, json=None, headers=None, **kw):
         self.calls.append({"url": url, "json": json, "headers": headers})
-        item = self.script.pop(0) if self.script else (200, b"RAWPCM")
+        # 默认体 ≥12B：短响应自 2026-09-21 起被"容器判形过短闸"拒收，
+        # 本文件钉的是请求体参数，不借短桩偷懒。
+        item = self.script.pop(0) if self.script else (200, b"RAWPCM" * 8)
         if isinstance(item, Exception):
             raise item
         return FakeResp(*item)
@@ -143,9 +145,15 @@ def test_unwrap_non16bit_rejected():
     except RuntimeError as e:
         assert "16-bit" in str(e)
 
-def test_unwrap_stubby_riff_passthrough():
-    pcm, rate = TTS._unwrap_audio(b"RIFF", 24000)
-    assert pcm == b"RIFF" and rate == 24000
+def test_unwrap_stubby_riff_rejected():
+    """短到判不出容器的整包响应=坏响应（2026-09-21 审查修复批，翻转旧
+    `test_unwrap_stubby_riff_passthrough` 宽容钉）：4B "RIFF" 曾被当裸 PCM
+    透传 → 1 帧垃圾 + 假"云成功"解钉；现在响亮失败换本地回落+钉扎。"""
+    try:
+        TTS._unwrap_audio(b"RIFF", 24000)
+        assert False, "短响应必须拒收（与流式 _decide 同闸）"
+    except RuntimeError as e:
+        assert "过短" in str(e)
 
 
 # ── ② 请求体透传 ────────────────────────────────────────────
@@ -157,7 +165,7 @@ def test_body_defaults_pcm_no_rate(monkeypatch):
     assert sess.calls[0]["url"] == "https://x.example/v1/audio/speech"
     body = sess.calls[0]["json"]
     assert body["response_format"] == "pcm" and "sample_rate" not in body
-    assert cap == [(b"RAWPCM", 24000)]
+    assert cap == [(b"RAWPCM" * 8, 24000)]
 
 def test_body_passthrough_format_and_rate(monkeypatch):
     cap = []

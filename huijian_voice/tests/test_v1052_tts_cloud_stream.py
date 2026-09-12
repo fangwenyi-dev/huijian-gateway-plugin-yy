@@ -680,11 +680,17 @@ def test_decoder_rejects_non_16bit_wav():
 
 
 def test_decoder_raw_pcm_shorter_than_sniff_window():
-    """短到判不出容器的响应：按裸 PCM 宽容处理（与 _unwrap_audio 同宽容度）。"""
+    """短到判不出容器的响应=坏响应（2026-09-21 审查修复批翻转本宽容钉）。
+
+    旧形态钉"按裸 PCM 宽容处理"——评审实证其反面：4B "RIFF" 残响应掉进
+    缺省 PCM 支产 1 帧垃圾、`cloud_frames=1` 被记**云成功并解除钉扎**。
+    现在 _decide 与 _unwrap_audio 同闸 <12B 拒收，由 stream_opus 走零帧
+    政策（本地回落+钉扎），与"截断音频必须响亮失败"自家纪律对齐。"""
     raw = b"\x11\x22\x33\x44"
     dec = _CloudOpusStream(24000)
     assert dec.feed(raw) == []
-    assert dec.flush() == TtsEngine._resample_encode(raw, 24000)
+    with pytest.raises(RuntimeError, match="过短"):
+        dec.flush()
 
 
 def test_decoder_unknown_rate_is_not_fatal():

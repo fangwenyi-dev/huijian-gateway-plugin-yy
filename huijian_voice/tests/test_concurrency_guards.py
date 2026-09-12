@@ -106,6 +106,53 @@ def test_tts_unload_defers_to_inflight():
     assert eng.unload() is True
 
 
+class _ConcurrencyProbeTts:
+    """generate 并发峰值探针：sherpa-onnx OfflineTts 前端（espeak/jieba/
+    pinyin）持共享可变状态，并发进入=互踩甚至 C++ 崩溃。"""
+
+    def __init__(self):
+        self.active = 0
+        self.peak = 0
+        self.lock = threading.Lock()
+
+    def generate(self, text, sid=0, speed=1.0):
+        with self.lock:
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+        time.sleep(0.2)
+        with self.lock:
+            self.active -= 1
+        return SimpleNamespace(samples=np.zeros(4800, dtype=np.float32),
+                               sample_rate=16000)
+
+    num_speakers = 53
+
+
+def test_tts_generate_serialized():
+    """审查修复（2026-09-21）：generate 并行互斥（_gen_lock）。F1 的 busy 计数
+    只防跨代析构，**不防同代并发调用**；web 试听（synthesize_pcm）与卫星播报
+    流式句是两个 executor 线程。两路必须串行、都完成出音、busy 归零。"""
+    eng = TtsEngine(DSettings({"tts.sid": 45, "tts.speed": 1.0}), SimpleNamespace())
+    probe = _ConcurrencyProbeTts()
+    eng._tts = probe
+    results = []
+    rlock = threading.Lock()
+
+    def one(i):
+        r = eng._synth(f"第{i}句。", 45, 1.0)
+        with rlock:
+            results.append(r)
+
+    ths = [threading.Thread(target=one, args=(i,)) for i in range(2)]
+    for t in ths:
+        t.start()
+    for t in ths:
+        t.join(5)
+    assert probe.peak == 1, f"generate 并发进入峰值={probe.peak}，_gen_lock 失效回潮"
+    assert len(results) == 2 and all(len(r) > 0 for r in results), "两路合成都要完成出音"
+    assert eng._busy == 0
+
+
 # ── F2/F4: ModelStore single-flight ────────────────────────────
 def _make_tar_bytes(top="pkg"):
     files = {f"{top}/tokens.txt": b"tok", f"{top}/encoder.int8.onnx": b"enc",

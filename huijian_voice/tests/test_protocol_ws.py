@@ -239,6 +239,82 @@ def test_tts_takeover_no_orphans(server):
     _run(go())
 
 
+class _TtsEmptyAware:
+    """真实引擎形态：空/纯空白文本 split 出 0 句=零帧收束（FakeTts 恒吐帧，
+    测不出空 detect 语义，单独做一个忠实形态）。"""
+
+    def __init__(self, packets=3, delay=0.01):
+        self.packets, self.delay = packets, delay
+        self.texts = []
+
+    def ready(self):
+        return True
+
+    async def stream_opus(self, text, engine_out=None):
+        self.texts.append(text)
+        if not text.strip():
+            return
+        for i in range(self.packets):
+            yield b"OPUS" + str(i).encode()
+            await asyncio.sleep(self.delay)
+
+
+def test_tts_empty_detect_replies_stop(server):
+    """审查修复（2026-09-21）契约钉：自家契约「每 detect 必有 stop」——旧版
+    `and text` 把空文本 detect 静默吞掉：客户端 fail_after(60) 白等一整分钟
+    且全程持有播报通道锁（tts.speak message="" 可达，core schema 不拦空串）。
+    现在空 detect/纯空白 detect 都必须零帧+恰一条干净 stop。"""
+    port, ctx = server
+
+    async def go():
+        fake = _TtsEmptyAware()
+        ctx.tts = fake
+        async with ClientSession() as sess:
+            for probe in ('{"type":"tts","state":"detect","text":""}',
+                          '{"type":"tts","state":"detect","text":"   "}'):
+                ws = await _connect(sess, port, "tts")
+                await ws.send_str(probe)
+                texts, bins = await _collect(ws, 1, timeout=6)
+                await ws.close()
+                assert not bins, "空 detect 不得产帧"
+                assert len(texts) == 1 and texts[0].get("state") == "stop", \
+                    f"空 detect 未收束 stop（契约破口回潮）: {texts}"
+                assert "truncated" not in texts[0], "空文本是完整收束，不是截断"
+        assert fake.texts == ["", ""], "整流必须真正走到 stream_opus（统一路径）"
+    _run(go())
+
+
+def test_tts_empty_detect_takeover_converges(server):
+    """慢流在飞时空 detect 顶入：旧流截断（不发 stop），空流零帧收束恰一条
+    stop——顶替语义对空文本同样成立，通道不得留下悬挂轮。"""
+    port, ctx = server
+
+    async def go():
+        ctx.tts = FakeTts(packets=60, delay=0.05)
+        async with ClientSession() as sess:
+            ws = await _connect(sess, port, "tts")
+            await ws.send_str('{"type":"tts","state":"detect","text":"第一条慢慢说"}')
+            await asyncio.sleep(0.15)
+            ctx.tts = _TtsEmptyAware()
+            await ws.send_str('{"type":"tts","state":"detect","text":""}')
+            stops = 0
+            deadline = asyncio.get_event_loop().time() + 10
+            while asyncio.get_event_loop().time() < deadline:
+                try:
+                    msg = await asyncio.wait_for(ws.receive(), 8)
+                except asyncio.TimeoutError:
+                    break
+                if msg.type == WSMsgType.TEXT:
+                    obj = json.loads(msg.data)
+                    if obj.get("state") == "stop":
+                        stops += 1
+                        assert "truncated" not in obj
+                        break
+            await ws.close()
+            assert stops == 1, "空 detect 顶替后 stop 数量/形状不对"
+    _run(go())
+
+
 # ── C3 LLM ─────────────────────────────────────────────────────
 def test_llm_frame_sequence(server):
     port, _ = server

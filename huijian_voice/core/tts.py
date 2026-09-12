@@ -40,6 +40,14 @@
 settings DEFAULTS tts.cloud.*_timeout_s）：停摆的云端点几秒内失败 → 云→本地
 回落照旧即时触发。首字节与首帧两跳延迟全程打日志（[TTS] 云首字节/首帧、
 模型未就绪本轮等待、本地首帧）。
+
+2026-09-21 审查修复批（本文件）：①**语速入音色指纹**（HA 消息哈希盘缓存无
+TTL，speed 不换键=模板句永远旧语速；云档另补 model/response_format/端点
+host；api_key 永不入指纹），三处 speed 读取统一 `_speed()` 安全值，坏配置
+不再逐句炸链；②**generate 并行互斥**（_gen_lock：试听与播报并发时
+sherpa-onnx 前端共享状态互踩/崩溃，F1 只防跨代析构不防同代并发）；③云响应
+**短于嗅探窗不得判成裸 PCM**（旧形态 4B "RIFF" 残响应产 1 帧垃圾还"云成功
+解钉"；流式 _decide 与整包 _unwrap_audio 同闸）。
 """
 from __future__ import annotations
 
@@ -51,6 +59,7 @@ import threading
 import time
 from collections import OrderedDict
 from typing import AsyncIterator, Optional
+from urllib.parse import urlparse
 
 import numpy as np
 
@@ -401,6 +410,13 @@ class _CloudOpusStream:
 
     # ── 内部 ────────────────────────────────────────────────────
     def _decide(self, data: bytes) -> None:
+        # 审查修复（2026-09-21）：判形必须拿满嗅探窗——旧形态下 <12B 的残响应
+        # （如 4 字节 "RIFF"）`data[8:12]` 切空判不进 WAVE，掉到"裸 PCM 缺省"
+        # 分支：实测产 1 帧垃圾、`cloud_frames=1` 被记**云成功并解除钉扎**。
+        # 短到无法判容器的响应是坏响应，必须响亮失败→回落本地+钉扎。
+        if len(data) < self._SNIFF_BYTES:
+            raise RuntimeError(
+                f"云 TTS 响应过短（共 {len(data)}B，无法判定容器形态）")
         if data[:4] == b"RIFF" and data[8:12] == b"WAVE":
             # 12B（RIFF/size/WAVE）即容器头，**不进音频流水**；其余留待块头解析
             self._rbuf = bytearray(data[12:])
@@ -482,6 +498,13 @@ class TtsEngine:
         self._tts = None
         self._lock = threading.Lock()
         self._busy = 0          # 在飞合成数（卸载避让；审查 F1）
+        # 审查修复（2026-09-21）：generate **并行**互斥。F1 只防跨代析构、
+        # 不防同代并发——sherpa-onnx OfflineTts 前端（espeak-ng/jieba/pinyin
+        # 通道）持共享可变状态，并发 generate 轻则两路音频互踩、重则 C++ 层
+        # 崩溃打死整个容器（播报+STT+LLM 全断）。可达触发：web「试听」
+        # (synthesize_pcm) 与卫星播报在飞句并发；双客户端同理。4C 台架合成
+        # 本就 CPU 饱和，串行化零实质吞吐损失（云端解码/opus 编码不受此锁）。
+        self._gen_lock = threading.Lock()
         self.last_used = time.time()
         self.encoder_rate = const.SAMPLE_RATE
         # P0-4 (text, sid, speed) → (packets, bytes) LRU；仅本地档，asyncio 单线程
@@ -552,20 +575,49 @@ class TtsEngine:
             sid = 18
         return sid
 
+    def _speed(self) -> float:
+        """语速安全读（审查修复 2026-09-21）：合成三处与指纹必须读**同一个**
+        校验值——坏配置（非数/非正）回 1.0 并留一行 WARN，不再"每轮 float()
+        炸穿 → 截断声明"。播报可用性优先。"""
+        raw = self.settings.get("tts.speed", 1.0)
+        try:
+            v = float(raw)
+        except (TypeError, ValueError):
+            logger.warning("[TTS] tts.speed=%r 非数，按 1.0 合成", raw)
+            return 1.0
+        if v <= 0:
+            logger.warning("[TTS] tts.speed=%r 非正，按 1.0 合成", raw)
+            return 1.0
+        return v
+
     def voice_fingerprint(self) -> str:
         """v1.0.48（P5，"多嗓音"第六路径收口）：HA core 的 TTS 缓存键=
-        sha1(文本)_语言_options_实体id——加载项内部音色对它**完全不感知**，
+        sha1(文本)_语言_options_实体id——加载项内部配置对它**完全不感知**，
         web 换嗓后同一句永远命中旧嗓缓存。修复：集成实体把本指纹并入
         default_options（core 将 default_options 合进 options 参与键计算），
         指纹变→键轮换→必然重合成；旧条目由 TTL/清理兜底。递送=WS
         settings 消息（tts 通道建连随欢迎发 + web 保存即推送）。
-        只涵盖会换嗓的变化：provider/云 voice/本地 sid/自定义注入数；
-        speed 不改嗓音，不入。"""
+        2026-09-21 审查修复批（口径更正）：缓存存的是**渲染结果**，凡改变
+        音频产出的服务端配置都得进键——初版"speed 不改嗓音，不入"把嗓音
+        身份与音频身份混为一谈：语速滑条（web 0.6–2.0）改档后模板句永久
+        命中旧语速盘缓存（消息哈希键无 TTL，仅 clear_cache 可清），与当初
+        修的"换嗓不轮换"同族同病灶。speed 入指纹（本地+云）；云档另补
+        model/response_format/base_url host（换平台同 voice 名=不同嗓）。
+        **api_key 永不入指纹**（指纹随 WS 帧与 INFO 日志走，凭据不上链）。"""
         prov = str(self.settings.get("tts.provider", "local_kokoro"))
+        speed_s = f"s{self._speed():g}"
         if prov.startswith("cloud"):
-            voice = str((self.settings.get("tts.cloud") or {}).get("voice") or "alloy")
-            return f"cloud:{voice}"
-        return f"local:sid{self.resolve_sid()}+c{len(self._custom_sids)}"
+            cloud = self.settings.get("tts.cloud") or {}
+            if not isinstance(cloud, dict):
+                cloud = {}
+            base = str(cloud.get("base_url") or "")
+            host = urlparse(base).netloc or base
+            return (f"cloud:{str(cloud.get('voice') or 'alloy')}"
+                    f":{str(cloud.get('model') or 'tts-1')}"
+                    f":{str(cloud.get('response_format') or 'pcm')}"
+                    f":{host}"
+                    f":{speed_s}")
+        return f"local:sid{self.resolve_sid()}+c{len(self._custom_sids)}+{speed_s}"
 
     def reset_cloud_pin(self, reason: str = "") -> None:
         """v1.0.55（定案⑤）：云失败钉扎的复位开关=云配置热变更。
@@ -745,7 +797,7 @@ class TtsEngine:
         # 云档=云端对应音色（可选）；**云失败回落=固定默认本地音色 sid18**——回落是
         # 应急通道，取最保守单音色，不跟 web 配置（可能是自定义名/云专属号）漂移。
         sid = _DEFAULT_SID if fell_back else self.resolve_sid()
-        speed = float(self.settings.get("tts.speed", 1.0))
+        speed = self._speed()
         if engine_out is not None:
             eng0 = engine_out.get("engine")
             engine_out["engine"] = f"local:sid{sid}" + (
@@ -862,7 +914,10 @@ class TtsEngine:
                 return b""
             self._busy += 1
         try:
-            audio_obj = tts.generate(sent, sid=sid, speed=speed)
+            # 并行 generate 互斥（见 __init__ _gen_lock 注释）：F1 快照/计数
+            # 语义不变，仅把 C++ 调用排队（两锁不嵌套、无死锁序）。
+            with self._gen_lock:
+                audio_obj = tts.generate(sent, sid=sid, speed=speed)
             samples = np.asarray(audio_obj.samples, dtype=np.float32)
             rate = int(audio_obj.sample_rate)
             if samples.size == 0:
@@ -885,7 +940,7 @@ class TtsEngine:
         if not self.ready() and not await loop.run_in_executor(None, self.ensure_loaded):
             return b""
         sid = self.resolve_sid()
-        speed = float(self.settings.get("tts.speed", 1.0))
+        speed = self._speed()
         out = b""
         for sent in split_sentences(text):
             out += await loop.run_in_executor(None, self._synth, sent, sid, speed)
@@ -933,7 +988,7 @@ class TtsEngine:
                 "voice": str(cloud.get("voice") or "alloy"),
                 "input": text,
                 "response_format": str(cloud.get("response_format") or "pcm"),
-                "speed": float(self.settings.get("tts.speed", 1.0))}
+                "speed": self._speed()}
         # 平台预设透传：如硅基流动 pcm 默认 44.1kHz，须显式指定才与预期一致
         if sr_req := cloud.get("sample_rate"):
             body["sample_rate"] = int(sr_req)
@@ -1006,6 +1061,11 @@ class TtsEngine:
     def _unwrap_audio(raw: bytes, default_rate: int) -> tuple:
         """返回 (s16le mono pcm, rate)。RIFF/WAVE 拆封；mp3/ogg 显式报错。"""
         import struct
+        # 与流式路 _decide 同闸（审查修复 2026-09-21）：短到无法判容器的整包
+        # 响应是坏响应（0B 维持旧语义交给零帧收束政策）。
+        if 0 < len(raw) < 12:
+            raise RuntimeError(
+                f"云 TTS 响应过短（共 {len(raw)}B，无法判定容器形态）")
         if len(raw) >= 44 and raw[:4] == b"RIFF" and raw[8:12] == b"WAVE":
             pos, sr, bits, data = 12, 0, 0, None
             while pos + 8 <= len(raw):

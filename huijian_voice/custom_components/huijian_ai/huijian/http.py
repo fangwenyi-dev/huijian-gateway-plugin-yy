@@ -176,6 +176,37 @@ class HuijianDeviceInfoView(HuijianHttpView):
         return self.json_message("device not found", 404)
 
 
+def parse_tts_stt_options(raw):
+    """options query 参数 → dict（审查修复 2026-09-21）。旧版把 query string
+    原样直传 async_create_result_stream，core 里 options.pop → AttributeError
+    ——该参数一传即 400，形同虚设。显式 JSON 解析并校验必须为对象；缺省 {}。"""
+    if not raw:
+        return {}
+    try:
+        opts = json.loads(raw)
+    except ValueError:
+        raise ValueError("options 必须为 JSON 对象字符串")
+    if not isinstance(opts, dict):
+        raise ValueError("options 必须为 JSON 对象")
+    return opts
+
+
+def pick_default_entities(loaded_entries):
+    """多条目取默认实体的**first-wins** 规则（审查修复 2026-09-21）。
+    旧循环"最后一条 entry 覆盖"——多设备条目下取到随机末位的配置
+    （张冠李戴）。各键取首个显式配置者；皆无则定案默认。"""
+    conf_tts = conf_stt = None
+    for entry in loaded_entries:
+        if not conf_tts:
+            conf_tts = entry.options.get(CONF_TTS_ENTITY_ID)
+        if not conf_stt:
+            conf_stt = entry.options.get(CONF_STT_ENTITY_ID)
+        if conf_tts and conf_stt:
+            break
+    return (conf_tts or "tts.huijian_speech",
+            conf_stt or "stt.huijian_asr")
+
+
 class HuijianTtsSttView(HuijianHttpView):
     requires_auth = True
     url = "/api/huijian-ai/tts-stt"
@@ -184,21 +215,24 @@ class HuijianTtsSttView(HuijianHttpView):
     async def get(self, request: web.Request):
         hass = request.app[KEY_HASS]
         message = request.query.get("message")
+        if not message or not message.strip():
+            return self.json_message("message 必填", 400)
 
-        default_tts = "tts.huijian_speech"
-        default_stt = "stt.huijian_asr"
-        for entry in hass.config_entries.async_loaded_entries(DOMAIN):
-            default_tts = entry.options.get(CONF_TTS_ENTITY_ID, default_tts)
-            default_stt = entry.options.get(CONF_STT_ENTITY_ID, default_stt)
+        default_tts, default_stt = pick_default_entities(
+            hass.config_entries.async_loaded_entries(DOMAIN))
 
         tts_entity = request.query.get("tts_entity", default_tts)
         stt_entity = request.query.get("stt_entity", default_stt)
 
         try:
+            options = parse_tts_stt_options(request.query.get("options"))
+        except ValueError as err:
+            return self.json({"error": str(err)}, 400)
+        try:
             stream = hass.data["tts_manager"].async_create_result_stream(
                 engine=tts_entity,
                 use_file_cache=not request.query.get("nocache"),
-                options=request.query.get("options") or {},
+                options=options,
             )
         except Exception as err:
             return self.json({"error": str(err)}, 400)

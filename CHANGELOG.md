@@ -1,5 +1,46 @@
 # 变更日志
 
+## [1.0.57] - 2026-09-21 TTS 审查修复批（语速入指纹 + generate 并行互斥 + 空 detect 契约收口）
+
+- **语速/云产出参数入音色指纹**（`core/tts.py voice_fingerprint`）：v1.0.48
+  初版以"speed 不改嗓音"为由把语速排除在指纹外——前提错了：HA 缓存存的是
+  **渲染结果**且消息哈希盘缓存**无 TTL**（仅 tts.clear_cache 可清），web 语速
+  滑条（0.6–2.0）调档后模板句永久命中旧语速音频，与当初修的"换嗓不轮换"同族
+  同病灶。现本地=`sid+注入数+speed`、云=`voice+model+response_format+端点
+  host+speed`；**api_key 永不入指纹**（指纹随 WS 帧与 INFO 日志外流）。speed
+  三处读取统一 `_speed()` 安全值（非数/非正按 1.0+WARN，坏配置不再逐句炸链）。
+  ⚠ 升级效应（预期，非 bug）：指纹格式变更 → HA 盘缓存键一次性全轮换，
+  各句首播重新合成一遍；现场嫌等可手动 `tts.clear_cache` 提前清旧。
+- **generate 并行互斥**（`_gen_lock`）：F1 busy 计数只防跨代析构、不防同代
+  并发；sherpa-onnx OfflineTts 前端（espeak/jieba/pinyin）持共享可变状态，
+  web 试听与卫星播报流式句并发=同对象多线程互踩甚至 C++ 崩溃打死整个容器
+  （播报+STT+LLM 三通道全断）。C++ 调用排队串行（与 _lock 不嵌套无死锁序；
+  4C 台架合成本就 CPU 饱和，零实质吞吐损失）。
+- **空文本 detect 契约收口**（`core/session.py` + 集成 `tts.py`）：自家契约
+  「每 detect 必有 stop」的破口——旧版 `and text` 把空/纯空白 detect（
+  tts.speak message="" 可达，core schema 不拦空串）静默吞掉，客户端
+  fail_after(60) 白等一整分钟且全程持有播报通道 _request_lock。服务端空文本
+  统一走整流（0 句→零帧→干净 stop，顶替语义一并保住）；实体侧另加 fail-loud
+  守卫，空文本一次 WS 往返都不消耗。
+- **云短响应判形闸**：流式 `_decide` 与整包 `_unwrap_audio` 同闸——<12B 响应
+  不得掉进"裸 PCM 缺省"支（旧形态 4B "RIFF" 残响应实测产 1 帧垃圾还记"云
+  成功"解除钉扎）。翻转 v1.0.52 两条旧宽容钉为拒收钉（含翻转理由）。
+- **逐帧日志降级**（集成 `tts.py`）：`Received bytes` 每 60ms 一行 INFO+hex
+  分配（五分钟播报≈5000 行）违 v1.0.48 自家日志纪律——降 DEBUG 且 INFO 级下
+  连 hex 都不分配；逐跳对账保留首块/收束两条 INFO 聚合。
+- **tts-stt HTTP 视图两收口**：`options` query 参数复活（旧版直传 str 进 core
+  options.pop 即 AttributeError=该参数一传必 400 的死参），显式 JSON 解析+
+  对象校验；多条目默认实体改 **first-wins**（旧=末条覆盖，多设备张冠李戴），
+  空 message 补 400。
+- 钉桩：本批 15 项——`test_tts_review_fixes.py` 6（实体守卫/日志级别含 hex
+  零分配断言/两路过短闸/options 解析/first-wins，全 AST 真身执行）+
+  `test_protocol_ws.py` 2（空 detect 收束 + 空 detect 顶替慢流）+
+  `test_concurrency_guards.py` 1（generate 并发峰值探针）+
+  `test_v1048_fp_and_guards.py` 重写指纹组 6（含把**空转钉**
+  `test_fingerprint_speed_not_included`——两引擎喂相同配置恒等，什么都没
+  拦住——翻正为真实差异行为钉）。回归 969 passed，唯一红为 css⇄网关母本分叉
+  （www 素材同步批另行处理，与本批无关）。
+
 ## [1.0.56] - 2026-09-21 TTS 深审定案批（真流式 + 截断收口协议 + 指纹容器 + RIFF 钳位 + 云失败钉扎并批）
 
 - **TTS 深审定案批**（三独立对抗核验全确认，七项全部落地：④云端半途串播的

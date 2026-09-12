@@ -165,7 +165,12 @@ class HuijianTtsEntity(BaseEntity):
         v1.0.45（缺字/静音错位毒化根治）：detect 发送、整流消费、收口判定整体
         下沉到 TtsTransport.stream()——同连接并发请求在传输层串行，且本轮若未以
         stop 收口（本函数被取消/出错）即断连清算，残帧绝不拖进下一次播报。
+        审查修复（2026-09-21）：空文本不发 detect——加载项侧已有"每 detect 必有
+        stop"收口，但实体提前 raise 省掉一整轮 WS 往返，也让 tts.speak 传空串
+        当场报错（此前形态=持播报通道锁白等 60s 再超时）。
         """
+        if not message or not message.strip():
+            raise HomeAssistantError("huijian TTS 空播报文本，未发起合成")
         transport = tts_transport.get_entry_transport(self.hass, self.entry)
         if not await transport.ensure_connected():
             _LOGGER.error("Failed to establish WebSocket connection for TTS")
@@ -182,9 +187,16 @@ class HuijianTtsEntity(BaseEntity):
                         # 此前混流让卫星播噪声；丢帧保静音，日志留痕。
                         _LOGGER.error("Decode opus failed, frame dropped: %s", e)
                         continue
-                    _LOGGER.info(
-                        "Received bytes: %s %s", len(resp), resp.hex()[0:64]
-                    )
+                    # 审查修复（2026-09-21）：逐帧 INFO 降 DEBUG——本行在
+                    # v1.0.25 排障期救过场，但每 60ms 一行 + 每帧 hex 分配，
+                    # 五分钟播报≈5000 行，与 v1.0.48 自家日志纪律（全量/高频
+                    # 降 DEBUG、INFO 留聚合）冲突。逐跳对账已有首块
+                    # （first-chunk ready）与收口（流式下发收束 N 字节）两条
+                    # INFO，热路径不再逐帧打。
+                    if _LOGGER.isEnabledFor(logging.DEBUG):
+                        _LOGGER.debug(
+                            "Received bytes: %s %s", len(resp), resp.hex()[0:64]
+                        )
                     yield resp
                 else:
                     if getattr(resp, "error", None):
