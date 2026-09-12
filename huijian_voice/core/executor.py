@@ -393,6 +393,12 @@ class Executor:
         if intent == "PauseDevice":            # v1.0.42 家电族（扫地机器人/电视/窗帘）
             return f"好的，{head}{names}暂停了"
         if intent == "ControlWindow":
+            if args.get("speed") is not None:
+                # 开窗器速度/力度参数（网关 v1.4.3+ number 滑动条）：集成端
+                # 正常回中文 message，此分支兜 message 缺失
+                return f"好的，{head}{names}速度已设为{args['speed']}%"
+            if args.get("strength") is not None:
+                return f"好的，{head}{names}力度已设为{args['strength']}%"
             if args.get("position") is not None:
                 # 百分比开度（集成端正常会带中文 message 直播；此分支兜底）
                 return f"好的，{head}{names}开到{args['position']}%"

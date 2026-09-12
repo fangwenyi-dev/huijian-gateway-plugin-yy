@@ -150,5 +150,8 @@ def test_window_speech_carries_area():
     root = pathlib.Path(__file__).resolve().parents[1]
     src = (root / "custom_components/huijian_ai/intent_window_control.py").read_text(
         encoding="utf-8")
-    assert 'label = f"{area_name}的{_dev_label}"' in src, "区域话术丢失"
+    # 开窗器速度/力度参数批（v1.0.5x）把话术提取成 _window_label 共用 helper
+    # ——钉模板本体而非 `label = ` 赋值形，重构不再误伤本钉。
+    assert 'f"{area_name}的{_dev_label}"' in src, "区域话术丢失"
+    assert 'f"{area_name}的所有窗户"' in src, "全屋形态话术丢失"
     assert "所有窗户" in src

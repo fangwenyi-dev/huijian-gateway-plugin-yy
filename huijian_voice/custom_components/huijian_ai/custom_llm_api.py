@@ -241,10 +241,14 @@ class HuijianControlAPI(llm.API):
                 "ControlWindow",
                 "Unified entry for ALL window commands (open/close/pause/tilt). "
                 "action: 开/开启=open, 关/关闭=close, 暂停/停止/停=pause, 内倒/内岛=A(tilt). "
-                "e.g. '内岛展厅窗户'(A,展厅), '打开平推窗'(open,平推窗).",
+                "e.g. '内岛展厅窗户'(A,展厅), '打开平推窗'(open,平推窗). "
+                "开窗器速度/力度设定（网关 v1.4.3+）用 speed/strength 槽(0-100)且不带 action："
+                "'办公室平开窗速度设为30%' -> speed=30.",
                 self._handle_control_window,
                 vol.Schema({
-                    vol.Required("action"): cv.string,
+                    vol.Optional("action"): cv.string,
+                    vol.Optional("speed"): vol.Coerce(int),
+                    vol.Optional("strength"): vol.Coerce(int),
                     vol.Required("target"): _target_schema(),
                 }),
             ),

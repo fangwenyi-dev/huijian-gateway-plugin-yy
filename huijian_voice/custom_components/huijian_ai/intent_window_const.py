@@ -470,3 +470,53 @@ def find_covers_for_buttons(hass, button_entity_ids: list[str]) -> list[tuple[st
             out.append((dev_name, cover_entry.entity_id))
     _LOGGER.info("Position covers for %s buttons → %s", list(button_entity_ids), out)
     return out
+
+
+# 网关 v1.4.3+ 为每台开窗器挂 number 滑动条（速度/力度），unique_id 恒为
+# {gateway_sn}_{device_sn}_{suffix}（网关 number.py 实锤）。语音参数通道按
+# 同设备 + 后缀寻径，与「按钮→同设备 cover」百分比定位同一套纪律。
+_NUMBER_PARAM_SUFFIX = {"speed": "_speed", "strength": "_strength"}
+_NUMBER_PARAM_CN = {"speed": "速度", "strength": "力度"}
+
+
+def find_param_numbers_for_buttons(
+    hass, button_entity_ids: list[str], param: str
+) -> list[tuple[str, str]]:
+    """窗类按钮实体 → 同设备参数滑动条，返回 [(设备名, number_entity_id)]。
+
+    param ∈ speed/strength；机型没有对应实体（网关 < v1.4.3 或传感器类
+    设备）时返回空表，调用方如实报失败，绝不把「没有」含糊成「成功」。
+    """
+    from homeassistant.helpers import device_registry as dr
+    from homeassistant.helpers import entity_registry as er
+
+    suffix = _NUMBER_PARAM_SUFFIX.get(param)
+    if not suffix:
+        return []
+    entity_registry = er.async_get(hass)
+    device_registry = dr.async_get(hass)
+
+    out: list[tuple[str, str]] = []
+    seen_devices: set[str] = set()
+    seen_entities: set[str] = set()
+    for button_entity_id in button_entity_ids:
+        entry = entity_registry.async_get(button_entity_id)
+        if not entry or not entry.device_id or entry.device_id in seen_devices:
+            continue
+        seen_devices.add(entry.device_id)
+        dev = device_registry.async_get(entry.device_id)
+        dev_name = None
+        if dev is not None:
+            dev_name = getattr(dev, "name_by_user", None) or getattr(dev, "name", None)
+        dev_name = dev_name or entry.device_id
+        for num_entry in er.async_entries_for_device(entity_registry,
+                                                     entry.device_id):
+            if num_entry.domain != "number" or num_entry.entity_id in seen_entities:
+                continue
+            if not str(num_entry.unique_id or "").endswith(suffix):
+                continue
+            seen_entities.add(num_entry.entity_id)
+            out.append((dev_name, num_entry.entity_id))
+    _LOGGER.info("Param(%s) numbers for %s buttons → %s", param,
+                 list(button_entity_ids), out)
+    return out

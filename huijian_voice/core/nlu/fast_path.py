@@ -183,6 +183,43 @@ _POS_LEAD_RE = re.compile(rf"^(?:{_POS_TAIL_VERBS})\s*(?=[\u4e00-\u9fff0-9])")
 _POS_CURTAIN_WORDS = ("帘", "纱窗", "百叶")
 
 
+def _is_param_single(text: str) -> bool:
+    """句尾显式数值 + 窗类参数词（速度/力度）＝单发参数令，不是连排句。
+
+    「开窗器速度设为80」的 开窗 是设备名的一部分，却被连排切分误判成动词
+    段（split→['开窗器速度','设为80']），链发第二段裸数值永远听不懂，整句
+    落兜底。豁免只认**假分裂**：目标剥掉窗类名词后不含独立动作动词——
+    「关闭办公室平开窗速度设为30」里 关闭 是真子句动词，仍按连排拒收
+    （单发误执行=只关窗丢数值，比如实听不懂更糟）。"""
+    try:
+        m = _POS_TAIL_RE.search(text or "")
+        if not m:
+            return False
+        head0 = text[:m.start()].strip()
+        pm = _WIN_PARAM_TAIL_RE.search(head0)
+        if not pm:
+            return False
+        target = head0[:pm.start()].strip(" 的地得了吧啦，,")
+        if not _is_window_position_target(target):
+            return False
+        resid = target
+        for w in ("开窗器", "开合器") + _WINDOW_TYPES:
+            resid = resid.replace(w, "")
+        return not re.search(r"打开|关闭|关掉|关上|开启|开一下|开到|关到|"
+                             r"调节|调整|设定|设置|停止|暂停|全开|全关|开|关",
+                             resid)
+    except Exception:  # noqa: BLE001 —— 豁免判定永不冒泡（保守=不豁免）
+        return False
+
+# ── 开窗器速度/力度参数（网关 v1.4.3+ 的 number 滑动条）─────────────
+# 「办公室平开窗速度设为百分之三十」旧版被百分比预检当**开度**吃掉（播报
+# "开到30%"、窗位被改，速度设定纹丝不动）。速度/力度词出现在数值段之前、
+# 且目标仍是窗类时，语义让位给参数通道：ControlWindow(speed|strength=N)。
+# 目标非窗类（"风扇速度调到30%"）一律不接管，落回原有车道——帘族同排除。
+_WIN_PARAM_TAIL_RE = re.compile(r"(?P<kw>速度|力度)\s*(?:的)?\s*$")
+_WIN_PARAM_KEYS = {"速度": "speed", "力度": "strength"}
+
+
 def _parse_position(num: str, had_verb: bool) -> Optional[int]:
     """句尾数值 token → 0-100 开度；None=不接管。
     无 %/百分之/一半 标记的裸数字必须有相邻动词引导（「窗户50」既不是
@@ -573,17 +610,36 @@ class FastPath:
                     utterance=text, trace=trace)
 
     def _position_plan(self, text: str, trace: list) -> Optional[Plan]:
-        """百分比开度句 → ControlWindow(position)。永不抛；门不齐返回 None
-        交回原动作表，无数字/帘族/非窗设备的句子行为与改动前完全一致。"""
+        """百分比开度句 → ControlWindow(position)；速度/力度参数句 →
+        ControlWindow(speed|strength)。永不抛；门不齐返回 None 交回原动作表，
+        无数字/帘族/非窗设备的句子行为与改动前完全一致。"""
         try:
             m = _POS_TAIL_RE.search(text)
             if not m:
                 return None
             verb = m.group("verb") or ""
+            head0 = text[:m.start()].strip()
+            # 速度/力度参数句：数值段之前的 head 以参数词收尾（引导动词已被
+            # verb 组吃掉；「平开窗的速度调到30%」的属格「的」也在这里一并
+            # 认）。窗类目标走参数通道；非窗类（风扇等）返回 None 落回原车道，
+            # 行为与改动前逐字一致。裁决先于开度解析：参数词即强意图标记，
+            # 裸数字（"速度设80"）也放行。
+            pm = _WIN_PARAM_TAIL_RE.search(head0)
+            if pm:
+                param = _WIN_PARAM_KEYS[pm.group("kw")]
+                target = head0[:pm.start()].strip(" 的地得了吧啦，,")
+                if not _is_window_position_target(target):
+                    return None
+                val = _parse_position(m.group("num"), True)
+                if val is None:
+                    return None
+                trace.append(f"开窗{pm.group('kw')}:{target or '全屋窗'}→{val}%")
+                return self._build_plan("ControlWindow", target, {param: val},
+                                        text, "t0", trace)
+            head = head0.strip(" 的地得了吧啦，,")
             pos = _parse_position(m.group("num"), bool(verb))
             if pos is None:
                 return None
-            head = text[:m.start()].strip().strip(" 的地得了吧啦，,")
             # 「打开展厅推拉窗50%」引导动词形：剥掉后再验窗类词（剥完不含
             # 窗词就不剥，保守回原表）
             lm = _POS_LEAD_RE.match(head)
@@ -681,7 +737,9 @@ class FastPath:
         # 走单发会被 T0 当成一句——轻则第一子句被吃成区域残渣（"办公室射灯关闭
         # 办公室"）只动最后一个设备，重则前半句执行、后半句**静默丢掉**。链发那
         # 边任一段听不懂会拒绝，这里同样拒（交上层），宁可如实说没听懂。
-        if creation.serial_clauses(text):
+        # 唯一豁免：窗类参数单发令（「开窗器速度设为80」的 开窗 是设备名的一部分，
+        # 不是子句动词——见 _is_param_single）。
+        if creation.serial_clauses(text) and not _is_param_single(text):
             return self._miss(trace, "连排句→交链发/上层")
 
         # v1.0.42 家电族：两道场景等值与连排闸之后、动作表扫描之前——
@@ -976,7 +1034,7 @@ class FastPath:
             args["target"] = [entry] if entry else []
         if "action" in extra:
             args["action"] = str(extra["action"]).lower()
-        for k in ("attribute", "delta", "mode", "position"):
+        for k in ("attribute", "delta", "mode", "position", "speed", "strength"):
             if k in extra:
                 args[k] = extra[k]
         # 温度调节带目标也改道 ClimateSetTemperature（原第二处：name 有而 attribute=temperature 保留 Adjust——仅无设备名改道，已在上分支）

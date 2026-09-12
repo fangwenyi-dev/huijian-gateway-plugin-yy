@@ -3,7 +3,7 @@ import logging
 from typing import Any
 
 import voluptuous as vol
-from homeassistant.components import cover
+from homeassistant.components import cover, number
 from homeassistant.components.button.const import DOMAIN as BUTTON_DOMAIN
 from homeassistant.components.button.const import \
     SERVICE_PRESS as SERVICE_PRESS_BUTTON
@@ -17,12 +17,61 @@ from .intent_window_const import (WINDOW_ACTION_MAPPING, WINDOW_NAME_MAPPING,
                                   extract_window_name, find_action_in_text,
                                   find_all_window_buttons_by_action,
                                   find_covers_for_buttons,
+                                  find_param_numbers_for_buttons,
                                   find_window_buttons,
                                   normalize_chinese_numbers)
 
 _LOGGER = logging.getLogger(__name__)
 
 ACTION_CHINESE = {"open": "开启", "close": "关闭", "pause": "暂停", "a": "内倒"}
+# 开窗器参数通道（网关 v1.4.3+ number 滑动条）：intent 槽名 → 播报词
+PARAM_CN = {"speed": "速度", "strength": "力度"}
+
+
+def _resolve_window_button_ids(
+    hass, window_name: str | None, area_name: str | None, device_name: str | None,
+) -> tuple[list[str], dict | None]:
+    """窗类目标 → 按钮实体 id 表；返回 (button_ids, error_dict)。
+
+    区域泛称/无窗型 → 区域内全部窗，与「开所有窗」同口径（百分比定位与
+    速度/力度参数共用此寻径，2026-09 参数通道接入时自 _apply_window_position
+    原样提取，零行为改动）。
+    """
+    button_ids: list[str] = []
+    if window_name:
+        buttons = find_window_buttons(
+            hass, window_name, area_name, original_name=device_name
+        )
+        if not buttons and area_name:
+            buttons = find_window_buttons(
+                hass, window_name, None, original_name=device_name
+            )
+        button_ids = list(buttons.values())
+        generic_all = (not device_name) or str(device_name).strip().lower() in (
+            "窗户", "窗",
+        )
+        if area_name and (generic_all or not button_ids):
+            button_ids = find_all_window_buttons_by_action(hass, area_name, "open")
+    elif area_name:
+        button_ids = find_all_window_buttons_by_action(hass, area_name, "open")
+    else:
+        return [], {"success": False, "error": "No target specified"}
+    if not button_ids:
+        return [], {
+            "success": False,
+            "error": f"Could not find window buttons for "
+                     f"{device_name or window_name or area_name}",
+        }
+    return button_ids, None
+
+
+def _window_label(area_name: str | None, device_name: str | None,
+                  window_name: str | None) -> str:
+    """播报主语：「区域+设备」，全屋形态「区域的所有窗户」（v1.0.49 口径）。"""
+    _dev_label = device_name or window_name
+    if _dev_label:
+        return f"{area_name}的{_dev_label}" if area_name else _dev_label
+    return f"{area_name}的所有窗户" if area_name else "所有窗户"
 
 
 async def _apply_window_position(
@@ -48,32 +97,12 @@ async def _apply_window_position(
     if not 0 <= position <= 100:
         return {"success": False, "error": f"开度超出范围(0-100)：{position}"}
 
-    # 1) 定位窗类按钮（区域泛称/无窗型 → 区域内全部窗，与「开所有窗」同口径）
-    button_ids: list[str] = []
-    if window_name:
-        buttons = find_window_buttons(
-            hass, window_name, area_name, original_name=device_name
-        )
-        if not buttons and area_name:
-            buttons = find_window_buttons(
-                hass, window_name, None, original_name=device_name
-            )
-        button_ids = list(buttons.values())
-        generic_all = (not device_name) or str(device_name).strip().lower() in (
-            "窗户", "窗",
-        )
-        if area_name and (generic_all or not button_ids):
-            button_ids = find_all_window_buttons_by_action(hass, area_name, "open")
-    elif area_name:
-        button_ids = find_all_window_buttons_by_action(hass, area_name, "open")
-    else:
-        return {"success": False, "error": "No target specified"}
-    if not button_ids:
-        return {
-            "success": False,
-            "error": f"Could not find window buttons for "
-                     f"{device_name or window_name or area_name}",
-        }
+    # 1) 定位窗类按钮（寻径与速度/力度参数通道共用，见 _resolve_window_button_ids）
+    button_ids, err = _resolve_window_button_ids(
+        hass, window_name, area_name, device_name
+    )
+    if err is not None:
+        return err
 
     # 2) 按钮 → 同设备 cover 实体
     covers = find_covers_for_buttons(hass, button_ids)
@@ -117,11 +146,7 @@ async def _apply_window_position(
     # v1.0.49（现场「我说的是展厅」）：带设备名的话术过去只报设备名，区域被吞——
     # 用户在播报里听不出执行的是哪个房间，误以为 NLU 没识别区域。话术统一
     # 「区域+设备」，全屋形态保持「区域的所有窗户」。
-    _dev_label = device_name or window_name
-    if _dev_label:
-        label = f"{area_name}的{_dev_label}" if area_name else _dev_label
-    else:
-        label = f"{area_name}的所有窗户" if area_name else "所有窗户"
+    label = _window_label(area_name, device_name, window_name)
 
     if ok_names and not bad_msgs:
         return {
@@ -141,6 +166,83 @@ async def _apply_window_position(
     return {
         "success": False,
         "error": f"开到{position}%未成功：{'；'.join(bad_msgs[:3])}",
+    }
+
+
+async def _apply_window_param(
+    intent_obj: intent.Intent,
+    window_name: str | None,
+    area_name: str | None,
+    device_name: str | None,
+    raw,
+    param: str,
+) -> dict:
+    """开窗器速度/力度设定：窗类目标 → 同设备 number 滑动条 → number.set_value。
+
+    网关 v1.4.3+ 为每台开窗器挂 number 实体（unique_id 后缀 _speed/_strength，
+    0-100%）。寻径与百分比定位同源（按钮体系），机型没有该实体（旧网关/
+    传感器位）就如实报失败并给升级指引——绝不说「已设置」（能力边界铁律）。
+    """
+    hass = intent_obj.hass
+    cn = PARAM_CN.get(param, param)
+    try:
+        value = int(float(str(raw).strip().rstrip("%％")))
+    except (TypeError, ValueError):
+        return {"success": False, "error": f"无法识别的{cn}数值：{raw!r}"}
+    if not 0 <= value <= 100:
+        return {"success": False, "error": f"{cn}超出范围(0-100)：{value}"}
+
+    button_ids, err = _resolve_window_button_ids(
+        hass, window_name, area_name, device_name
+    )
+    if err is not None:
+        return err
+
+    numbers = find_param_numbers_for_buttons(hass, button_ids, param)
+    if not numbers:
+        return {
+            "success": False,
+            "error": f"该窗户的开窗器没有{cn}设置——请将窗控网关集成升级到 "
+                     f"v1.4.3 或更新版本（带速度/力度滑动条）后再试",
+        }
+
+    ok_names: list[str] = []
+    bad_msgs: list[str] = []
+    for dev_name, number_entity_id in numbers:
+        try:
+            await hass.services.async_call(
+                number.DOMAIN,
+                number.const.SERVICE_SET_VALUE,
+                {ATTR_ENTITY_ID: number_entity_id, "value": value},
+                context=intent_obj.context,
+                blocking=True,
+            )
+            ok_names.append(dev_name)
+            _LOGGER.info("Set %s %s%% on %s (%s)", param, value,
+                         number_entity_id, dev_name)
+        except Exception as err2:  # noqa: BLE001
+            _LOGGER.error("number.set_value %s failed: %s", number_entity_id, err2)
+            bad_msgs.append(f"{dev_name}：{err2}")
+
+    label = _window_label(area_name, device_name, window_name)
+    if ok_names and not bad_msgs:
+        return {
+            "success": True,
+            "message": f"已将{label}{cn}设为{value}%",
+            "numbers": [eid for _, eid in numbers],
+        }
+    if ok_names:
+        return {
+            "success": True,
+            "message": (
+                f"已将{len(ok_names)}扇窗{cn}设为{value}%，"
+                f"但{len(bad_msgs)}扇未成功：{'；'.join(bad_msgs[:3])}"
+            ),
+            "numbers": [eid for _, eid in numbers],
+        }
+    return {
+        "success": False,
+        "error": f"{cn}设为{value}%未成功：{'；'.join(bad_msgs[:3])}",
     }
 
 
@@ -214,10 +316,15 @@ def _all_window_result(
 class ControlWindowIntent(intent.IntentHandler):
     intent_type = "ControlWindow"
     description = (
-        "Unified entry for ALL window commands (open/close/pause/tilt) and "
-        "percentage positioning. Action keywords: 开/开启=open, 关/关闭=close, "
+        "Unified entry for ALL window commands (open/close/pause/tilt), "
+        "percentage positioning and opener parameter setting. Action keywords: "
+        "开/开启=open, 关/关闭=close, "
         "暂停/停止/停=pause, 内倒/内岛=A(tilt). Optional slot position(0-100): "
         "'把推拉窗打开到50%' -> position=50 (定位开度，仅支持百分比的开窗器机型生效). "
+        "Optional slots speed/strength(0-100, 网关 v1.4.3+ 开窗器滑动条): "
+        "'办公室平开窗速度设为百分之三十' -> speed=30, "
+        "'窗户力度调到80%' -> strength=80——参数槽与 position/action 互斥，"
+        "携带时按「同设备 number 实体」设定，不动窗位. "
         "Examples: '内岛展厅窗户' -> action=A, area=展厅, name=窗户. "
         "'打开平推窗' -> action=open, name=平推窗. "
         "Valid window names: 平推窗,平开窗,推拉窗,内开窗,外开窗,天窗,飘窗,推拉门,内开内倒窗,单内倒窗,外装平开窗,智能窗,窗户."
@@ -231,6 +338,10 @@ class ControlWindowIntent(intent.IntentHandler):
             # 百分比开度（网关 v1.7.20+ 开窗器）：与 action 二选一，
             # 携带时走 cover.set_cover_position 定位，不再按按钮。
             vol.Optional("position"): vol.Any(int, float, str),
+            # 开窗速度/力度（网关 v1.4.3+ number 滑动条）：与上面二选一，
+            # 携带时走同设备 number.set_value，不改窗位。
+            vol.Optional("speed"): vol.Any(int, float, str),
+            vol.Optional("strength"): vol.Any(int, float, str),
             vol.Required("target"): target_parameter_type(),
         }
 
@@ -281,6 +392,15 @@ class ControlWindowIntent(intent.IntentHandler):
             return await _apply_window_position(
                 intent_obj, window_name, area_name, device_name, pos_raw
             )
+
+        # 开窗器速度/力度参数（网关 v1.4.3+）：与开度同在，裁决同位次——
+        # 参数句不需要 action，必须赶在 window_name 缺失的全窗兜底分支之前。
+        for _param in ("speed", "strength"):
+            _raw = (slots.get(_param) or {}).get("value")
+            if _raw is not None:
+                return await _apply_window_param(
+                    intent_obj, window_name, area_name, device_name, _raw, _param
+                )
 
         if not window_name:
             if area_name and action:

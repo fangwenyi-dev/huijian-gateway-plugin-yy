@@ -47,10 +47,15 @@ TOOLS: list[dict] = [
         "parameters": {
             "type": "object", "properties": {"target": _TARGET_SCHEMA}, "required": ["target"]}}},
     {"type": "function", "function": {
-        "name": "ControlWindow", "description": "控制窗户：open 开 / close 关 / pause 暂停 / a 内倒",
+        "name": "ControlWindow",
+        "description": ("控制窗户：action=open 开 / close 关 / pause 暂停 / a 内倒；"
+                        "开窗器参数设定用 speed/strength(0-100，网关 v1.4.3+ 滑动条)，"
+                        "如「平开窗速度设为30%」→ speed=30（不带 action）"),
         "parameters": {"type": "object", "properties": {
             "action": {"type": "string", "enum": ["open", "close", "pause", "a"]},
-            "target": _TARGET_SCHEMA}, "required": ["action", "target"]}}},
+            "speed": {"type": "integer", "description": "开窗速度 0-100"},
+            "strength": {"type": "integer", "description": "开窗力度 0-100"},
+            "target": _TARGET_SCHEMA}, "required": ["target"]}}},
     {"type": "function", "function": {
         "name": "AdjustDeviceAttribute", "description": "调节设备属性", "parameters": {
             "type": "object", "properties": {
