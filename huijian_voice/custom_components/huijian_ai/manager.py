@@ -154,6 +154,12 @@ class ESPHomeManager:
     __slots__ = (
         "_cancel_subscribe_logs",
         "_log_level",
+        # v1.0.51 热修：本类有 __slots__（无 __dict__），新增实例属性**必须同时
+        # 登记在此**，否则 __init__ 赋值即 AttributeError → 整个 config entry
+        # setup 失败（现场：Error setting up entry HUIJIAN-0BD0 for huijian_ai，
+        # v1.0.49/1.0.50 实发）。钉桩：tests/test_v1051_manager_slots.py 静态校验
+        # "类内所有 self.X = 赋值都在 __slots__ 里"，防同类再犯。
+        "_satellite_selfheal_at",
         "cli",
         "device_id",
         "domain_data",

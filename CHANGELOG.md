@@ -1,5 +1,22 @@
 # 变更日志
 
+## [1.0.51] - 2026-09-21 热修：集成条目无法 setup
+
+- **根因（v1.0.49/1.0.50 实发，现场 12:28:42）**：`ESPHomeManager` 定义了
+  `__slots__`（无 `__dict__`），而 v1.0.49 新增的卫星订阅自愈时戳
+  `self._satellite_selfheal_at` **未登记进 `__slots__`** → `__init__` 赋值即
+  `AttributeError: ... and no __dict__ for setting new attributes` →
+  `Error setting up entry HUIJIAN-xxxx for huijian_ai`，**整个 config entry
+  无法建立**（卫星、全部实体、语音链路一起下线，比它要修的缺陷更严重）。
+- **修复**：`__slots__` 补登记 `_satellite_selfheal_at`；自愈逻辑本身不变
+  （连接建立后的存在性核对 + 限频 10 分钟重载）。
+- **为什么 768 钉没拦住**：本仓测试一律 AST 摘函数执行，不 import homeassistant、
+  不实例化 manager，而这类缺陷只在实例化时炸。新增静态钉
+  `tests/test_v1051_manager_slots.py`（6 钉，双副本同钉）：遍历类体内所有
+  `self.X =`（含 AnnAssign/AugAssign），逐个核对是否在 `__slots__` 中；
+  并做 A/B 反证——去掉登记项后该钉必判红（已实证）。
+- 六源同版本 1.0.51。
+
 ## [1.0.50] - 2026-09-21 发布体补全
 - v1.0.49 发版时本批改动纪要（查询族人感/电量两维、守卫放行、删除语序补洞、
   窗话术区域化、改名诊断翻译）未随 CHANGELOG 外发——本版补全发布说明体，
