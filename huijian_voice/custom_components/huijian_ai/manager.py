@@ -742,8 +742,12 @@ class ESPHomeManager:
             return
         now = time.monotonic()
         entry_id = self.entry.entry_id
-        last = _SATELLITE_SELFHEAL_LAST.get(entry_id, 0.0)
-        if now - last < _SATELLITE_SELFHEAL_COOLDOWN:
+        # 哨兵必须是 None 而非 0.0：time.monotonic() 基准是**开机时刻**，刚断电
+        # 重启的机器上 now 本身 < 600——get(entry_id, 0.0) 会让"从未自愈"被误判
+        # 成"距上次自愈不足限频"，恰好在最需要自愈的冷启动窗口把首次自愈吞掉
+        # （tests/test_v1052_fixes.py 在 uptime<600s 的 WSL 上实锤此坑）。
+        last = _SATELLITE_SELFHEAL_LAST.get(entry_id)
+        if last is not None and now - last < _SATELLITE_SELFHEAL_COOLDOWN:
             _LOGGER.info(
                 "%s：卫星实体仍未注册（可能为首连竞态），但距上次自愈仅 %ss"
                 "——限频中，本次不重载",

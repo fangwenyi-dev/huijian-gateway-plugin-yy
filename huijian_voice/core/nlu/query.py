@@ -293,7 +293,10 @@ class QueryZone:
             if attrs.get("device_class") != device_class:
                 continue
             name = (attrs.get("friendly_name") or "")
-            ent_area = self.ha._entity_area.get(eid, "")
+            # v1.0.52：与 :223/:261 同规防护——真 HAClient 恒有该属性，但注入面
+            # 缺失时裸取会 AttributeError 被级联折叠成"查询族异常"整条静默降级。
+            ent_area = (self.ha._entity_area.get(eid, "")
+                        if hasattr(self.ha, "_entity_area") else "")
             if area and have_area_data and ent_area != area and area not in name:
                 continue
             try:

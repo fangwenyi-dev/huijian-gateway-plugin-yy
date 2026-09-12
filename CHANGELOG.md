@@ -1,5 +1,39 @@
 # 变更日志
 
+## [1.0.53] - 2026-09-21 双审计修复批（1.0.52 后续：冷启动哨兵 + 窗户话术 + 防线固化）
+
+2026-09-21 固件+加载项双 agent 深查批次。A-F1 主体（进程级限频+复查+LOADED
+防呆）与 A-F4（UDP 幂等停旧）已随 1.0.52 发出，本批为**其余项与一处在
+1.0.52 实发体中坐实的缺陷后续**。
+
+- **冷启动哨兵修复**（`manager.py`，1.0.52 实发体缺陷）：自愈限频的"从未自愈"
+  哨兵是 `get(entry_id, 0.0)`，而 `time.monotonic()` 基准=**开机时刻**——
+  uptime<600s 的机器（断电重启后恰是最需要自愈的窗口）会把首次自愈整个吞掉。
+  改 `last is None` 判定。本坑由新钉在 WSL 开发机（uptime 268s）当场抓获。
+- **A-F2**（`intent_window_control.py`）：`_press_multi_buttons` 改返回
+  `(成功ids, 失败话术)`，新增 `_all_window_result` 三态裁决——"开/关所有窗户"
+  部分失败不再折叠成"已…所有窗户关闭"全量话术（与 `_apply_window_position`
+  同规：失败必须确定且可复述；关窗有安全语义）。
+- **A-F5**（`core/nlu/query.py`）：`_sensor_answer` 的 `_entity_area` 读取补
+  `hasattr` 守卫，与 v1.0.49 同批新码同规（注入面异常不再被级联折叠成
+  "查询族异常"静默降级温湿度查询）。
+- **A-F6**（测试防线，零运行时变更）：意图契约扫描器改 **AST 结构提取**——旧
+  regex 遇 pattern 含 `)` 断扫、读不到 `intent, tag = "PauseDevice", …` 元组
+  赋值（实跑证明 PauseDevice 整体漏网）；新增防再漏钉
+  `test_scanner_catches_tuple_form_intent`。`conftest.FakeHAClient.handle_intent`
+  对未注入意图改按**真实注册表派生**裁决（集成 `intent_type` ∪ HA core 内置，
+  与契约测试同源一张表；v1.0.20 恒成功替身教训固化）。
+- **新钉 `tests/test_v1052_fixes.py`（12 项）**：A-F1 行为钉四件（首连竞态不
+  重载/真缺失恰好一次/跨实例限频存活/冷启动哨兵）+ F2 三态话术钉 + 形态钉
+  （UDP 先停旧/`_entity_area` 全守卫/hacs≥2024.8/槽位标记一致性）。
+
+### 校验
+
+- 工区（含本批全部改动）实测三种跑法全绿：`huijian_voice` 下
+  **831 passed, 5 skipped**；仓库根 `pytest huijian_voice/tests` 同绿；
+  CI 同环境 py3.13 venv **836 passed, 0 failed**。
+- 五源同版本 1.0.53；`test_release_consistency` 18 钉绿。
+
 ## [1.0.52] - 2026-09-21 TTS 下行真流式（首音不再等整段合成）
 
 现场（2026-09-21 12:54，固件 v2.1.28 新日志逐跳留痕）：说完"关闭办公室平开窗"，

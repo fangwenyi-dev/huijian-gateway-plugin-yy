@@ -20,6 +20,22 @@ def settings():
     return Settings(Path(os.environ["HUIJIAN_DATA"]) / f"settings-{os.getpid()}.json")
 
 
+_REAL_INTENTS_CACHE = None
+
+
+def _real_executable_intents():
+    """真实可执行意图全集（集成 intent_type ∪ HA core 内置；懒载一次）。
+
+    v1.0.52（A-F6）：FakeHAClient 默认裁决依据——替身不得比真机更宽容
+    （v1.0.20 HassUnlock 恒成功事故教训，派生自 test_intent_contract 同一张表）。
+    """
+    global _REAL_INTENTS_CACHE
+    if _REAL_INTENTS_CACHE is None:
+        from test_intent_contract import real_executable_intents
+        _REAL_INTENTS_CACHE = real_executable_intents()
+    return _REAL_INTENTS_CACHE
+
+
 class FakeStore:
     """离线仓内模型目录袋（E2E 机上有解包资产时用真目录，CI 上返回 None 走跳过分支）。"""
     def __init__(self, dirs=None):
@@ -62,7 +78,18 @@ class FakeHAClient:
 
     async def handle_intent(self, name, data, timeout=10.0):
         self.calls.append((name, data))
-        return self.results.get(name, {"success": True})
+        if name in self.results:
+            return self.results[name]
+        # v1.0.52（A-F6）：替身不得比真机更宽容——未知意图恒成功正是
+        # v1.0.20 HassUnlock 事故的放行通道。默认按**真实注册表派生**裁决
+        # （集成 intent_type ∪ HA core 内置）；测试确需自定义意图名时显式
+        # 传 results= 注入，属有意行为。
+        if name not in _real_executable_intents():
+            return {"success": False,
+                    "error": (f"intent {name!r} 未在集成注册且非 HA core 内置"
+                              "（FakeHAClient 按真实注册表裁决，见 "
+                              "tests/test_intent_contract.py）")}
+        return {"success": True}
 
     async def states(self):
         return dict(self._states)

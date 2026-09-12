@@ -146,12 +146,17 @@ async def _apply_window_position(
 
 async def _press_multi_buttons(
     hass, context, action: str, button_entity_ids: list[str]
-) -> dict:
-    """Press multiple window buttons and return results dict.
+) -> tuple[list[str], list[str]]:
+    """Press multiple window buttons.
 
     Used by all-window paths (generic name like "所有窗户" or bare type name like "窗户").
+
+    v1.0.52：返回 (成功ids, 失败话术列表)——旧版只回成功列表、失败仅记日志，
+    调用方把"5 扇败 2 扇"播报成"已所有窗户关闭"，违反本文件 _apply_window_position
+    立下的铁律（失败必须确定且可复述），且"关所有窗"有安全语义。
     """
     results = []
+    failed_msgs: list[str] = []
     for button_entity_id in button_entity_ids:
         try:
             await hass.services.async_call(
@@ -166,7 +171,44 @@ async def _press_multi_buttons(
             await asyncio.sleep(0.5)
         except Exception as err:
             _LOGGER.error("Failed to press %s: %s", button_entity_id, err)
-    return results
+            state = hass.states.get(button_entity_id)
+            label = (
+                (state.attributes.get("friendly_name") if state else None)
+                or button_entity_id.split(".", 1)[-1]
+            )
+            failed_msgs.append(f"{label}：{err}")
+    return results, failed_msgs
+
+
+def _all_window_result(
+    area_name: str | None,
+    action: str,
+    results: list[str],
+    failed_msgs: list[str],
+) -> dict:
+    """全窗按压的统一裁决：全成/部分成/全败三种话术，部分失败绝不折叠成全成功。"""
+    action_cn = ACTION_CHINESE.get(action, action)
+    area_label = (area_name + chr(30340)) if area_name else ""
+    if not results:
+        return {
+            "success": False,
+            "error": f"未能{action_cn}任何窗户",
+            "buttons": [],
+        }
+    if failed_msgs:
+        return {
+            "success": True,
+            "message": (
+                f"已将{area_label}{len(results)}扇窗{action_cn}，"
+                f"但{len(failed_msgs)}扇未成功：{'；'.join(failed_msgs[:3])}"
+            ),
+            "buttons": results,
+        }
+    return {
+        "success": True,
+        "message": f"已{area_label}所有窗户{action_cn}",
+        "buttons": results,
+    }
 
 
 class ControlWindowIntent(intent.IntentHandler):
@@ -246,20 +288,10 @@ class ControlWindowIntent(intent.IntentHandler):
                     intent_obj.hass, area_name, action
                 )
                 if all_buttons:
-                    results = await _press_multi_buttons(
+                    results, failed_msgs = await _press_multi_buttons(
                         intent_obj.hass, intent_obj.context, action, all_buttons
                     )
-                    if not results:
-                        return {
-                            "success": False,
-                            "error": f"未能{ACTION_CHINESE.get(action, action)}任何窗户",
-                            "buttons": results,
-                        }
-                    return {
-                        "success": True,
-                        "message": f"已{(area_name + chr(30340)) if area_name else ''}所有窗户{ACTION_CHINESE.get(action, action)}",
-                        "buttons": results,
-                    }
+                    return _all_window_result(area_name, action, results, failed_msgs)
             return {
                 "success": False,
                 "error": f"Could not extract window name from '{device_name}'",
@@ -281,20 +313,10 @@ class ControlWindowIntent(intent.IntentHandler):
                     intent_obj.hass, area_name, action
                 )
                 if all_buttons:
-                    results = await _press_multi_buttons(
+                    results, failed_msgs = await _press_multi_buttons(
                         intent_obj.hass, intent_obj.context, action, all_buttons
                     )
-                    if not results:
-                        return {
-                            "success": False,
-                            "error": f"未能{ACTION_CHINESE.get(action, action)}任何窗户",
-                            "buttons": results,
-                        }
-                    return {
-                        "success": True,
-                        "message": f"已{(area_name + chr(30340)) if area_name else ''}所有窗户{ACTION_CHINESE.get(action, action)}",
-                        "buttons": results,
-                    }
+                    return _all_window_result(area_name, action, results, failed_msgs)
             return {
                 "success": False,
                 "error": f"Could not find any {action} buttons in {area_name}",
