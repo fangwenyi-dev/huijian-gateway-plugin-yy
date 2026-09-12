@@ -1,5 +1,66 @@
 # 变更日志
 
+## [1.0.56] - 2026-09-21 TTS 深审定案批（真流式 + 截断收口协议 + 指纹容器 + RIFF 钳位 + 云失败钉扎并批）
+
+- **TTS 深审定案批**（三独立对抗核验全确认，七项全部落地：④云端半途串播的
+  钉扎守卫源码与定案②⑤⑥⑦同文件不可分拆，一并随本批入发布树；其配套行为
+  钉 `tests/test_v1055_guard_and_voice.py` 主体钉的是并行会话在途的
+  pipeline/executor 窗口守卫批，故随该批另行提交，本批由
+  `test_v1055_tts_stream_poison.py` 的半途收束自报钉与 `test_v1052` 话术钉
+  覆盖云失败路径）：
+  ① **真流式回归**（`huijian/audio.py`）：s16le→wav 直封支曾被 `b"".join`
+  抽干整源才封头，"流式 TTS"退化为全句合成后一次吐——现场实锤播报前
+  ~30s 静音再整段开声。现流式形态用占位头（RIFF/data 长度 0xFFFFFFFF，
+  卫星端 `_iter_wav_pcm_chunks` 与 ffmpeg 均按"读到流尽"消化）首块 PCM 就绪
+  即出；批式默认参数保留，整段路字节级不变。占位头按消费者形态设闸
+  （v1.0.56 消费链审计 B）：仅 core 必再封装的"卫星四件套"options 放行
+  流式——落盘缓存存的是 core ffmpeg 转换后产物；tts.speak/tts_get_url/
+  dict 形 tts_audio_output 等"只要 wav 不带参数"的消费者（needs_conversion
+  判假、盘缓存无 TTL、命中永不二转）一律回落批式真实头，占位头禁入盘。
+  ② **截断收口协议**（`core/session.py` + `huijian/tts_transport.py`）：
+  超预算/停摆/断连/合成异常/引擎自报半截 → stop 帧带 `truncated:true`
+  （纯增量键；固件 cJSON 逐键取值实测不可见；新旧组件交叉版本互不破坏）→
+  transport 转 `Dict(error)` 收口并断连清算（每坏轮至多 1 次重连，三通道
+  独立 WS 互不牵连；supersede 四窗口零 stop 漏发实证）。根因：HA
+  `TTSCache._load_data_into_cache` **只在异常时**弃缓存，普通 stop 收口的
+  半截音频会以消息哈希键永久落盘（含跨重启），一句残缺话永远只播半句。
+  配套防误报（协议审计 P1）：连排标点会被分句器拆出独立纯标点段、本地
+  合成正常产空——静音段不再误 latch 截断（否则完整音频被每轮误判死且
+  不自愈），真词句空产出照报。云"零帧正常收束"（空 body/钳位后无帧）
+  改判失败：回落 sid18+开钉扎，不再误记"整流成功"解除保险丝。③
+  **default_options 容器错位**（`tts.py`）：TTS 实体
+  只挂 assist 条目，transport 在 `entry.runtime_data`——旧读 `hass.data
+  [entry_id]` 恒 KeyError，换嗓指纹轮转自 v1.0.45 起就是哑弹；现走真实
+  `get_entry_data` 双容器解析。⑤ `reset_cloud_pin`：tts 节配置热更即解除
+  云钉扎，改对参数立刻恢复试云，不用干等钉扎窗口；审计回炉两处（D-1
+  开机后第一次保存往往正是"修好云配置"那次——首调同样复位，未钉时 no-op
+  零副作用；D-2 解钉块前置独立 try——不被后序热应用步骤异常吞掉）。⑥ **音色越界复核**：
+  冷启动 `resolve_sid` 拿不到 num_speakers 直接放行越界 sid，模型就绪后按
+  真实音色数回落复核（防 Kokoro 索引越界整轮炸）。⑦ **RIFF 尾块钳位**
+  （`_CloudOpusStream`）：整包路径按 `data_size` 丢弃尾随 LIST/pad，流式路径
+  却把声明长度之外的元数据块喂进编码器=句尾咔哒噪声；现按可信声明截断，
+  0/0xFFFFFFFF 未知长维持读到流尽。
+- **钉桩**：`tests/test_v1055_tts_stream_poison.py`（33 项，全行为钉：真实
+  async_convert_audio 执行验"源未抽干先出块"与"消费者中途关闭源确定性收口"、
+  占位头流式闸真身判据表（卫星四件套放行/自由 wav 消费者回落）、真实
+  get_entry_data/default_options 跨文件执行、transport stream 截断收口、
+  session 四类早退 stop 帧语义、stream_opus 半途收束/空句/加载失败自报截断/
+  零帧改判失败、纯标点静音段不误报截断+真缺句照报、冷 sid 越界复核+缓存
+  重算命中回放、main 热更复位（首调复位+前序异常不吞钉）、RIFF 钳位字节级
+  一致×passthrough/24k 重采样/单块吞满三形态、csz=0 与 0xFFFFFFFF 读尽语义
+  ——实施期该批当场逮出 `_data_left` 双重递减丢 5 字节的自伤，修正后逐比特
+  对齐）；`test_v1052` 遥测字面钉随钉扎话术改版同步。
+- **发布通道对齐（治理记录）**：集成侧三件（`huijian/audio.py`/`tts.py`/
+  `tts_transport.py`）曾于 v1.0.55 发布前 cp 至商店镜像，被镜像整树同步
+  （4ec33bb）先行带入——即镜像一度分发"新集成+v1.0.55 加载项"子集（降级
+  矩阵核过安全：旧加载项不发 truncated 键，截断检测为死代码；流式直封
+  集成侧独立生效）。本批发布主仓与镜像对齐；仅升集成不升加载项的客户，
+  截断防毒化不生效但也无回归，升级加载项后全量生效。
+- 回归：发布树（tag 导出）py313 venv 实测 **886 passed / 3 skipped** 全绿
+  （skip=css 母本守卫与 yyjicheng 副本守卫，导出树无此二路径按设计跳过）；
+  工作区含并行在途件复测 919 passed / 1 failed，唯一红为 css 分叉存量守卫
+  （CI skip 项），非本批引入。
+
 ## [1.0.55] - 2026-09-12 「设备换 IP 后 HA 永追不回」断链修复 + 断连可观测性 + 播报截断后再唤醒收口
 
 现场定谳（串口与 HA 日志簿互证：设备重启后 `[Errno 113] 192.168.1.235:6053`

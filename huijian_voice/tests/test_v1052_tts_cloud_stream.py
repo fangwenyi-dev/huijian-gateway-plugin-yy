@@ -592,7 +592,9 @@ def test_telemetry_log_lines_present_and_old_ones_untouched():
                    '"[TTS] 本地首帧 %dms"'):
         assert marker in src, f"缺遥测行：{marker}"
     # 既有日志字面量（现场按这些 grep）一律不得改写
-    for kept in ('"[TTS] 云合成失败(%s) → 回落本地默认音色（注意：音色会变化）"',
+    # v1.0.55 同步：云失败话术随"钉扎"机制改版（回落语义与 [TTS] 云合成失败
+    # 前缀不变，尾部改为明示钉扎秒数），现场 grep 口径保持可辨。
+    for kept in ('"[TTS] 云合成失败(%s) → 回落本地默认音色，并钉扎本地 %.0f 秒"',
                  '"[TTS] Kokoro multi-lang 已加载（%d 音色），sid=%s"',
                  '"[TTS] 模型已卸载（省电档）"',
                  '"[TTS] 合成产出空音频，原文: %r"',

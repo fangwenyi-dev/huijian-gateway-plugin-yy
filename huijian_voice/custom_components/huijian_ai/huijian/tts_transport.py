@@ -136,6 +136,21 @@ class TtsTransport(WsTransport):
                             yield data
                         elif data.state == "stop":
                             clean = True
+                            if getattr(data, "truncated", None):
+                                # v1.0.55（深审定案②）：加载项声明"半截音频"
+                                # （整流超预算/合成停滞/云端半途断流收束）。
+                                # 必须以 error 收口让实体 raise——HA core 只在
+                                # 异常时 pop 缓存；若按普通 stop 收口，截断音频
+                                # 会被当完整结果写进消息哈希缓存（内存+落盘、
+                                # 跨重启重扫），同一句永久缺尾字且不自愈
+                                # （2026-09-21 定案）。clean=False 顺带断连清算，
+                                # 下一轮在全新连接上开始。
+                                clean = False
+                                self.logger.warning(
+                                    "TTS 被服务端截断（半截音频按错误收口，防缓存毒化）: %r",
+                                    text[:40],
+                                )
+                                yield Dict(error="huijian TTS 音频被服务端截断")
                             break
                         else:
                             self.logger.info("Received unknown message: %s", data)

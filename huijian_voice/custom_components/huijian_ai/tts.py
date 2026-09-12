@@ -13,7 +13,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 
 from .const import DOMAIN
-from .huijian import tts_transport
+from .huijian import get_entry_data, tts_transport
 from .huijian.audio import async_convert_audio
 
 # v1.0.52：HA 的流式 TTS 契约（TTSAudioRequest/TTSAudioResponse）。老 HA 没有这
@@ -81,9 +81,16 @@ class HuijianTtsEntity(BaseEntity):
         无条件合进 options 并参与缓存键 sha1(文本)_语言_options_引擎——加载项
         内部音色对键**不感知**，web 换嗓后同一句永远命中旧嗓缓存。把服务端
         经 WS settings 推送的音色指纹放进键里：换嗓 → 键轮换 → 必重合成，
-        旧条目 TTL 自然作废。指纹缺席（旧版加载项）→ 空 dict，行为与今一致。"""
+        旧条目 TTL 自然作废。指纹缺席（旧版加载项）→ 空 dict，行为与今一致。
+
+        v1.0.55（深审定案③）：容器必须走 get_entry_data——本实体**只挂在
+        assist 条目**上（__init__.py 仅 assist 分支 Platform.TTS），而
+        assist 的 transport 存在 entry.runtime_data；旧实现直读
+        hass.data[DOMAIN][entry_id] 恒 KeyError → 被裸 except 吞 → 指纹恒
+        None → "换嗓轮换缓存键"从未生效（内存+盘双命中旧嗓音频）。
+        get_entry_data 自带 unload 窗口守卫（runtime_data 缺席→空视图）。"""
         try:
-            tr = self.hass.data[DOMAIN][self.entry.entry_id].get(
+            tr = get_entry_data(self.hass, self.entry).get(
                 tts_transport.ATTR_TRANSPORT)
             fp = getattr(tr, "voice_fp", None) if tr else None
         except Exception:
@@ -107,13 +114,37 @@ class HuijianTtsEntity(BaseEntity):
         """
         return options.get("preferred_format") or options.get("audio_format") or "mp3"
 
-    def _convert(self, pcm_stream, fmt: str, options: dict):
-        """s16le@16k PCM 流 → 目标容器（wav 走 audio.py 的纯 Python 直封）。"""
+    @staticmethod
+    def _want_stream_wrap(fmt: str, options: dict) -> bool:
+        """占位头流式直封只放行给「core 必转」的消费形态（v1.0.56 审计 B）。
+
+        core `TTSCache._async_get_stream` 判 needs_conversion 只看 options 的
+        sample_rate/channels/bytes/bitrate 四参（_bench/ha_core_ref:1146-1157）。
+        卫星路恒带四件套 → needs_conversion 恒真 → core 自家 ffmpeg 重封装，
+        占位头只活在 ffmpeg 的 stdin 里，**落盘的是转换后产物**；消息哈希盘
+        缓存无 TTL、命中后原样吐字节且永不二次转换——"只要 wav 不带参数"的
+        消费者（tts.speak 自由 options、/api/tts_get_url、dict 形
+        tts_audio_output、rate=0 申报的媒体播放器卫星）若吃到占位头即被
+        永久毒化（假 37h 时长、setpos 炸）。故这类形态一律回落批式真实头。
+        """
+        return fmt == "wav" and any(
+            options.get(k) is not None
+            for k in ("preferred_sample_rate",
+                      "preferred_sample_channels",
+                      "preferred_sample_bytes")
+        )
+
+    def _convert(self, pcm_stream, fmt: str, options: dict, streaming: bool = False):
+        """s16le@16k PCM 流 → 目标容器（wav 走 audio.py 的纯 Python 直封）。
+
+        streaming=True（v1.0.55）：直封支产「占位头 + 逐块透传」，首块 PCM
+        就绪即出声；整段路保持默认批式（真实长度头，字节级与旧一致）。"""
         return async_convert_audio(
             self.hass,
             pcm_stream,
             "s16le",
             to_extension=fmt,
+            streaming=streaming,
             input_params=[
                 "-ar",
                 str(self.opus_sample_rate),
@@ -194,8 +225,14 @@ class HuijianTtsEntity(BaseEntity):
             request.language,
         )
         fmt = self._resolve_fmt(options)
+        # v1.0.56（审计 B）：本方法是 2026.9.1 core 下**所有**消费者的入口
+        # （`isinstance Provider or not async_supports_streaming_input()` 两支
+        # 都不中——TextToSpeechEntity 重写了本方法，core 把 tts.speak 的整段
+        # 消息也 gen_stream 包成流喂进来，_bench/ha_core_ref:1107-1137）。
+        # 流式直封（占位头）按 options 形态选，见 _want_stream_wrap。
+        streaming = self._want_stream_wrap(fmt, options)
         pcm = self._async_pcm_stream(message)
-        converted = self._convert(pcm, fmt, options)
+        converted = self._convert(pcm, fmt, options, streaming=streaming)
 
         # peek 首块：流式下无法"事后返回 (None, None)"，改为抛错——HA 的
         # _load_data_into_cache 捕获异常后会 pop 掉内存缓存条目，等价保留
@@ -243,8 +280,15 @@ class HuijianTtsEntity(BaseEntity):
     async def async_get_tts_audio(
         self, message: str, language: str, options: dict
     ) -> TtsAudioType:
-        """整段路径（保留）：非管线消费者（tts.speak 服务 / media_source / 老 HA）
-        仍走这里；HA 的 assist 管线现在走上面的流式出口。"""
+        """整段路径（仅为老 HA 兼容保留）。
+
+        v1.0.56 路由实锤：2026.9.1 的 core 下本方法对本实体是**死码**——
+        `TTSCache` 分流判据只看 `isinstance Provider`（旧式平台基类，我们不是）
+        与 `async_supports_streaming_input()`（重写 async_stream_tts_audio 即
+        True），所有消费者（含 tts.speak / tts_get_url / media_source）都改由
+        流式入口以 gen_stream 包装进入。「整段路拿真实头」的保障现已转移到
+        流式入口内的 `_want_stream_wrap` 批式回落支（占位头不落盘）。
+        """
         # v1.0.48（隐私）：播报文本属家居隐私，INFO 只留前 40 字+长度，
         # 全文降 DEBUG（现场默认 INFO 级不落全量）。
         _LOGGER.info(

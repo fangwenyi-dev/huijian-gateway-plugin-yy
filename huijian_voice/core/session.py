@@ -242,6 +242,12 @@ class TtsSession(BaseSession):
         n_frames = n_bytes = 0
         engine: dict = {}
         it = None
+        # v1.0.55（深审定案②）：本轮音频是否"缺尾巴"。一切非自然早退
+        # （超预算/停滞/断连/合成异常/引擎自报半途收束）都必须置位——
+        # stop 帧带 truncated 声明，集成侧据此以 error 收口，HA 才不会被
+        # 截断音频毒化消息哈希缓存（内存+落盘、跨重启命中）。顶替/取消路
+        # 径本来就不发 stop（gen 守卫），不在此列。
+        truncated = False
         try:
             # F5：预算必须覆盖「生成器挂起」——逐包用剩余预算做 wait_for，
             # native 合成卡死也能按点收束（finally 的 stop 义务不变）。
@@ -255,6 +261,7 @@ class TtsSession(BaseSession):
                                    n_frames, text[:30])
                     return
                 if remain <= 0:
+                    truncated = True
                     logger.warning("[TTS] 整流超预算截断：已发 %d 帧 / %r",
                                    n_frames, text[:30])
                     return
@@ -263,12 +270,14 @@ class TtsSession(BaseSession):
                 except StopAsyncIteration:
                     break
                 except asyncio.TimeoutError:
+                    truncated = True
                     logger.warning("[TTS] 合成流停滞超预算，截断收束（已发 %d 帧）: %r",
                                    n_frames, text[:30])
                     return
                 if not await self.send_bytes(pkt):
                     # v1.0.45：连接中断同样点名——半截音频在此对账（对端多半
                     # 正在重连，本端 stop 也会失败，只有这行 WARN 说明真相）。
+                    truncated = True
                     logger.warning("[TTS] 播报连接中断，停止下发：已发 %d 帧 / %r",
                                    n_frames, text[:30])
                     return
@@ -283,6 +292,7 @@ class TtsSession(BaseSession):
                                n_frames, text[:30])
             raise
         except Exception:
+            truncated = True
             logger.exception("[TTS] 合成流异常（以 stop 收束）")
         finally:
             # v1.0.48：四条早退（顶替/超预算/停滞/断连）与 cancel 路径统一在此
@@ -294,7 +304,14 @@ class TtsSession(BaseSession):
                     await it.aclose()
             # 仅当自己仍是当前代时才收束（防被顶替后发孤儿 stop）
             if gen == self._gen:
-                await self.send_json({"type": "tts", "state": "stop"})
+                if engine.get("truncated"):
+                    # 引擎自报半途收束（v1.0.55 云端半途断流等）——
+                    # 生成器是"正常耗尽"，本函数各早退位点看不见，必须在此并档。
+                    truncated = True
+                stop_frame = {"type": "tts", "state": "stop"}
+                if truncated:
+                    stop_frame["truncated"] = True
+                await self.send_json(stop_frame)
                 # v1.0.25：成功也留一行——「灯开了不播报」必须能逐跳对账
                 # （加载项下发 → 集成收帧 → 卫星推流 → 设备出声），此前成功全静默。
                 if sent_any:

@@ -196,6 +196,22 @@ class Service:
 
     # ── 热应用回调（v2 §4.1：不重启不断连）──────────────────────
     def _on_settings_change(self, data: dict) -> None:
+        # v1.0.55（定案⑤）+ v1.0.56 审计修正（D-1/D-2）：tts 节热变更复位
+        # 云失败钉扎。三处纪律：①本块挪到函数**首位且独立 try**——排在其后的
+        # _write_endpoints/_rotate_voice_fp 抛错不得吞掉解钉（D-2：旧顺序下
+        # 修复保存连续两次都不解钉）；②**首调同样复位**——开机后第一次保存
+        # 高概率就是"修好云配置"那一次，旧"首调只建基线"会把保险丝再钉满
+        # 300s（D-1）；reset_cloud_pin 未钉扎时是 no-op，盲复位零副作用；
+        # ③快照判据防"任意无关保存都解钉"（tts 节没动就不必反复试云）。
+        try:
+            tts_snap = json.dumps(data.get("tts") or {}, sort_keys=True,
+                                  ensure_ascii=False, default=str)
+            prev_snap = getattr(self, "_tts_cfg_snap", None)
+            self._tts_cfg_snap = tts_snap
+            if prev_snap is None or prev_snap != tts_snap:
+                self.tts.reset_cloud_pin("tts 配置热更")
+        except Exception:
+            logger.exception("[配置] tts 快照/解钉失败（不阻断其余热应用）")
         try:
             self.textcnn.set_thresholds_override(data.get("nlu", {}).get("thresholds_override") or {})
             self._write_endpoints()

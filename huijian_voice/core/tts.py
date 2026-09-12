@@ -94,6 +94,13 @@ _CACHE_MAX_BYTES = 4 << 20      # 4MB 硬闸（opus 32kbps×10s≈40KB/句，量
 
 _DEFAULT_SID = 18   # 本地定案默认音色 zf_026（云失败回落唯一用嗓，音色归属条款③）
 
+# ── v1.0.55 云失败钉扎（现场 2026-09-12「还是有两个 tts 音色」主修）──────
+# 旧形态：每一轮都先试云、失败再本地——云持续不可用时 = **逐句换嗓**（男⇄女
+# 随机交替）+ **逐句白等云超时**（first_byte 6s）双惩罚。钉扎 = 一次云失败后
+# CLOUD_PIN_S 秒内所有轮次直接本地（引擎列打「云钉扎」可辨），到期自动放一行
+# 试云：网络恢复不需要重启，云若还死也只多等一次超时。
+_CLOUD_PIN_S = 300.0
+
 # ── 云档读超时（v1.0.52：整包 total=30 硬超时 → 分段可配）────────────
 # 现场形态：云端点"连上了但不出声"（平台排队/合成卡死/半开连接）时，旧实现
 # 要等满 30s total 才抛 → 云→本地回落白等 30s，用户听到的是长静音后才出声。
@@ -325,7 +332,12 @@ class _CloudOpusStream:
     与整包路径（`_unwrap_audio` + `_resample_encode`）同判据同输出规格：
     · 头部字节永不进音频流水（RIFF 44B/扩展头逐块解析到 data 块为止）；
     · 一个 opus 编码器实例贯穿整段（逐帧喂满帧 → 与一次性 encode_stream 逐比特一致）；
-    · 尾帧零填充到 60ms（与 encode_stream 尾帧同法）。
+    · 尾帧零填充到 60ms（与 encode_stream 尾帧同法）；
+    · data 块之后的字节按声明长度截断（v1.0.55 定案⑦：LIST/pad 元数据绝不
+      编成噪声帧）。边界注记（v1.0.56 审计 A-doc）：声明 0 或 0xFFFFFFFF=
+      未知长 → 读到流尽；奇数 csz 由 carry 补半样对齐。整包路径对这两种
+      坏声明是"0 帧/ValueError 炸"，与之**不**逐一对齐——流式一侧是更安全的
+      那一边，且整包分支仅在 `iter_chunked` 缺失时到达，真 aiohttp 永不走。
     """
 
     _SNIFF_BYTES = 12       # RIFF/WAVE 判定所需最短前缀
@@ -340,6 +352,10 @@ class _CloudOpusStream:
         self._res = None
         self._enc = None
         self._pcm = bytearray()         # 待满帧的 16k s16le
+        # v1.0.55（定案⑦）：data 块声明长度的剩余字节。None=不限（裸 PCM，
+        # 或 wav 声明 0/0xFFFFFFFF 未知长——读到流尽，与整包路径同判据）；
+        # 有值=data 之后的尾块字节一律不进音频流水。
+        self._data_left: int | None = None
 
     # ── 输入 ────────────────────────────────────────────────────
     def feed(self, chunk: bytes) -> list:
@@ -415,6 +431,12 @@ class _CloudOpusStream:
                 if self._bits != 16:
                     raise RuntimeError(f"云 TTS wav 位深 {self._bits} 不支持（仅 16-bit）")
                 payload = bytes(self._rbuf[8:])
+                if 0 < csz < 0xFFFFFFFF:
+                    # 定案⑦：可信声明长度 → 按其截断（尾随 LIST/pad 不进音频）。
+                    # 钳位唯一发生在 _payload（含本次首口），此处只记总额——
+                    # 若在切片处先扣、_payload 再扣一次=双重递减（本文件测试批
+                    # 当场逮到的实施缺陷：尾帧少 5 字节）。
+                    self._data_left = csz
                 self._rbuf = bytearray()
                 self._start_payload(self._rate)
                 return self._payload(payload)
@@ -431,6 +453,12 @@ class _CloudOpusStream:
 
     def _payload(self, chunk: bytes) -> list:
         """喂响应体载荷块（**源域** s16le）：重采样 → 攒满 60ms 即出包。"""
+        if self._data_left is not None:
+            if self._data_left <= 0:
+                return []                   # 声明长度已尽：之后的字节是尾块元数据
+            if len(chunk) > self._data_left:
+                chunk = chunk[:self._data_left]
+            self._data_left -= len(chunk)
         return self._frame_pcm(self._res.feed(chunk))
 
     def _frame_pcm(self, pcm16k: bytes) -> list:
@@ -462,6 +490,8 @@ class TtsEngine:
         self._cache_bytes = 0
         self.cache_hits = 0     # 观测计数（状态页/排障）
         self._cloud_voice_warned = False   # 云音色缺省告警只打一次
+        # v1.0.55：上次云失败时刻（monotonic）；0=健康。见 _CLOUD_PIN_S 注释。
+        self._cloud_fail_ts = 0.0
         self._custom_sids: dict[str, int] = {}   # 加载时注入的自定义音色名→sid
 
     def _voices_count(self, key: str) -> int:
@@ -536,6 +566,18 @@ class TtsEngine:
             voice = str((self.settings.get("tts.cloud") or {}).get("voice") or "alloy")
             return f"cloud:{voice}"
         return f"local:sid{self.resolve_sid()}+c{len(self._custom_sids)}"
+
+    def reset_cloud_pin(self, reason: str = "") -> None:
+        """v1.0.55（定案⑤）：云失败钉扎的复位开关=云配置热变更。
+
+        _cloud_fail_ts 是对"仍是那个坏端点"的保险丝，不是死刑：用户改对
+        base_url/api_key、换 provider、修 timeout，都不该被旧失败时刻继续
+        钉在 local:pinned 最长 _CLOUD_PIN_S 秒。热应用回调
+        （main._on_settings_change）检测 tts 节变更时调用本方法。"""
+        if self._cloud_fail_ts:
+            self._cloud_fail_ts = 0.0
+            logger.info("[TTS] 云钉扎已解除（%s）→ 下一轮恢复试云",
+                        reason or "配置变更")
 
     # ── 生命周期 ────────────────────────────────────────────────
     def ready(self) -> bool:
@@ -655,18 +697,49 @@ class TtsEngine:
         prov = str(self.settings.get("tts.provider", "local_kokoro"))
         fell_back = False
         if prov.startswith("cloud"):
-            if engine_out is not None:
-                engine_out["engine"] = "cloud:%s" % str(
-                    (self.settings.get("tts.cloud") or {}).get("voice") or "alloy")
-            try:
-                async for pkt in self._cloud_stream(text):
-                    yield pkt
-                return
-            except Exception as e:
+            # v1.0.55 云失败钉扎（现场「还是有两个 tts 音色」主修，见 _CLOUD_PIN_S）。
+            if self._cloud_fail_ts and (time.monotonic() - self._cloud_fail_ts < _CLOUD_PIN_S):
                 fell_back = True
-                logger.warning("[TTS] 云合成失败(%s) → 回落本地默认音色（注意：音色会变化）", e)
                 if engine_out is not None:
-                    engine_out["engine"] = "local:fallback"
+                    engine_out["engine"] = "local:pinned"
+                logger.info("[TTS] 云钉扎中（剩 %.0fs）→ 本轮直接本地默认音色",
+                            _CLOUD_PIN_S - (time.monotonic() - self._cloud_fail_ts))
+            else:
+                if engine_out is not None:
+                    engine_out["engine"] = "cloud:%s" % str(
+                        (self.settings.get("tts.cloud") or {}).get("voice") or "alloy")
+                cloud_frames = 0
+                try:
+                    async for pkt in self._cloud_stream(text):
+                        cloud_frames += 1
+                        yield pkt
+                    if not cloud_frames:
+                        # v1.0.56（审计 B-gap）：零帧"正常收束"（空 body、或被
+                        # 定案⑦钳位后一帧不剩）不得记成"整流成功"——那会解除
+                        # 既有钉扎并让整轮静默。抛错走既有失败路径：本地默认
+                        # 音色兜底 + 开钉扎窗口。
+                        raise RuntimeError("云零帧返回")
+                    self._cloud_fail_ts = 0.0      # 整流成功 = 解除钉扎
+                    return
+                except Exception as e:
+                    # 断在首帧前或半途都记失败时刻、开启钉扎窗口。
+                    self._cloud_fail_ts = time.monotonic()
+                    if cloud_frames:
+                        # 半途断流**不**再接本地嗓：一男一女的混播比"本轮少半句、
+                        # 下轮起全本地"更伤（双音色观感的另一来源在此封死）。
+                        # v1.0.55（定案②）：生成器"正常耗尽"收的半截口必须自报
+                        # 截断——session 据此在 stop 帧声明 truncated，集成以
+                        # error 收口，HA 才不把缺尾音频写进消息哈希缓存。
+                        logger.warning("[TTS] 云端半途断流（已出 %d 帧：%s）→ 本轮就此收束，"
+                                       "并钉扎本地 %.0f 秒", cloud_frames, e, _CLOUD_PIN_S)
+                        if engine_out is not None:
+                            engine_out["truncated"] = True
+                        return
+                    fell_back = True
+                    logger.warning("[TTS] 云合成失败(%s) → 回落本地默认音色，并钉扎本地 %.0f 秒"
+                                   "（到期自动再试云；防逐句换嗓+逐句白等超时）", e, _CLOUD_PIN_S)
+                    if engine_out is not None:
+                        engine_out["engine"] = "local:fallback"
         loop = asyncio.get_running_loop()
         # 音色归属定案（用户 2026-09-18）：本地档=web 设定音色（数字或自定义主名）；
         # 云档=云端对应音色（可选）；**云失败回落=固定默认本地音色 sid18**——回落是
@@ -674,10 +747,20 @@ class TtsEngine:
         sid = _DEFAULT_SID if fell_back else self.resolve_sid()
         speed = float(self.settings.get("tts.speed", 1.0))
         if engine_out is not None:
-            fb = engine_out.get("engine") == "local:fallback"
-            engine_out["engine"] = f"local:sid{sid}" + ("(云回落)" if fb else "")
+            eng0 = engine_out.get("engine")
+            engine_out["engine"] = f"local:sid{sid}" + (
+                "(云钉扎)" if eng0 == "local:pinned"
+                else ("(云回落)" if eng0 == "local:fallback" else ""))
         load_checked = self.ready()
         for sent in split_sentences(text):
+            if not any(c.isalnum() for c in sent):
+                # v1.0.56（审计 P1）：split_sentences 会把连排标点拆出独立
+                # 纯标点段（"第一句！！！第二句。"→['第一句！','！','！','第二句。']），
+                # emoji/符号行同理。这类段本地合成**正常**产出为空——把它当
+                # 缺句 latched truncated，会把整轮完整音频永久判死（每轮误报、
+                # 流式路 raise+弃缓存+重连且不自愈）。真词句空产出照报截断，
+                # 定案②语义不丢。
+                continue
             key = (sent, sid, speed)
             hit = self._cache.get(key)
             if hit is not None:
@@ -696,10 +779,44 @@ class TtsEngine:
                 logger.info("[TTS] 模型未就绪，本轮等待 %dms",
                             int((time.perf_counter() - t_wait) * 1000))
                 if not ok:
+                    if engine_out is not None:
+                        # 定案②：模型加载失败=其后各句全缺，半截口必须自报截断
+                        engine_out["truncated"] = True
                     return
                 load_checked = True
+                # v1.0.55（定案⑥）：模型就绪后复核音色。冷态 _tts=None 时
+                # resolve_sid 的越界检查被 `n and ...` 短路——坏配置写的越界
+                # 数字原样返回，_synth 抛错被吞就是整轮静默（与热态"WARN+
+                # 回落18"两态不一致）。n>0 才拦得住，故复核必须在这里做。
+                # fell_back 恒 _DEFAULT_SID，无需复核。
+                if not fell_back:
+                    sid2 = self.resolve_sid()
+                    if sid2 != sid:
+                        logger.info("[TTS] 模型就绪后音色复核：%s → %s", sid, sid2)
+                        sid = sid2
+                        if engine_out is not None:
+                            eng0 = engine_out.get("engine")
+                            engine_out["engine"] = f"local:sid{sid}" + (
+                                "(云钉扎)" if eng0 == "local:pinned"
+                                else ("(云回落)" if eng0 == "local:fallback" else ""))
+                        key = (sent, sid, speed)      # 复核后本句键重算
+                        hit = self._cache.get(key)
+                        if hit is not None:
+                            self._cache.move_to_end(key)
+                            self.cache_hits += 1
+                            self.last_used = time.time()
+                            for pkt in hit[0]:
+                                local_first_ms = self._note_local_first(t_turn, local_first_ms)
+                                yield pkt
+                            continue
             pcm16 = await loop.run_in_executor(None, self._synth, sent, sid, speed)
             if not pcm16:
+                # v1.0.55（定案②）：_synth 吞错产空句=整段播报缺一句，此前静默
+                # continue、半截音频以普通 stop 收口——HA 把缺尾音频当完整结果
+                # 缓存，同一句永久缺一截且不自愈。改为自报截断（缺一句也报）。
+                if engine_out is not None:
+                    engine_out["truncated"] = True
+                logger.warning("[TTS] 句子合成空产出，本轮声明截断: %r", sent[:30])
                 continue
             # F5：整句 opus 编码是 CPU 活，出事件循环
             packets = await loop.run_in_executor(None, self._encode, pcm16)

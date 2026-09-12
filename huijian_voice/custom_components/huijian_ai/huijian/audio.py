@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import io
 import logging
 import wave
@@ -25,6 +26,27 @@ def wrap_pcm_as_wav(pcm: bytes, rate: int, channels: int, sample_bytes: int = 2)
     return buf.getvalue()
 
 
+def wav_stream_header(rate: int, channels: int, sample_bytes: int = 2) -> bytes:
+    """流式 WAV 占位头（44B）：RIFF/data 长度域恒 0xFFFFFFFF。
+
+    v1.0.55：真流式要求首块 PCM 就绪即出头透传，整段长度此刻不可知；
+    `wave` 模块写不了占位长，此处手搓。语义=标准"未知长度流式 WAV"：
+    卫星侧 `_iter_wav_pcm_chunks` 对声明长度 0/0xFFFFFFFF 按"源结束收尾"
+    处理（v1.0.52 已备）；ffmpeg 的 wav demuxer 同样读到 EOF。`wave` 整读
+    型消费者拿 getnframes()=0xFFFFFFFF 需按短读处理——仅流式路会产这种头。
+    """
+    byte_rate = rate * channels * sample_bytes
+    block_align = channels * sample_bytes
+    return (
+        b"RIFF" + (0xFFFFFFFF).to_bytes(4, "little") + b"WAVE"
+        + b"fmt " + (16).to_bytes(4, "little") + (1).to_bytes(2, "little")
+        + int(channels).to_bytes(2, "little") + int(rate).to_bytes(4, "little")
+        + int(byte_rate).to_bytes(4, "little") + int(block_align).to_bytes(2, "little")
+        + int(sample_bytes * 8).to_bytes(2, "little")
+        + b"data" + (0xFFFFFFFF).to_bytes(4, "little")
+    )
+
+
 async def async_convert_audio(
     hass: HomeAssistant,
     audio_bytes_gen: AsyncIterable[bytes] | AsyncGenerator[bytes],
@@ -36,8 +58,16 @@ async def async_convert_audio(
     to_sample_bytes: int | None = None,
     to_frame_duration: int | None = None,
     input_params: list | None = None,
+    streaming: bool = False,
 ) -> AsyncGenerator[bytes, None]:
-    """Convert audio to a preferred format using ffmpeg."""
+    """Convert audio to a preferred format using ffmpeg.
+
+    streaming=True 时 s16le→wav 直封支改为「占位头 + 逐块透传」增量出块
+    （v1.0.55 真流式修复：旧实现 b"".join 整段攒完才产一块，实体 peek 被
+    阻塞至全段合成结束，卫星首音=整段合成时间——v1.0.52 宣称的流式收益在
+    这条必经支被清零）。默认 False=批式整封（整段路/老调用字节级不变，
+    盘缓存消费者继续拿真实长度头）。
+    """
     # ── s16le → wav 纯 Python 直封（v1.0.25）──────────────────────────
     # 卫星推流只认 16k/mono/16bit WAV，而加载项 WS tts 通道吐的正是裸
     # s16le 16k/mono——本可原样封容器。此前一律走 ffmpeg，而
@@ -63,6 +93,46 @@ async def async_convert_audio(
             and to_sample_channels in (None, channels)
             and to_sample_bytes in (None, 2)
         ):
+            if streaming:
+                # ── v1.0.55：流式直封——先等到**第一块非空 PCM**再出头 ──
+                # 首块未到绝不出头：纯头 44B 是"非空 bytes"，会骗过实体
+                # peek 的空结果闸（v1.0.34 M2 同款毒化，见下方批式支注释）。
+                agen = audio_bytes_gen.__aiter__()
+                # 本支是"部分消费"形态：消费者随时可能中途 aclose 我们。源
+                # 收口必须显式落 finally——只靠 GC 终结器会把 transport 的
+                # 断连清算/残帧隔离推迟到不确定时刻（v1.0.45 纪律的延伸）。
+                try:
+                    first: bytes | None = None
+                    while True:
+                        try:
+                            cand = await agen.__anext__()
+                        except StopAsyncIteration:
+                            break
+                        if cand:
+                            first = cand
+                            break
+                    if first is None:
+                        _LOGGER.error("[TTS] 直封收到空 PCM（加载项未回音频），不产出（出口走 fail-loud）")
+                        return
+                    total = len(first)
+                    yield wav_stream_header(rate, channels, 2)
+                    yield first
+                    async for chunk in agen:
+                        if chunk:
+                            total += len(chunk)
+                            yield chunk
+                    _LOGGER.info(
+                        "[TTS] s16le→wav 流式直封收束：%d 帧 %.2fs（%dHz/%dch/16bit，%d 字节，占位头）",
+                        total // (2 * channels),
+                        total / (2 * channels * rate),
+                        rate,
+                        channels,
+                        total,
+                    )
+                finally:
+                    with contextlib.suppress(BaseException):
+                        await agen.aclose()
+                return
             pcm = b"".join([chunk async for chunk in audio_bytes_gen])
             if not pcm:
                 # v1.0.34（审查 M2）：空合成必须在此截住——44 字节纯头是"非空
