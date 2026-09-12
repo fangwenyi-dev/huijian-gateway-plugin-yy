@@ -224,6 +224,10 @@
             },
             "title": "Device conflict for {name}"
         },
+        "satellite_unreachable": {
+            "description": "Home Assistant has been unable to reach this device for {minutes} minutes (dialing {address}, {attempts} failed attempts, last error: {error}).\n\nThe most common cause is that the device changed its IP address while this entry still points at the old one. If the device re-advertises on the LAN (mDNS/DHCP discovery), this integration updates the address and reloads automatically. Otherwise check the device power/network, set a static DHCP lease for it on your router, or remove and re-add the entry.",
+            "title": "{name} has been unreachable for a long time"
+        },
         "service_calls_not_allowed": {
             "description": "The device attempted to perform a Home Assistant action, but this functionality is not enabled.\n\nIf you trust this device and want to allow it to perform Home Assistant action, you can enable this functionality in the options flow.",
             "title": "{name} is not permitted to perform Home Assistant actions"

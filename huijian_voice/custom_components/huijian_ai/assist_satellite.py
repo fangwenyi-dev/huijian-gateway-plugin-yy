@@ -720,6 +720,43 @@ class EsphomeAssistSatellite(
             )
             return None
 
+    async def _drain_stale_pipeline(
+        self, old_task: asyncio.Task | None, timeout: float = 2.0
+    ) -> bool:
+        """v1.0.55：新一轮开跑前确定性收掉旧一轮。
+
+        现场形态：播报中途链路劣化/截断 → 设备发不出 stop/abort → 网络恢复后
+        再次唤醒直接 start=1。core 的 accept **不防双开**（本实体 `_is_running`
+        是"活着"位而非"在跑"位），两个 run 共抢同一个 `_audio_queue`、
+        TTS 下行互相插帧——v1.0.45 台架实锤的"杂流/半句"在卫星端的复现。
+        取消旧任务并**有界等待**其收口（2s，在设备 8s 应答预算内；本方法在
+        后台任务里 await，不占 start 回调）；超时不阻塞新一轮（卡死旧 run
+        是确定的坏，留 WARN 供现场对账）。
+        返回 True=旧轮已收口。
+        """
+        if old_task is None or old_task.done():
+            return True
+        old_task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(old_task), timeout=timeout)
+        except TimeoutError:
+            _LOGGER.warning(
+                "慧尖卫星旧轮 pipeline 未在 %ds 内收口（已取消在途），"
+                "新一轮照常开跑——若伴随杂流/半句播报请查此条",
+                timeout,
+            )
+            return False
+        except asyncio.CancelledError:
+            # 区分两种取消：旧任务"以 cancelled 收尾"（shield 把结果抛给我们，
+            # 正是我们要的收口）vs 本任务自己被撤销（实体拆除——此时绝不能继续
+            # 开新轮）。cancelling()>0 说明撤销冲我们来的，如实上抛。
+            cur = asyncio.current_task()
+            if cur is not None and cur.cancelling() > 0:
+                raise
+        except Exception:  # noqa: BLE001 - 旧轮自身异常同样算收口
+            _LOGGER.debug("慧尖卫星旧轮 pipeline 收口时抛错（忽略）", exc_info=True)
+        return old_task.done()
+
     async def _handle_pipeline_start_impl(
         self,
         conversation_id: str,
@@ -790,14 +827,24 @@ class EsphomeAssistSatellite(
             start_stage,
             end_stage,
         )
-        self._pipeline_task = self.config_entry.async_create_background_task(
-            self.hass,
-            self.async_accept_pipeline_from_satellite(
+        # v1.0.55：旧轮（若还活着）在后台协程里先接管再开跑——core 不防双开，
+        # 两 run 共抢 _audio_queue = v1.0.45"杂流/半句"的卫星端复现；而设备
+        # "播报截断→再唤醒"恰恰会在旧 run 收口前发来 start=1。start 回调本身
+        # 保持零等待（设备 8s 应答预算）。
+        old_pipeline_task = self._pipeline_task
+
+        async def _run_pipeline_round() -> None:
+            await self._drain_stale_pipeline(old_pipeline_task)
+            await self.async_accept_pipeline_from_satellite(
                 audio_stream=self._wrap_audio_stream(),
                 start_stage=start_stage,
                 end_stage=end_stage,
                 wake_word_phrase=wake_word_phrase,
-            ),
+            )
+
+        self._pipeline_task = self.config_entry.async_create_background_task(
+            self.hass,
+            _run_pipeline_round(),
             "esphome_assist_satellite_pipeline",
         )
         self._pipeline_task.add_done_callback(self.handle_pipeline_finished)

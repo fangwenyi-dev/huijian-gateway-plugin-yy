@@ -222,6 +222,10 @@
             },
             "title": "{name}的设备冲突"
         },
+        "satellite_unreachable": {
+            "description": "Home Assistant 已连续 {minutes} 分钟无法连接该设备（正在拨打 {address}，失败 {attempts} 次，最近错误：{error}）。\n\n最常见原因是设备 IP 已变化而本条目仍指向旧地址。若设备在局域网内重新广播（mDNS/DHCP 发现），本集成会自动改写地址并重载；否则请检查设备电源/网络，或在路由器为设备设置固定 DHCP 租约，也可删除后重新添加条目。",
+            "title": "{name} 长时间无法连接"
+        },
         "service_calls_not_allowed": {
             "description": "设备尝试执行一个 Home Assistant 动作，但此功能未被启用。\n\n如果您信任此设备并希望允许它执行 Home Assistant 动作，您可以在选项流程中启用此功能。",
             "title": "不允许 {name} 执行 Home Assistant 动作"

@@ -1,5 +1,42 @@
 # 变更日志
 
+## [1.0.55] - 2026-09-12 「设备换 IP 后 HA 永追不回」断链修复 + 断连可观测性 + 播报截断后再唤醒收口
+
+现场定谳（串口与 HA 日志簿互证：设备重启后 `[Errno 113] 192.168.1.235:6053`
+持续、设备侧 rebind 后 100s+ 零 `Accepted`）：固件 v2.1.24 起已广播
+`_esphomelib._tcp`（mDNS TXT 带 mac，main/application.cc:561），但本 fork 在
+移植时把上游 esphome 的 zeroconf 声明清成了 `[]`——HA 从不浏览该服务类型，
+config_flow 里现成的「mac 命中既有条目 → 真连设备核验 → 更新 host → reload
+自动重连」迁移链成死代码。设备换 IP 即语音永久哑、重启设备也无效；且
+aioesphomeapi 对每个重连周期只有首次尝试记 WARNING（其余 DEBUG），现场看
+就是"HA 没动静"——两头盲区叠加导致历史多轮定位无果。
+
+- **manifest 恢复 `_esphomelib._tcp.local.` 声明**，迁移链复活；两条命脉
+  （zeroconf/DHCP discovery）齐备。商店仓副本已同步（yyjicheng 工作区），
+  正式版发布时以主仓为准再同步。
+- **断连可观测性**（`manager.py`）：连通类失败进观测窗，持续 ≥5 分钟建
+  repair issue `satellite_unreachable`（中英话术含所拨地址、连续失败次数、
+  时长、最近错误），此后每 5 分钟刷新 issue 并限频一条 WARNING；恢复连接
+  自动复位窗口并删 issue。认证类错误仍走 reauth 通道、不叠加计数。
+- **播报截断后再唤醒的卫星端收口**（`assist_satellite.py`）：现场指纹"每次
+  出问题前都是播报没播完"——链路劣化截断下行时设备发不出 stop，恢复后再
+  唤醒直接 start=1；core 的 `accept_pipeline` **不防双开**（本实体
+  `_is_running` 是"活着"位），旧 run 未收口就与新 run 共抢同一
+  `_audio_queue`、TTS 下行互相插帧（v1.0.45 台架实锤"杂流/半句"的卫星端复
+  现）。现新一轮后台协程先经 `_drain_stale_pipeline` 取消旧轮并有界等待其
+  收口（2s，不占设备 8s 应答窗口），超时也让路新轮并留 WARNING；本任务被
+  拆除时的撤销如实上抛，绝不"吞撤销还开新轮"。
+- **钉桩**：`tests/test_v1055_zeroconf_migration.py`（15 项）——manifest
+  形状钉（防"合法 YAML 空数组"再次躲过字符串钉）、双语话术钉、AST 真执行
+  迁移五分支（换 IP 更新/同 IP 免探测/TXT 缺 mac 拒绝/mac 不符不写别人 IP/
+  DHCP 只更 host）、观测窗节奏真执行、on_connect/on_connect_error 接线结构
+  钉、`_drain_stale_pipeline` 行为钉（真 asyncio：收口/超时让路/撤销上抛）
+  与接线顺序结构钉；`__slots__` 登记四件（v1.0.51 守卫当场拦下未登记赋值）。
+
+回归：851 passed/8 skipped（默认解释器）、856 passed（CI 同级 py313 venv），
+仓库根/huijian_voice 两种跑法一致全绿（发布前以暂存树导出实测）。本地对网关
+商店仓 css 分叉为存量遗留①（CI skip），非本批引入。
+
 ## [1.0.54] - 2026-09-12 开窗器速度/力度语音参数通道（配套网关 v1.4.3+ 滑动条）
 
 现场主诉（日志实锤）：说「办公室平开窗速度设为百分之三十」被百分比预检当

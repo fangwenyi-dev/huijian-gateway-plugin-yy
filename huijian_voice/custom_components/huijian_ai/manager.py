@@ -24,7 +24,7 @@ from aioesphomeapi import (EncryptionPlaintextAPIError, ExecuteServiceResponse,
 from awesomeversion import AwesomeVersion
 from homeassistant.components import bluetooth, tag, zeroconf
 from homeassistant.config_entries import ConfigEntryState
-from homeassistant.const import (ATTR_DEVICE_ID, CONF_MODE,
+from homeassistant.const import (ATTR_DEVICE_ID, CONF_MODE, CONF_PORT,
                                  EVENT_HOMEASSISTANT_CLOSE,
                                  EVENT_LOGGING_CHANGED, Platform)
 from homeassistant.core import (CALLBACK_TYPE, Event, EventStateChangedData,
@@ -50,8 +50,9 @@ from homeassistant.util.json import json_loads_object
 from .bluetooth import async_connect_scanner
 from .const import (CONF_ALLOW_SERVICE_CALLS, CONF_BLUETOOTH_MAC_ADDRESS,
                     CONF_DEVICE_NAME, CONF_NOISE_PSK, CONF_SUBSCRIBE_LOGS,
-                    DEFAULT_ALLOW_SERVICE_CALLS, DEFAULT_URL, DOMAIN,
-                    PROJECT_URLS, STABLE_BLE_VERSION, STABLE_BLE_VERSION_STR)
+                    DEFAULT_ALLOW_SERVICE_CALLS, DEFAULT_PORT, DEFAULT_URL,
+                    DOMAIN, PROJECT_URLS, STABLE_BLE_VERSION,
+                    STABLE_BLE_VERSION_STR)
 from .dashboard import async_get_dashboard
 from .domain_data import DomainData
 from .encryption_key_storage import async_get_encryption_key_storage
@@ -60,6 +61,15 @@ from .entry_data import ESPHomeConfigEntry, RuntimeEntryData
 from .enum_mapper import EsphomeEnumMapper
 
 DEVICE_CONFLICT_ISSUE_FORMAT = "device_conflict-{}"
+SATELLITE_UNREACHABLE_ISSUE_FORMAT = "satellite_unreachable-{}"
+# v1.0.55 重连可观测性（2026-09-12 现场定谳）：设备换 IP/链路黑洞后，HA 其实
+# 每个失败尝试都在敲旧地址的门，但 aioesphomeapi 只对每个重连周期的**首次**
+# 尝试记 WARNING、其余全 DEBUG——现场看就是"HA 没有动静"。持续断连 ≥5 分钟
+# 即建 repair issue（含目标地址/失败次数/时长/最后错误），并按 5 分钟一条
+# 的限频打 WARNING；恢复连接自动删 issue。配合本批恢复的 zeroconf 声明
+# （_esphomelib._tcp.local.），"设备改 IP → 语音永久哑且无人知晓"两头闭环。
+UNREACHABLE_ISSUE_THRESHOLD_S = 300.0
+UNREACHABLE_WARN_INTERVAL_S = 300.0
 UNPACK_UINT32_BE = struct.Struct(">I").unpack_from
 
 
@@ -167,6 +177,11 @@ class ESPHomeManager:
         # "类内所有 self.X = 赋值都在 __slots__ 里"，防同类再犯。
         # v1.0.52：_satellite_selfheal_at 已删除（改模块级冷却表，见
         # _SATELLITE_SELFHEAL_LAST），勿再加回——实例级限频跨 reload 无效。
+        # v1.0.55：不可达观测窗四件（见 UNREACHABLE_* 常量注释）。
+        "_conn_fail_count",
+        "_conn_fail_since",
+        "_conn_warn_at",
+        "_unreachable_issue_open",
         "cli",
         "device_id",
         "domain_data",
@@ -204,6 +219,18 @@ class ESPHomeManager:
         self._log_level = LogLevel.LOG_LEVEL_NONE
         # v1.0.52：卫星自愈冷却时戳已上移为模块级 _SATELLITE_SELFHEAL_LAST
         # （实例级会随 reload 清零 → 限频失效 → 重载风暴），此处不再持有属性。
+        # v1.0.55 重连可观测性状态（见 UNREACHABLE_* 常量注释）。
+        self._conn_fail_since: float | None = None
+        self._conn_fail_count = 0
+        self._conn_warn_at = 0.0
+        self._unreachable_issue_open = False
+
+    @property
+    def _unreachable_issue_id(self) -> str:
+        """Return the unreachable-repair issue id for this entry."""
+        return SATELLITE_UNREACHABLE_ISSUE_FORMAT.format(
+            self.entry.unique_id or self.entry.entry_id
+        )
 
     async def on_stop(self, event: Event) -> None:
         """Cleanup the socket client on HA close."""
@@ -480,6 +507,22 @@ class ESPHomeManager:
 
     async def on_connect(self) -> None:
         """Subscribe to states and list entities on successful API login."""
+        # v1.0.55：连上了 = 观测清零。_conn_fail_since 只在曾持续断连时置位，
+        # 正常瞬时重试不留痕，避免每次闪断都刷"已恢复"日志。
+        if self._conn_fail_since is not None:
+            outage = time.monotonic() - self._conn_fail_since
+            if outage >= UNREACHABLE_ISSUE_THRESHOLD_S:
+                _LOGGER.info(
+                    "设备 %s 已重连成功（此前不可达约 %d 分钟，失败 %d 次）",
+                    self.entry.title,
+                    int(outage // 60),
+                    self._conn_fail_count,
+                )
+            self._conn_fail_since = None
+            self._conn_fail_count = 0
+        if self._unreachable_issue_open:
+            self._unreachable_issue_open = False
+            async_delete_issue(self.hass, DOMAIN, self._unreachable_issue_id)
         try:
             await self._on_connect()
         except InvalidAuthAPIError as err:
@@ -848,6 +891,53 @@ class ESPHomeManager:
             finally:
                 self.entry_data.loaded_platforms.discard(Platform.ASSIST_SATELLITE)
 
+    @callback
+    def _async_note_connect_failure(self, err: Exception) -> None:
+        """v1.0.55：连通类失败计数；持续 ≥5min → repair issue + 限频 WARNING。
+
+        每次尝试都会进来（aioesphomeapi 46.3：on_connect_error 逐失败调用），
+        成本须保持常数级：无锁、单调钟、两处幂等写。
+        """
+        now = time.monotonic()
+        if self._conn_fail_since is None:
+            self._conn_fail_since = now
+            self._conn_fail_count = 0
+        self._conn_fail_count += 1
+        outage = now - self._conn_fail_since
+        if outage < UNREACHABLE_ISSUE_THRESHOLD_S:
+            return
+        # 限频节奏 = issue 刷新节奏：同一把闸，占位里的时长/次数不会停在旧值。
+        if now - self._conn_warn_at >= UNREACHABLE_WARN_INTERVAL_S:
+            self._conn_warn_at = now
+            self._unreachable_issue_open = True
+            async_create_issue(
+                self.hass,
+                DOMAIN,
+                self._unreachable_issue_id,
+                is_fixable=False,
+                severity=IssueSeverity.WARNING,
+                translation_key="satellite_unreachable",
+                translation_placeholders={
+                    "name": self.entry.title,
+                    "address": (
+                        f"{self.host}:"
+                        f"{self.entry.data.get(CONF_PORT, DEFAULT_PORT)}"
+                    ),
+                    "minutes": str(int(outage // 60)),
+                    "attempts": str(self._conn_fail_count),
+                    "error": f"{type(err).__name__}: {err}",
+                },
+            )
+            _LOGGER.warning(
+                "设备 %s 已不可达 %d 分钟（连续失败 %d 次，最近=%s），"
+                "HA 正在拨 %s；若设备换了 IP，mDNS/DHCP 发现会自动改写地址并重载条目",
+                self.entry.title,
+                int(outage // 60),
+                self._conn_fail_count,
+                type(err).__name__,
+                self.host,
+            )
+
     async def on_connect_error(self, err: Exception) -> None:
         """Start reauth flow if appropriate connect error type."""
         if not isinstance(
@@ -859,7 +949,14 @@ class ESPHomeManager:
                 InvalidAuthAPIError,
             ),
         ):
+            # v1.0.55：连通类失败（SocketAPIError=拒绝/不可达/超时）此前
+            # 现场零痕迹（aioesphomeapi 每个重连周期只有首次尝试记 WARNING），
+            # 进可观测窗口。
+            self._async_note_connect_failure(err)
             return
+        # 认证类失败有自己的 reauth/ERROR 通道：不叠加"不可达"叙事，清窗口
+        self._conn_fail_since = None
+        self._conn_fail_count = 0
 
         if isinstance(err, InvalidEncryptionKeyAPIError):
             if (
