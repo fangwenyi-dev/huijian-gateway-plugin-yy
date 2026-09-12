@@ -1084,6 +1084,11 @@ class Pipeline:
             # 无连接词的动词连排（2026-09-10 真机：连排双动作只执行了后一个）
             clauses = creation.serial_clauses(text)
         if not clauses:
+            # 并列宾语「打开展厅内倒窗和推拉窗」（2026-09-21 用户令第③点）：
+            # 共享动词多设备句必须链发；T0 单发只吃一个并谎报「办好了」=半执行。
+            # 任一分句听不懂→整句拒猜（fast_path 同形守卫兜住回退单发那一步）。
+            clauses = T.coord_clauses(text)
+        if not clauses:
             return None
         pairs = await asyncio.gather(*[self._match_pair(c) for c in clauses])
         plans: list[Plan] = []

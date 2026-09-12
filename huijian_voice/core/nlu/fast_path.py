@@ -119,10 +119,15 @@ _T1_MAP: dict[str, tuple[str, dict]] = {
 # T1 Adjust* 的 delta 扫描表（收编新增：原 v1.5 对 T1 命中不带 delta 的缺陷补全）
 _DELTA_SCANNERS: dict[str, list[tuple[re.Pattern, Any]]] = {
     "brightness": [
-        (re.compile(r"亮度\s*(?:调到|设到|为|成)?\s*(\d+)"), "$1"),
+        # 裸「到/至」形 2026-09-21 补：「调高亮度到80%」曾被可选组漏掉"到"，
+        # 整句掉进 (调高)→+20 相对档——**绝对值被静默丢**，用户要 80% 得到 +20。
+        # 「调高/调低…到」双动词形：亮度与数值间允许 ≤2 字间隙、"到"前缀可选。
+        (re.compile(r"(?:调到|设到|调高到|调低到|提高|降低)?\s*亮度[^\d]{0,2}(\d+)"), "$1"),
+        (re.compile(r"亮度\s*(?:到|至)?\s*(\d+)"), "$1"),
         (re.compile(r"百分之\s*([零一二三四五六七八九十百]+)"), "cn:$1"),
-        (re.compile(r"(?:开到|打开到|调到|设到|设为|关到)\s*(\d+)\s*[%％]?"), "$1"),
+        (re.compile(r"(?:开到|打开到|调到|设到|设为|关到|调高到|调低到)\s*(\d+)\s*[%％]?"), "$1"),
         (re.compile(r"调到\s*(\d+)\s*%?"), "$1"),
+        (re.compile(r"(?:一半|半数)"), "50"),
         (re.compile(r"(亮一点|亮一些|调亮|亮些|大一点|大一些|高一点|高一些|调高)"), "+20"),
         (re.compile(r"(暗一点|暗一些|调暗|暗些|小一点|小一些|低一点|低一些|调低)"), "-20"),
     ],
@@ -134,7 +139,7 @@ _DELTA_SCANNERS: dict[str, list[tuple[re.Pattern, Any]]] = {
         (re.compile(r"(低一点|低一些|凉一点)"), "-1"),
     ],
     "fan_speed": [
-        (re.compile(r"风[量速]?\s*(?:调到|设为|为|成)?\s*(\d+)"), "$1"),
+        (re.compile(r"风[量速]?\s*(?:调到|设为|为|成|到|至)?\s*(\d+)"), "$1"),
         (re.compile(r"(大一点|大一些|大些|加大|调大)"), "+1"),
         (re.compile(r"(小一点|小一些|小些|减小|调小)"), "-1"),
     ],
@@ -153,10 +158,18 @@ _DELTA_SCANNERS: dict[str, list[tuple[re.Pattern, Any]]] = {
 }
 
 # 属性词 → 目标域映射（"卧室亮度调高一点"：亮度=属性不是设备名，转区域级 light 目标）
+# 2026-09-21 扩数值尾巴：「调高亮度到80%」rest=亮度到80% 旧形不认"到80%"，
+# 掉进 parse_target 质量门→miss→fallback（浴霸幻觉被 ⑦ 收紧堵掉后显形）。
+# 属性句的正确形态=属性域目标+delta 走 _apply_context 上下文继承回上一设备。
 _ATTR_ONLY = re.compile(
-    r"^\s*([\u4e00-\u9fff]{1,4}?(?:室|厅|房|间|区|馆|楼))?[的]?((?:亮度|色温|温度|风量|风速|位置|开合度))(?:调)?(?:一点|一些|点|些)?\s*$")
+    r"^\s*([\u4e00-\u9fff]{1,4}?(?:室|厅|房|间|区|馆|楼))?[的]?((?:亮度|色温|温度|风量|风速|位置|开合度))"
+    r"(?:调|整)*(?:高|低|亮|暗|大|小)?(?:到|至|为|成)?\s*(\d{1,3})?\s*[%％]?\s*(?:一半)?\s*(?:一点|一些|点|些)?\s*$")
 _ATTR_DOMAIN = {"亮度": "light", "色温": "light", "温度": "climate",
                 "风量": "climate", "风速": "climate", "位置": "cover", "开合度": "cover"}
+# T1 Adjust 剥数值段后的**句首**调节动词（只收双字形——单字会误剥
+# "空调/拉窗"类设备名头部）。
+_ADJ_HEAD = re.compile(r"^(?:调高|调低|调亮|调暗|调大|调小|调到|调至|调成|调为|"
+                       r"提高|降低|提升|加大|减小|增加|减少)+")
 
 _WINDOW_ACTION_SCAN = [
     (re.compile(r"内倒|内导|内岛"), "a"),
@@ -704,6 +717,13 @@ class FastPath:
         if phrase and phrase == text:
             return await self._scene_plan(phrase, text, trace)
 
+        # 并列宾语「打开A和B」单发禁执行闸（2026-09-21 用户令第③点）：该形态
+        # 由 pipeline._try_compound 链发处理；链拒（某分句不认）回落到这里时，
+        # 绝不允许 T0 把吃到的那一个执行掉并谎报成功——半执行比不执行危险。
+        if T.coord_refuse(text):
+            trace.append("并列宾语:链已拒或含不识分片,单发拒猜")
+            return self._miss(trace)
+
         # 显式全屋命令先于复杂查询守卫裁决（守卫会吞掉"打开所有灯"，见方法注释）
         wh = self._wholehouse_plan(text, trace)
         if wh is not None:
@@ -869,7 +889,10 @@ class FastPath:
                         return self._miss(trace, "Adjust 无可用数值")
                     delta, matched = scanned
                     extra_args["delta"] = delta
-                    rest_text = text.replace(matched, "").strip()
+                    # 剥数值段后再剥**调节动词头**：「调高亮度到80%」scan 吃掉
+                    # "亮度到80" 剩 "调高%"——残渣守卫剥 %/调 后剩"高"非空，
+                    # 旧实现以整块残渣去 parse_target 撞质量门→整句 miss。
+                    rest_text = _ADJ_HEAD.sub("", text.replace(matched, "").strip()).strip()
                 if intent in ("TurnDeviceOn", "TurnDeviceOff") and text and "\u4e00" <= text[0] <= "\u9fff":
                     prefix, suffix = T.extract_prefix(text)
                     if prefix and suffix:
@@ -965,7 +988,10 @@ class FastPath:
         # Adjust + 「区域?+属性词」：目标=该区域属性域，属性词不吃成设备名
         if intent == "AdjustDeviceAttribute" and rest_text and (mm := _ATTR_ONLY.match(rest_text)):
             area, attr_word = mm.group(1) or "", mm.group(2)
-            args = {"attribute": extra.get("attribute", ""), "delta": str(extra.get("delta", ""))}
+            _dl = extra.get("delta", "")
+            if mm.group(3):                       # 句内绝对值兜底（scanner 失手时）
+                _dl = int(mm.group(3))
+            args = {"attribute": extra.get("attribute", ""), "delta": str(_dl)}
             dom = _ATTR_DOMAIN.get(attr_word, "light")
             args["target"] = ([{"area": area}] if area else []) or [{"devices": [{"domains": [dom]}]}]
             if area:
@@ -1089,7 +1115,7 @@ class FastPath:
 
 # 12 窗型 + 泛称「窗户」（与 custom_components/huijian_ai WINDOW_ACTION_MAPPING 对齐，
 # 长词在前防短词截胡）；窗帘/纱窗=标准 cover，不在此表。
-_WINDOW_TYPES = ("内开内倒窗", "外装平开窗", "单内倒窗", "平推窗", "平开窗",
+_WINDOW_TYPES = ("内开内倒窗", "外装平开窗", "单内倒窗", "内倒窗", "平推窗", "平开窗",
                  "推拉窗", "内开窗", "外开窗", "推拉门", "智能窗", "天窗",
                  "飘窗", "窗户",
                  # 2026-09 悬窗族 + 提升窗（用户点名「区域+窗户」机型）。_window_type

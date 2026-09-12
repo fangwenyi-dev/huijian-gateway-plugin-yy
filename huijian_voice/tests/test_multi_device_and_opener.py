@@ -487,3 +487,114 @@ def test_integration_hanging_window_sync_source_pins():
         assert f'"{w}"' in shared, f"{w} 缺 WINDOW_KEYWORDS"
     assert mapping.index('"下悬窗"') < mapping.index('"悬窗"')   # 键序截胡钉
     assert '"机器人"' in shared                                   # 含窗家电排除钉
+
+
+# ── 2026-09-21 用户三连问（上下文回指 / NL→动态实体可靠性 / 并列多窗）──────
+
+def test_context_chain_absolute_brightness():
+    """「打开办公室射灯」→「调高亮度到80%」：绝对值不丢 + 继承上一目标。"""
+    p, ex = _pipe()
+    asyncio.run(p.handle("打开办公室射灯", origin="cc-1"))
+    ex.plans.clear()
+    r = asyncio.run(p.handle("调高亮度到80%", origin="cc-1"))
+    assert r.source != "fallback", r.trace
+    pl = ex.plans[0]
+    assert pl.intent == "AdjustDeviceAttribute"
+    assert pl.args["delta"] == "80"          # 旧缺陷：被 (调高)→+20 吞成相对档
+    d = pl.args["target"][0]["devices"][0]
+    assert d["name"] == "射灯"                # 上下文继承，不是幻觉设备
+
+
+def test_attr_residual_never_hallucinates_device():
+    """⑦拼音幻觉事故形：「亮度到80%」fresh 会话不得凭空配出"浴霸"类目标。"""
+    p, ex = _pipe()
+    r = asyncio.run(p.handle("调高亮度到80%", origin="fresh-iso-zz"))
+    for pl in ex.plans:
+        blob = str(pl.args)
+        assert "浴霸" not in blob and "亮度" not in blob, blob
+
+
+def test_brightness_half_word():
+    p, ex = _pipe()
+    asyncio.run(p.handle("打开办公室射灯", origin="half-1"))
+    ex.plans.clear()
+    asyncio.run(p.handle("亮度调到一半", origin="half-1"))
+    assert ex.plans[0].args["delta"] == "50"
+
+
+def test_coord_parallel_two_windows_chain():
+    """用户令第③点：「打开展厅内倒窗和推拉窗」必须两扇都开（旧=只开一扇谎报）。"""
+    p, ex = _pipe()
+    r = asyncio.run(p.handle("打开展厅内倒窗和推拉窗", origin="cp-1"))
+    assert r.source == "chain", r.source
+    pl = ex.plans[0]
+    steps = [(pl.intent, pl.args)] + [(s["name"], s["args"]) for s in pl.extra_steps]
+    assert len(steps) == 2 and all(i == "ControlWindow" for i, _ in steps)
+    names = [a["target"][0]["devices"][0]["name"] for _, a in steps]
+    assert names == ["内倒窗", "推拉窗"]
+    assert all(a["target"][0]["area"] == "展厅" for _, a in steps)  # 共享区域回填
+
+
+def test_coord_parallel_mixed_domains():
+    p, ex = _pipe()
+    r = asyncio.run(p.handle("打开办公室的空调和射灯", origin="cp-2"))
+    assert r.source == "chain"
+    pl = ex.plans[0]
+    assert pl.intent == "TurnDeviceOn"
+    assert len(pl.extra_steps) == 1
+    assert pl.args["target"][0]["devices"][0]["name"] == "空调"
+    assert pl.extra_steps[0]["args"]["target"][0]["devices"][0]["name"] == "射灯"
+
+
+def test_coord_unknown_piece_honest_refuse():
+    """右片不认识 → 整句拒猜；绝不"吃左片执行+谎报成功"（半执行）。"""
+    p, ex = _pipe()
+    r = asyncio.run(p.handle("打开展厅内倒窗和不存在的xyz东西", origin="cp-3"))
+    assert ex.plans == []
+    assert not r.ok or "不会" in r.text or "听" in r.text
+
+
+@pytest.mark.parametrize("t", ["打开开窗器", "关闭加湿器", "打开展厅的内开窗",
+                               "打开调和模式", "关闭推窗器"])
+def test_coord_negative_no_misfire(t):
+    """含"和"字形/窗族长词不许被并列展开误伤（加湿器含和字、开窗器整词）。"""
+    p, ex = _pipe()
+    r = asyncio.run(p.handle(t, origin="cp-4"))
+    assert r.source != "chain" or t in (), t
+
+
+def test_neidao_window_recognized():
+    """「内倒窗」现场简称五表同步后：打开/关闭形完整识别为 ControlWindow。"""
+    p, ex = _pipe()
+    for t, act in [("打开展厅内倒窗", "open"), ("关闭内倒窗", "close")]:
+        ex.plans.clear()
+        asyncio.run(p.handle(t, origin="nd-1"))
+        pl = ex.plans[0]
+        assert pl.intent == "ControlWindow", (t, pl.intent)
+        assert pl.args["action"] == act
+        assert pl.args["target"][0]["devices"][0]["name"] == "内倒窗"
+
+
+def test_scene_coord_parallel_actions():
+    """场景/自动化同纪律：「就打开内倒窗和推拉窗」→ 两个独立 action。"""
+    p, ex = _pipe()
+    r = asyncio.run(p.handle("当我说有点热，就打开内倒窗和推拉窗", origin="sc-1"))
+    assert r.source == "creation" and ex.plans[0].intent == "HassCreateVoiceScene"
+    acts = ex.plans[0].args["actions"]
+    assert [a["intent"] for a in acts] == ["ControlWindow", "ControlWindow"]
+    assert [a["params"]["target"][0]["devices"][0]["name"] for a in acts] == \
+        ["内倒窗", "推拉窗"]
+
+
+def test_coord_source_pins():
+    """安全形态源头钉：拼音档属性词禁入 + 集成映射长词序。"""
+    tg = (HERE / "core" / "nlu" / "targets.py").read_text(encoding="utf-8")
+    assert "_ATTR_NO_PINYIN" in tg and "coord_refuse" in tg
+    assert "tol = 1 if len(py_dev) <= 5 else 2" in tg   # 短拼音容差收紧钉
+    const = (HERE / "custom_components" / "huijian_ai" /
+             "intent_window_const.py").read_text(encoding="utf-8")
+    mapping = const[const.index("WINDOW_NAME_MAPPING = {"):const.index("WINDOW_ALL_NAMES")]
+    assert mapping.index('"外装平开窗"') < mapping.index('"平开窗"')  # 截胡修复钉
+    assert mapping.index('"内开内倒窗"') < mapping.index('"内倒窗"')
+    assert '"内倒窗"' in (HERE / "custom_components" / "huijian_ai" /
+                          "intent_device_shared.py").read_text(encoding="utf-8")

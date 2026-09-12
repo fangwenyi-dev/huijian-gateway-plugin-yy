@@ -331,6 +331,11 @@ def split_actions(y_text: str) -> list[str]:
     y_text = (y_text or "").strip().strip("。！？!?")
     if len(y_text) < 6:
         return [y_text] if y_text else []
+    # 并列宾语「打开内倒窗和推拉窗」→"打开内倒窗、打开推拉窗"（2026-09-21
+    # 用户令第③点，场景/自动化同纪律：每个设备独立成项，绝不半执行）。
+    cc = T.coord_clauses(y_text)
+    if cc:
+        y_text = "、".join(cc)
     parts = [p.strip(" 。！？!?，,、") for p in _Y_SPLIT.split(y_text)]
     parts = [p for p in parts if p]
     parts = _serial_expand(parts)
