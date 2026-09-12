@@ -144,7 +144,11 @@ def test_window_plan_keeps_area_exhibit_hall():
 def test_window_speech_carries_area():
     """集成窗意图话术钉：设备名形态必须「区域+的+设备」，全屋形态「区域的所有窗户」。"""
     import pathlib
-    src = pathlib.Path("custom_components/huijian_ai/intent_window_control.py").read_text(
+    # 路径按测试文件锚定（v1.0.49 CI 实锤）：裸相对路径 "custom_components/..."
+    # 只在 cwd=huijian_voice/ 时成立，而 CI 从仓库根跑 `pytest huijian_voice/tests`
+    # → FileNotFoundError（本地绿、CI 红）。仓内既有钉子一律用 parents[1] 锚定。
+    root = pathlib.Path(__file__).resolve().parents[1]
+    src = (root / "custom_components/huijian_ai/intent_window_control.py").read_text(
         encoding="utf-8")
     assert 'label = f"{area_name}的{_dev_label}"' in src, "区域话术丢失"
     assert "所有窗户" in src
