@@ -670,9 +670,7 @@ class EsphomeAssistSatellite(
             ),
             "esphome_assist_satellite_pipeline",
         )
-        self._pipeline_task.add_done_callback(
-            lambda _future: self.handle_pipeline_finished()
-        )
+        self._pipeline_task.add_done_callback(self.handle_pipeline_finished)
 
         return port
 
@@ -701,8 +699,19 @@ class EsphomeAssistSatellite(
         else:
             self._stop_pipeline()
 
-    def handle_pipeline_finished(self) -> None:
-        """Handle when pipeline has finished running."""
+    def handle_pipeline_finished(self, task: asyncio.Task | None = None) -> None:
+        """Handle when pipeline has finished running.
+
+        v1.0.49：只允许"当前这一轮"结束时复位状态。本方法是 _pipeline_task 的
+        done-callback，而 barge-in 的时序是"cancel 旧轮 → 250ms 后开新轮"：
+        老任务随后完成时会走到这里，旧实现**无条件**把 _active_pipeline_index
+        归零，而新一轮已在 _handle_pipeline_start_impl 里按唤醒词选好了索引
+        （:653）——归零后新一轮会落到默认管道（唤醒词→管道映射静默失效）。
+        现在用"完成的就是当前任务"作判据，陈旧回调只留一行 debug。
+        """
+        if task is not None and task is not self._pipeline_task:
+            _LOGGER.debug("Stale pipeline task finished; leaving state untouched")
+            return
         self._stop_udp_server()
         self._active_pipeline_index = 0
         _LOGGER.debug("Pipeline finished")
@@ -876,6 +885,16 @@ class EsphomeAssistSatellite(
         _LOGGER.debug("Requested pipeline abort")
         _queue_audio_chunk(self._audio_queue, None)   # 哨兵保入队（满则腾最旧）
         self._stream_end_pending = True               # v1.0.41 审查 S4：同上
+        # v1.0.49：abort 必须同时掐掉 TTS 下行推流。旧实现只 cancel _pipeline_task，
+        # 而 _stream_tts_audio 的循环判据是 `while self._is_running`，只有实体被移除
+        # 才置 False——于是 abort 之后推流照旧按 28.8ms/帧 往设备灌 32ms 音频，
+        # 直到"下一次 start"才在 :606-609 被取消。现场实锤（固件 v2.1.28 留痕）：
+        # 设备 abort 回收后仍收到 20+ 帧下行，只能逐帧
+        # `Discarding %u downlink bytes in state IDLE`。取消后 _stream_tts_audio 的
+        # finally 会补发 TTS_STREAM_END，两端对"这条流结束了"的认知因此一致。
+        if self._tts_streaming_task is not None:
+            self._tts_streaming_task.cancel()
+            self._tts_streaming_task = None
         if self._pipeline_task is not None:
             self._pipeline_task.cancel()
 

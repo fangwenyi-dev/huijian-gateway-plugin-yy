@@ -427,6 +427,14 @@ async def _scene_rename(request):
             await ctx.scenes.refresh(force=True)
         except Exception:
             pass
+    else:
+        # v1.0.49（现场主诉"改名没反应"）：改名是页面链路上**唯一**走集成
+        # REST PUT 的操作（测试/删除走 intent 通道）——集成停在旧版（PUT 视图
+        # 未注册 → 404/405）时用户只会看到一句天书 HTTP 码。翻译成行动指令。
+        err = str((j or {}).get("error") or "") if isinstance(j, dict) else str(j)
+        if re.search(r"40[45]|Not Found|Method Not Allowed", err, re.I):
+            j = {"success": False,
+                 "error": "集成端点缺失：升级 huijian_ai 集成后必须重启 HA 才生效"}
     return _op_response(j)
 
 

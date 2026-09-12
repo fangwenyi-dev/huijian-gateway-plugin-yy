@@ -24,6 +24,7 @@ from typing import Any, Optional
 from . import corrector, targets as T
 from . import creation
 from .music import GENERIC_WORDS as _MUSIC_WORDS
+from .query import looks_local_query
 
 logger = logging.getLogger("huijian.fastpath")
 
@@ -328,6 +329,11 @@ def _is_complex_query(text: str) -> bool:
     t = text.lower()
     if re.search(r"(创建|自动(化|场景)|修改|删除|添加|配对的?)", t):
         return True
+    # v1.0.49（Q2）：本地可答的量纲问句先放行给查询族（"温度多少/电量多少/
+    # 是否有人"）——下面的「多少|几 → 上层」和「是不是|有没有 → 上层」两条
+    # 粗闸会把它们全部截走，无 LLM 现场即哑。未命中查询族自然回落原链。
+    if looks_local_query(t):
+        return False
     if re.search(r"(状态|情况|哪些|列表)", t):
         return True
     if re.search(r"所有.*(?:灯|设备|开关)", t):

@@ -15,6 +15,18 @@ from typing import Optional
 logger = logging.getLogger("huijian.query")
 
 _AREA_SUFFIX = ("室", "厅", "房", "间", "区", "馆", "楼", "卫", "厨")
+
+# v1.0.49（Q2）：本地可答量纲信号词——fast_path 的复杂守卫（多少|几 → 上层）
+# 之前先过这盏灯，否则「办公室温度多少」「平开窗电池电量多少」这类最普通的
+# 读数问句全部在入口被"交上层"截走，无 LLM 用户只剩兜底话术（现场主诉）。
+# 只放"读数据"专有维度词，不放泛疑问词——宁可少放行不可劫持控制/创作句。
+_LOCAL_DIM_RE = re.compile(
+    r"(温度|湿度|照度|亮度|电量|电池|有人|没人|有没有人|是否有人|人在不在|空不空|多少度|几度)")
+
+
+def looks_local_query(text: str) -> bool:
+    """命中本地量纲词 → True（守卫放行给查询族，未命中自然回原链）。"""
+    return bool(_LOCAL_DIM_RE.search(text or ""))
 _DEVICE_WORDS = {
     "灯": ("light",), "筒灯": ("light",), "射灯": ("light",), "灯带": ("light",),
     "吸顶灯": ("light",), "台灯": ("light",),
@@ -61,9 +73,23 @@ class QueryZone:
             ans = await self._count_answer(area, text)
             if ans:
                 return ans
+        # 人感/有无人在场（v1.0.49 Q3：现场「办公室现在是否有人」——人感传感器
+        # 用 occupancy/presence/motion 判定，多颗任一在位即"有人"）
+        if re.search(r"(有人|没人|人在|空不空|有没有人|是否有人)", text):
+            ans = await self._presence_answer(area)
+            if ans:
+                return ans
+        # 设备电池电量（v1.0.49 Q4：「办公室平开窗电池电量多少」——device_class
+        # =battery 传感器，设备提示词按实体名匹配，读数直报）
+        if re.search(r"(电池|电量)", text) and re.search(
+                r"(多少|剩|还有|低|高|满|怎样|如何|状态|不足|正常|查询|查|看看)", text):
+            ans = await self._battery_answer(area, text)
+            if ans:
+                return ans
         # 温度/湿度/照度
         m = re.search(r"(温度|湿度|照度|亮度)", text)
-        if m and re.search(r"(多少|几|怎样|怎么样|如何)", text):
+        if m and (re.search(r"(多少|几|怎样|怎么样|如何)", text)
+                  or re.search(r"(查询|查一查|查一下|查下|查查|看看|看下|报一下|告诉我)", text)):
             kind = {"温度": "temperature", "湿度": "humidity", "照度": "illuminance", "亮度": "illuminance"}[m.group(1)]
             return await self._sensor_answer(area, kind, m.group(1))
         # 「多少度/几度」裸形（fast_path 守卫专门放行给本层，必须接住）
@@ -81,7 +107,7 @@ class QueryZone:
     # 温度查询落兜底（真机日志 2026-09-11）。先剥前缀再抽区域。
     _AREA_PREFIX_NOISE = re.compile(
         r"^(?:现在|此刻|目前|眼下|今天|今晚|昨天|昨晚|刚才|刚刚|此时|请问|麻烦|"
-        r"帮我看看|帮我查(?:一下|下)?|查一下|查看一下|查下|查看|看一下|看下|"
+        r"帮我看看|帮我查(?:一下|下)?|查一下|查看一下|查下|查看|看一下|看下|查询|查一查|报一下|"
         r"告诉我|我想知道|想问下|问一下)+[的]?")
 
     def _find_area(self, text: str) -> Optional[str]:
@@ -172,6 +198,87 @@ class QueryZone:
         if len(on_ents) <= 3:
             return f"{prefix}开着{len(on_ents)}{noun}：" + "、".join(names) + "。"
         return f"{prefix}开着{len(on_ents)}{noun}，比如{'、'.join(names[:2])}。"
+
+    _PRESENCE_ON = {"on", "detected", "true", "home", "occupied"}
+    _PRESENCE_OFF = {"off", "not_detected", "false", "clear", "cleared",
+                     "not_home", "idle", "unoccupied"}
+    _PRESENCE_DCLASSES = ("occupancy", "presence", "motion")
+
+    async def _presence_answer(self, area: Optional[str]) -> Optional[str]:
+        """有人吗：区域 occupancy/presence/motion 传感器聚合。命中链：区域绑定
+        → 名称含区域词（注册表缺失降级，同 _sensor_answer Q2 纪律）→ 全屋唯一。
+        任一在位=有人；拿不到可判定的传感器返回 None 让位上层。"""
+        states = await self.ha.states()
+        have_area_data = bool(getattr(self.ha, "_areas", None)
+                              or getattr(self.ha, "_entity_area", None))
+        cands = []
+        for eid, ent in states.items():
+            domain = eid.split(".")[0]
+            if domain not in ("sensor", "binary_sensor"):
+                continue
+            attrs = ent.get("attributes") or {}
+            if attrs.get("device_class") not in self._PRESENCE_DCLASSES:
+                continue
+            name = attrs.get("friendly_name") or ""
+            ent_area = self.ha._entity_area.get(eid, "") if hasattr(self.ha, "_entity_area") else ""
+            if area and have_area_data and ent_area != area and area not in name:
+                continue
+            if area and not have_area_data and area not in name:
+                continue
+            cands.append(str(ent.get("state", "")).lower())
+        if not cands:
+            return None
+        occ = any(st in self._PRESENCE_ON for st in cands)
+        unknown = all(st not in self._PRESENCE_ON and st not in self._PRESENCE_OFF
+                      for st in cands)
+        if unknown:
+            return None
+        prefix = f"{area}现在" if area else "家里现在"
+        return f"{prefix}{'有人' if occ else '没人'}。"
+
+    async def _battery_answer(self, area: Optional[str], text: str) -> Optional[str]:
+        """电池电量：device_class=battery 传感器。从问句剥骨架词得设备提示词
+        （「办公室平开窗电池电量多少」→「平开窗」），按实体名/区域匹配。"""
+        dev = text or ""
+        for w in ("电池电量", "剩余电量", "电池", "电量", "还剩多少", "还剩", "剩下",
+                  "还有多少", "还有", "是多少", "多少", "现在", "目前", "请问", "帮我",
+                  "我想知道", "查询", "查一查", "查一下", "查下", "查查", "看看", "告诉",
+                  "报一下", "状态", "有没有", "不足", "正常", "吗", "呢", "的", "了",
+                  "？", "?", "。", "现在", "如何", "怎样", "是"):
+            dev = dev.replace(w, "")
+        if area:
+            dev = dev.replace(area, "")
+        dev = dev.strip()[:8]
+        states = await self.ha.states()
+        cands = []
+        for eid, ent in states.items():
+            if not eid.startswith("sensor."):
+                continue
+            attrs = ent.get("attributes") or {}
+            if attrs.get("device_class") != "battery":
+                continue
+            name = attrs.get("friendly_name") or ""
+            ent_area = self.ha._entity_area.get(eid, "") if hasattr(self.ha, "_entity_area") else ""
+            try:
+                val = float(ent.get("state"))
+            except (TypeError, ValueError):
+                continue
+            if dev:
+                if dev in name:
+                    cands.append((name, val, 0))       # 名称含设备词：最强命中
+                elif not name and area and ent_area == area:
+                    cands.append((name, val, 2))
+            elif area and (ent_area == area or area in name):
+                cands.append((name, val, 0))
+        if not cands:
+            return None
+        cands.sort(key=lambda c: c[2])
+        name, val, _ = cands[0]
+        prefix = f"{area}的" if area else ""
+        label = name or (dev or "设备")
+        if len(cands) > 1 and cands[1][2] == cands[0][2]:
+            return f"{prefix}{label}电量还剩 {val:g}%。同区还有 {len(cands) - 1} 台设备有电池读数，想查哪台请说设备名。"
+        return f"{prefix}{label}电量还剩 {val:g}%。"
 
     async def _sensor_answer(self, area: Optional[str], device_class: str, cn: str) -> Optional[str]:
         states = await self.ha.states()   # 此调用顺带触发 registry 懒同步（refresh_states 内）

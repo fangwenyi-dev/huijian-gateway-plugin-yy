@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import secrets
 import struct
+import time
 from functools import partial
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -66,6 +68,10 @@ if TYPE_CHECKING:
 
 
 _LOGGER = logging.getLogger(__name__)
+
+# v1.0.49：卫星实体缺失自愈的限频（重载会掉一次连接，别把抖动放大成重载风暴）
+_SATELLITE_SELFHEAL_COOLDOWN = 600.0
+_SATELLITE_SELFHEAL_DELAY = 5.0
 
 LOG_LEVEL_TO_LOGGER = {
     LogLevel.LOG_LEVEL_NONE: logging.DEBUG,
@@ -183,6 +189,8 @@ class ESPHomeManager:
         self.entry_data = entry.runtime_data
         self._cancel_subscribe_logs: CALLBACK_TYPE | None = None
         self._log_level = LogLevel.LOG_LEVEL_NONE
+        # v1.0.49：卫星实体缺失自愈的限频时戳（见 _async_selfheal_missing_satellite）
+        self._satellite_selfheal_at = 0.0
 
     async def on_stop(self, event: Event) -> None:
         """Cleanup the socket client on HA close."""
@@ -646,6 +654,9 @@ class ESPHomeManager:
             )
             entry_data.loaded_platforms.add(Platform.ASSIST_SATELLITE)
 
+        # v1.0.49：订阅自愈兜底（详见 _async_selfheal_missing_satellite）
+        self._async_selfheal_missing_satellite(device_info, api_version)
+
         if device_info.zwave_proxy_feature_flags:
             entry_data.disconnect_callbacks.add(
                 cli.subscribe_zwave_proxy_request(self._async_zwave_proxy_request)
@@ -681,6 +692,55 @@ class ESPHomeManager:
             self.hass, self.entry_data.device_info, zwave_home_id
         )
 
+    @callback
+    def _async_selfheal_missing_satellite(
+        self, device_info: EsphomeDeviceInfo, api_version: APIVersion
+    ) -> None:
+        """设备宣告了语音助手、但本条目没有存活中的卫星实体 → 限频自愈重载。
+
+        v1.0.49（现场 2026-09-21"语音全哑数分钟"）：设备 `api_client_`（订阅槽）
+        唯一的重新订阅通路是"卫星实体被移除再添加"（aioesphomeapi 不会在重连后
+        自动重发 SubscribeVoiceAssistantRequest）。任何让实体不再重建的路径
+        （卸载后 loaded_platforms 闩锁未复位、实体 add 抛错被 HA 记成
+        "Error adding entity"…）都会把设备永久钉在 "VA not subscribed yet"：
+        唤醒有提示音、却永远等不到会话，设备侧除那行 WARN 外**零日志**，
+        用户只能重启 HA 或设备。
+        这里在**连接已建立**的安全点做一次存在性核对：实体活着时必注册
+        set_wake_words 回调、被移除即摘除——用它当探针（不猜 entity_id、
+        不碰状态机）。确凿缺失才以独立任务限频重载整条目
+        （重载 = 实体重建 = 重发订阅，即官方文档给的恢复手段）。
+        """
+        if self.hass.is_stopping:
+            return
+        try:
+            if not device_info.voice_assistant_feature_flags_compat(api_version):
+                return
+        except Exception:  # noqa: BLE001 —— 兼容包装器版本差异：判不了就不自愈
+            return
+        if self.entry_data.assist_satellite_set_wake_words_callbacks:
+            return
+        now = time.monotonic()
+        if now - self._satellite_selfheal_at < _SATELLITE_SELFHEAL_COOLDOWN:
+            return
+        self._satellite_selfheal_at = now
+        _LOGGER.warning(
+            "%s：设备已宣告语音助手，但本条目没有存活中的 assist_satellite 实体"
+            "（设备侧会永久停在 'VA not subscribed yet'）——%ss 后重载配置条目"
+            "重建实体并重新订阅（限频 %ss）",
+            self.entry.title,
+            int(_SATELLITE_SELFHEAL_DELAY),
+            int(_SATELLITE_SELFHEAL_COOLDOWN),
+        )
+        self.hass.async_create_task(self._async_reload_entry_after_delay())
+
+    async def _async_reload_entry_after_delay(self) -> None:
+        """延迟重载本条目（脱离 ReconnectLogic 的 _connected_lock 再动连接）。"""
+        await asyncio.sleep(_SATELLITE_SELFHEAL_DELAY)
+        if self.hass.is_stopping:
+            return
+        _LOGGER.warning("%s：执行卫星订阅自愈重载", self.entry.title)
+        await self.hass.config_entries.async_reload(self.entry.entry_id)
+
     async def on_disconnect(self, expected_disconnect: bool) -> None:
         """Run disconnect callbacks on API disconnect."""
         entry_data = self.entry_data
@@ -710,11 +770,29 @@ class ESPHomeManager:
             entry_data.async_update_device_state()
 
         if Platform.ASSIST_SATELLITE in self.entry_data.loaded_platforms:
-            await self.hass.config_entries.async_unload_platforms(
-                self.entry, [Platform.ASSIST_SATELLITE]
-            )
-
-            self.entry_data.loaded_platforms.remove(Platform.ASSIST_SATELLITE)
+            # v1.0.49 重订阅闩锁根治（现场 2026-09-21：设备侧反复
+            # "VA not subscribed yet -> bounded wait" 数分钟、而 apiClients 非零）。
+            # 设备 `api_client_`（订阅槽）**唯一**的重新订阅通路是"卫星实体被移除
+            # 再添加"——aioesphomeapi 不会在重连后自动重发
+            # SubscribeVoiceAssistantRequest（全库只在 subscribe_voice_assistant()
+            # 内发一次）。而本方法跑在 aioesphomeapi ReconnectLogic 的 _on_disconnect
+            # **持锁 await 期间**：这里的 await 一旦抛错/被取消，紧随的 remove 就永不
+            # 执行 → 下次连接时 _on_connect 的
+            # `ASSIST_SATELLITE not in loaded_platforms` 门控为假 → 平台永不再
+            # forward → 实体不再重建 → 订阅永不再发 → 设备永久哑火，只能整条目重载
+            # 或重启 HA。故：unload 失败也必须复位闩锁（discard 幂等）。
+            try:
+                await self.hass.config_entries.async_unload_platforms(
+                    self.entry, [Platform.ASSIST_SATELLITE]
+                )
+            except Exception:  # noqa: BLE001 —— 卸载失败不能连带闩锁一起卡死
+                _LOGGER.exception(
+                    "卸载 assist_satellite 平台失败（%s）：仍复位 loaded_platforms "
+                    "闩锁，保证重连后能重建实体并重新订阅",
+                    self.entry.title,
+                )
+            finally:
+                self.entry_data.loaded_platforms.discard(Platform.ASSIST_SATELLITE)
 
     async def on_connect_error(self, err: Exception) -> None:
         """Start reauth flow if appropriate connect error type."""

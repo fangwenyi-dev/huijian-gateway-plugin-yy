@@ -114,7 +114,15 @@ async def _apply_window_position(
             _LOGGER.error("set_cover_position %s failed: %s", cover_entity_id, err)
             bad_msgs.append(f"{dev_name}：{err}")
 
-    label = device_name or window_name or f"{area_name}的所有窗户"
+    # v1.0.49（现场「我说的是展厅」）：带设备名的话术过去只报设备名，区域被吞——
+    # 用户在播报里听不出执行的是哪个房间，误以为 NLU 没识别区域。话术统一
+    # 「区域+设备」，全屋形态保持「区域的所有窗户」。
+    _dev_label = device_name or window_name
+    if _dev_label:
+        label = f"{area_name}的{_dev_label}" if area_name else _dev_label
+    else:
+        label = f"{area_name}的所有窗户" if area_name else "所有窗户"
+
     if ok_names and not bad_msgs:
         return {
             "success": True,
@@ -249,7 +257,7 @@ class ControlWindowIntent(intent.IntentHandler):
                         }
                     return {
                         "success": True,
-                        "message": f"已{ACTION_CHINESE.get(action, action)}所有窗户",
+                        "message": f"已{(area_name + chr(30340)) if area_name else ''}所有窗户{ACTION_CHINESE.get(action, action)}",
                         "buttons": results,
                     }
             return {
@@ -284,7 +292,7 @@ class ControlWindowIntent(intent.IntentHandler):
                         }
                     return {
                         "success": True,
-                        "message": f"已{ACTION_CHINESE.get(action, action)}所有窗户",
+                        "message": f"已{(area_name + chr(30340)) if area_name else ''}所有窗户{ACTION_CHINESE.get(action, action)}",
                         "buttons": results,
                     }
             return {

@@ -3,6 +3,42 @@
 所有版本变更记录在此文件中。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [1.0.49] - 2026-09-21
+
+本地查询族补两维 + 入口守卫放行 + 卫星链路三修（现场 2026-09-21 主诉批次）：
+
+**查询族（无 LLM 也要答得出）**
+
+- **Q1/Q2 入口守卫放行**：fast_path 的「多少|几 → 交上层」粗闸会把最普通的读数问句
+  （「办公室温度多少」「查询办公室温度」「平开窗电池电量多少」）在入口截走，无 LLM
+  用户只剩兜底话术。新增本地可答量纲词表（温度/湿度/照度/亮度/电量/电池/有人…）
+  作为"这题本地答得了"的放行灯，**只放读数据专有维度词、不放泛疑问词**，宁可少放行
+  也不劫持控制/创作句；未命中自然回原链。
+- **Q3 人感维度**：支持「现在办公室是否有人」——按 occupancy/presence/motion
+  判定，同区域多颗传感器任一在位即"有人"。
+- **Q4 电量维度**：支持「XX 电池电量多少」——device_class=battery 实体按名称匹配，
+  读数直报。
+- **Q5 页内改名诊断**：对旧版集成（无 PUT 端点）只回天书 HTTP 码 → 改为可读指引。
+
+**卫星链路（HA 侧，配合固件 v2.1.28 的三档处置）**
+
+- **abort 真停 TTS 下行**：`_abort_pipeline()` 原先只 cancel pipeline 任务，TTS 推流
+  仍按 28.8ms/帧继续灌音频，直到"下一轮 start"才被取消——现场实锤：设备 abort 回收
+  后仍收到 20+ 帧，只能逐帧 `Discarding … downlink bytes in state IDLE`。现在 abort
+  即取消推流（其 finally 补发 TTS_STREAM_END，两端对"这条流结束了"认知一致）。
+- **陈旧回调不再抹掉新一轮的管道选择**：`handle_pipeline_finished` 改为只认"完成的
+  就是当前任务"。barge-in（cancel 旧轮 → 250ms 后开新轮）时，旧任务的 done-callback
+  会把新一轮按唤醒词选好的 pipeline 索引**归零**，静默退回默认管道。
+- **重订阅闩锁根治 + 订阅自愈**：设备侧订阅槽（`api_client_`）唯一的重新订阅通路是
+  "卫星实体被移除再添加"（aioesphomeapi 不会在重连后自动重发 SubscribeVoiceAssistant
+  Request）。`on_disconnect` 的 unload 一旦抛错/被取消，`loaded_platforms` 闩锁永不
+  复位 → 平台此后再不 forward → 实体不再重建 → 设备永久 "VA not subscribed yet"
+  （唤醒有提示音、永远等不到会话，只能重启 HA）。现 unload 放 `try`、闩锁复位放
+  `finally`；另加**连接建立后的存在性核对 + 限频（10 分钟）自愈重载**，把"必须人工
+  重启"变成自愈。
+
+测试：`pytest tests -q` = **768 passed**（新增 tests/test_v1049_query_delete.py）。
+
 ## [1.0.48] - 2026-09-20
 
 音色切换即时生效 + 安全收口批次：
