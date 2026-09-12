@@ -353,6 +353,10 @@ def test_v1052_f2_shape_pins_both_call_sites_destructure():
 # --------------------------------------------------------------------------
 def test_v1052_f3_hacs_floor_matches_runtime_data():
     hacs = Path(__file__).resolve().parents[2] / "yyjicheng" / "hacs.json"
+    # yyjicheng/ 是嵌套独立 git 仓（HACS 商店源），CI/提交树无该副本——
+    # 与本仓"带副本参数化、无副本计缺省"口径一致（同 1.0.52 集成流式那组）。
+    if not hacs.exists():
+        pytest.skip("CI 树无 yyjicheng/ 商店副本；下限钉在商店仓本地跑时生效")
     data = json.loads(hacs.read_text(encoding="utf-8"))
     ver = tuple(int(x) for x in data["homeassistant"].split("."))
     assert ver >= (2024, 8, 0), (
