@@ -23,6 +23,7 @@ from aioesphomeapi import (EncryptionPlaintextAPIError, ExecuteServiceResponse,
                            ZWaveProxyRequestType, parse_log_message)
 from awesomeversion import AwesomeVersion
 from homeassistant.components import bluetooth, tag, zeroconf
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import (ATTR_DEVICE_ID, CONF_MODE,
                                  EVENT_HOMEASSISTANT_CLOSE,
                                  EVENT_LOGGING_CHANGED, Platform)
@@ -72,6 +73,11 @@ _LOGGER = logging.getLogger(__name__)
 # v1.0.49：卫星实体缺失自愈的限频（重载会掉一次连接，别把抖动放大成重载风暴）
 _SATELLITE_SELFHEAL_COOLDOWN = 600.0
 _SATELLITE_SELFHEAL_DELAY = 5.0
+# v1.0.52 修重载风暴：冷却时戳必须**进程级**而非实例级——async_reload 会重建
+# ESPHomeManager，实例属性随旧实例清零，600s 限频在"重载→重连→再重载"回路里
+# 形同虚设（正是本限频注释声明要防的重载风暴）。keyed by entry_id；自愈本就是
+# 罕见路径，进程生命周期内保留即够，无需落盘。
+_SATELLITE_SELFHEAL_LAST: dict[str, float] = {}
 
 LOG_LEVEL_TO_LOGGER = {
     LogLevel.LOG_LEVEL_NONE: logging.DEBUG,
@@ -159,7 +165,8 @@ class ESPHomeManager:
         # setup 失败（现场：Error setting up entry HUIJIAN-0BD0 for huijian_ai，
         # v1.0.49/1.0.50 实发）。钉桩：tests/test_v1051_manager_slots.py 静态校验
         # "类内所有 self.X = 赋值都在 __slots__ 里"，防同类再犯。
-        "_satellite_selfheal_at",
+        # v1.0.52：_satellite_selfheal_at 已删除（改模块级冷却表，见
+        # _SATELLITE_SELFHEAL_LAST），勿再加回——实例级限频跨 reload 无效。
         "cli",
         "device_id",
         "domain_data",
@@ -195,8 +202,8 @@ class ESPHomeManager:
         self.entry_data = entry.runtime_data
         self._cancel_subscribe_logs: CALLBACK_TYPE | None = None
         self._log_level = LogLevel.LOG_LEVEL_NONE
-        # v1.0.49：卫星实体缺失自愈的限频时戳（见 _async_selfheal_missing_satellite）
-        self._satellite_selfheal_at = 0.0
+        # v1.0.52：卫星自愈冷却时戳已上移为模块级 _SATELLITE_SELFHEAL_LAST
+        # （实例级会随 reload 清零 → 限频失效 → 重载风暴），此处不再持有属性。
 
     async def on_stop(self, event: Event) -> None:
         """Cleanup the socket client on HA close."""
@@ -715,6 +722,14 @@ class ESPHomeManager:
         set_wake_words 回调、被移除即摘除——用它当探针（不猜 entity_id、
         不碰状态机）。确凿缺失才以独立任务限频重载整条目
         （重载 = 实体重建 = 重发订阅，即官方文档给的恢复手段）。
+
+        v1.0.52 修两处自伤（上线前实锤，见 tests/test_v1052_satellite_selfheal.py）：
+        ① 探针在 `_on_connect` 里紧跟 `await async_forward_entry_setups` 的**同
+        tick** 执行，而 `async_add_entities` 是 EntityPlatform 的推迟任务、回调
+        注册在实体 `async_added_to_hass` 末尾——首连/重连时探针**必然**看到空列表。
+        故"缺失"不是同 tick 定案，而是 sleep 后**复查仍缺失**才定案。
+        ② 冷却时戳改模块级：reload 重建 manager，实例属性归零会让 600s 限频
+        在重载回路里失效（连接→5s→重载→重连→再重载的自增强风暴）。
         """
         if self.hass.is_stopping:
             return
@@ -726,13 +741,21 @@ class ESPHomeManager:
         if self.entry_data.assist_satellite_set_wake_words_callbacks:
             return
         now = time.monotonic()
-        if now - self._satellite_selfheal_at < _SATELLITE_SELFHEAL_COOLDOWN:
+        entry_id = self.entry.entry_id
+        last = _SATELLITE_SELFHEAL_LAST.get(entry_id, 0.0)
+        if now - last < _SATELLITE_SELFHEAL_COOLDOWN:
+            _LOGGER.info(
+                "%s：卫星实体仍未注册（可能为首连竞态），但距上次自愈仅 %ss"
+                "——限频中，本次不重载",
+                self.entry.title,
+                int(now - last),
+            )
             return
-        self._satellite_selfheal_at = now
+        _SATELLITE_SELFHEAL_LAST[entry_id] = now
         _LOGGER.warning(
             "%s：设备已宣告语音助手，但本条目没有存活中的 assist_satellite 实体"
-            "（设备侧会永久停在 'VA not subscribed yet'）——%ss 后重载配置条目"
-            "重建实体并重新订阅（限频 %ss）",
+            "（设备侧会永久停在 'VA not subscribed yet'）——%ss 后**复查**，"
+            "仍缺失才重载配置条目重建实体并重新订阅（限频 %ss）",
             self.entry.title,
             int(_SATELLITE_SELFHEAL_DELAY),
             int(_SATELLITE_SELFHEAL_COOLDOWN),
@@ -740,12 +763,33 @@ class ESPHomeManager:
         self.hass.async_create_task(self._async_reload_entry_after_delay())
 
     async def _async_reload_entry_after_delay(self) -> None:
-        """延迟重载本条目（脱离 ReconnectLogic 的 _connected_lock 再动连接）。"""
+        """延迟复查并自愈重载本条目（脱离 ReconnectLogic 的 _connected_lock 再动连接）。"""
         await asyncio.sleep(_SATELLITE_SELFHEAL_DELAY)
         if self.hass.is_stopping:
             return
-        _LOGGER.warning("%s：执行卫星订阅自愈重载", self.entry.title)
-        await self.hass.config_entries.async_reload(self.entry.entry_id)
+        # 复查：首连/重连时这只是"实体 add 还没跑完"的正常竞态（5s 足够跑完），
+        # 只有复查**仍**无回调才是真缺失（loaded_platforms 闩锁卡死、实体 add
+        # 抛错等），那时 reload 才对症。不复查直接 reload = 每次连接都掉线一次。
+        if self.entry_data.assist_satellite_set_wake_words_callbacks:
+            _LOGGER.info(
+                "%s：自愈窗口内 assist_satellite 实体已完成注册"
+                "（探针属首连竞态）——取消重载",
+                self.entry.title,
+            )
+            return
+        if self.entry.state is not ConfigEntryState.LOADED:
+            # 已被别的路径在卸载/重载/迁移中，不必叠加操作
+            _LOGGER.info(
+                "%s：条目当前状态 %s，跳过卫星订阅自愈重载",
+                self.entry.title,
+                self.entry.state,
+            )
+            return
+        _LOGGER.warning("%s：复查仍无卫星实体，执行卫星订阅自愈重载", self.entry.title)
+        try:
+            await self.hass.config_entries.async_reload(self.entry.entry_id)
+        except Exception:  # noqa: BLE001 —— 自愈路径不得反杀 ReconnectLogic 任务
+            _LOGGER.exception("%s：卫星订阅自愈重载失败", self.entry.title)
 
     async def on_disconnect(self, expected_disconnect: bool) -> None:
         """Run disconnect callbacks on API disconnect."""

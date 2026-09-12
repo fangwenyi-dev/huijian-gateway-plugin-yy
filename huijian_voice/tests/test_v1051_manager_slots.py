@@ -87,7 +87,34 @@ class TestSlotsCoverSelfAssignments:
             f"{missing}"
         )
 
-    def test_hotfix_marker_present(self, path, class_name):
-        """形态钉：v1.0.51 热修登记项必须在位（防回退时被顺手删掉）。"""
-        slots, _ = _slots_and_self_assignments(path, class_name)
-        assert "_satellite_selfheal_at" in slots
+    def test_selfheal_cooldown_is_process_level(self, path, class_name):
+        """v1.0.52 不变量：卫星自愈的限频必须**进程级**，且自愈路径不得新增实例属性。
+
+        为什么这条比"某个 slot 名在不在"更重要：自愈动作本身就是
+        `async_reload(entry)`，而重载会重建 ESPHomeManager——实例级冷却时戳随旧
+        实例清零，600s 限频在"重载 → 重连 → 再自愈"回路里形同虚设（重载风暴）。
+        v1.0.51 的实例级写法正是踩了这个语义坑（并顺带把整个条目打死）。
+        """
+        import ast as _ast
+
+        src = path.read_text(encoding="utf-8")
+        assert "_SATELLITE_SELFHEAL_LAST" in src, "自愈冷却表丢失（或又退回实例级）"
+        tree = _ast.parse(src)
+        for node in _ast.walk(tree):
+            if isinstance(node, _ast.FunctionDef) and node.name == "_async_selfheal_missing_satellite":
+                assigned = {
+                    t.attr
+                    for sub in _ast.walk(node)
+                    if isinstance(sub, (_ast.Assign, _ast.AnnAssign))
+                    for t in (sub.targets if isinstance(sub, _ast.Assign) else [sub.target])
+                    if isinstance(t, _ast.Attribute)
+                    and isinstance(t.value, _ast.Name)
+                    and t.value.id == "self"
+                }
+                assert not assigned, (
+                    f"自愈路径新增了实例属性 {sorted(assigned)}——实例级状态跨 reload 失效，"
+                    "且新属性必须同步 __slots__（历史事故：整个条目 setup 失败）"
+                )
+                break
+        else:
+            pytest.fail("_async_selfheal_missing_satellite 未找到（自愈能力被删？）")

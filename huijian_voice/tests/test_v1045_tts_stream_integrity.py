@@ -66,7 +66,12 @@ def test_tts_entity_uses_stream_and_deterministic_close():
     src = TTS_ENTITY.read_text(encoding="utf-8")
     assert "transport.stream(message)" in src, "实体未走序列化对话 API"
     assert "await stream.aclose()" in src, "对话生成器未确定性关停（赌 GC=残料泄漏）"
-    assert "await gen.aclose()" in src, "外层转换生成器未确定性关停"
+    # v1.0.52：实体层拆出 _async_pcm_stream()（加载项 PCM 流）与 _convert()
+    # （容器转换流）两份生成器，且新增了流式出口 async_stream_tts_audio——
+    # 三条路都必须显式关停，故逐个钉住（原先是单个 `gen` 变量名）。
+    assert "await pcm.aclose()" in src, "PCM 生成器未确定性关停"
+    assert "await converting.aclose()" in src, "整段路径的转换生成器未确定性关停"
+    assert "await converted.aclose()" in src, "流式路径的转换生成器未确定性关停"
     assert '"state": "detect"' not in src, \
         "detect 发送不得残留在实体层（必须与消费同临界区，见 tts_transport.stream）"
 

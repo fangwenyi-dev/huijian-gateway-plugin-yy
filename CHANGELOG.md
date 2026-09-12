@@ -1,5 +1,81 @@
 # 变更日志
 
+## [1.0.52] - 2026-09-21 TTS 下行真流式（首音不再等整段合成）
+
+现场（2026-09-21 12:54，固件 v2.1.28 新日志逐跳留痕）：说完"关闭办公室平开窗"，
+**31 秒后才有声音**。设备侧原文明细：
+
+```
+12:54:32  Downlink audio start: 1024 bytes     ← 只来了首块
+12:54:47  Set output enable to false           ← 15s 无输出，功放省电关断
+12:55:03  Set output enable to true            ← 音频才继续到
+12:55:04  TTS stream end: downlink 39168 bytes ← 整段仅 1.22s
+```
+
+设备/链路全程健康（`[LINK] apiClients=1 vaSubscribed=1`、`[PWR] bodCnt=0`、无复位），
+**延迟全在 HA/加载项的 TTS 下行链路上**——链路里有三层把"流"攒成了"整段"。
+
+### 一、集成：卫星层改真流式（`assist_satellite.py`）
+
+- **病灶**：`data = b"".join([chunk async for chunk in tts_result.async_stream_result()])`
+  ——整段 WAV 收完才按固定 0.9 倍速发声（逐字抄自上游旧版；上游 HA 2026.8 早已
+  改成 `stream_wav(...)`：边走边解 WAV 头 + 固定 512 样本块 + 按设备环形缓冲水位
+  背压）。上游任何合成延迟被 1:1 放大成设备静音。
+- **改造**：新增自包含增量解析器 `_parse_wav_header()` / `_iter_wav_pcm_chunks()`
+  （任意分块边界都成立、支持 LIST 等额外块、按 `data` 声明长度收尾、末块带
+  `is_last`），`_stream_tts_audio()` 改为**边收边发** + **384ms 水位背压**
+  （对齐上游口径；本板 40 块×32ms≈1.28s，取更保守的水位抗欠载）。
+  不依赖 HA 内部 helper，故老 HA 同样可用。
+- **fail-loud 全保留**：非 WAV 早退、形态不符报错、0 帧告警（流式下在流尾判定）、
+  上游流异常改为留痕收尾（不再变成"Task exception was never retrieved"）。
+
+### 二、集成：实体层走 HA 原生流式出口（`tts.py`）
+
+- **关键事实**：HA 的 `TtsAudioType = tuple[str|None, bytes|None]` **只收 bytes**
+  （`components/tts/const.py`），实体侧唯一流式出口是重写
+  `async_stream_tts_audio → TTSAudioResponse(extension, data_gen)`（父类以
+  "子类是否重写"自动判定）。HA 的 `TTSCache` 会边读 `data_gen` 边把每块
+  `put_nowait` 给消费者——这条流从前就通，是我们以前把整段攒成 bytes 堵住了。
+- **改造**：新增 `async_stream_tts_audio()`（懒惰生成器，边合成边下发），
+  `async_get_tts_audio()` 保留为整段兼容路径（`tts.speak` 服务/老 HA）；
+  公共件拆为 `_resolve_fmt()` / `_async_pcm_stream()` / `_convert()`。
+- **空音频纪律不变**：流式下无法"事后返回 (None, None)"，改为 `peek 首块`
+  为空即抛错——HA 捕获后会 pop 内存缓存条目，等价于 v1.0.25「空结果绝不进缓存」。
+
+### 三、加载项：云档真流式 + 分段超时（`core/tts.py`）
+
+- 云档原为 `raw = await r.read()` 整段读完再重采样/编码 → 改为
+  `content.iter_chunked()` 增量读 + 有状态 polyphase 重采样 + 逐 60ms 帧出 opus
+  （RIFF 头按块增量解析到 `data` 块，载荷即刻成帧；不可解码格式显式报错以触发回落）。
+- `ClientTimeout(total=30, connect=8)` 拆为**可配四段**（`tts.cloud.connect_timeout_s`
+  / `first_byte_timeout_s` / `read_timeout_s` / `total_timeout_s`，默认 8/6/10/120）：
+  停摆端几秒内失败→云→本地回落即时触发；`total` 刻意放宽，慢而持续产出的合成不被误砍。
+
+### 四、逐跳首块遥测（P2，现场一眼定位"首音慢在哪一跳"）
+
+- 加载项：`[TTS] 云首字节 Xms / 首帧 Yms`、`[TTS] 本地首帧 Xms`、
+  模型未就绪时的 `[TTS] 模型未就绪，本轮等待 Xms`；
+- 实体：`[TTS] 首块就绪 Xms：…——流式下发`；
+- 卫星：`[TTS] 首块 Xms 后发出（N 样本，流式）`；与设备侧 `Downlink audio start`
+  相减即得本跳耗时。
+
+### 五、随本批纳入的并行修复
+
+- **卫星自愈限频改为进程级**（`manager.py`）：自愈动作本身是
+  `async_reload(entry)`，会重建 `ESPHomeManager`——实例级冷却时戳随旧实例清零，
+  600s 限频在"重载→重连→再自愈"回路里形同虚设（重载风暴）。改为模块级
+  `_SATELLITE_SELFHEAL_LAST`（keyed by entry_id），并在延迟后**复查**再决定是否重载。
+
+### 校验
+
+- `pytest huijian_voice/tests -q` 在**该提交的干净 worktree**（`git worktree add` 到
+  本 commit）里实测：**803 passed, 1 skipped, 0 failed**（v1.0.51 基线 762 passed
+  ——本批新增 41 钉：集成流式 16、加载项云档流式 25 等）；两种跑法（仓库根 /
+  `huijian_voice`）均绿。校验数字取"提交树"而非"含他人在飞文件的工区"，避免虚报。
+- 新钉含 **A/B 反证**：批式形态（`b"".join`）在"源未喂完"时**不可能**出块，
+  流式形态在源喂完前即出块——证明根因归罪成立、且防回退。
+- 现象学对照：本批后设备侧"首块"只受**首块合成时间**约束，不再受整段合成时间约束。
+
 ## [1.0.51] - 2026-09-21 热修：集成条目无法 setup
 
 - **根因（v1.0.49/1.0.50 实发，现场 12:28:42）**：`ESPHomeManager` 定义了

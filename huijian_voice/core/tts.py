@@ -30,11 +30,22 @@
       model/voices/tokens/data_dir/dict_dir/lexicon/lang))))) → generate(text,sid,speed)
   → float32@24kHz → 重采样 16k → 裸 opus 60ms 帧（协议 §2：帧长 960 样本硬约束）。
 句级流水线：逐句合成边产帧，首包目标 <1s；整流预算 55s（const.TTS_STREAM_BUDGET_S）。
+
+云档流式（v1.0.52，仅本文件）：`_cloud_stream` 曾 `raw = await r.read()` 整包
+读完再拆封/重采样/编码——首包=整段网络时长（平台慢即整段"哑着等"）。现改为
+`iter_chunked` 增量读：RIFF 头按块增量解析到 data 块，载荷即刻进有状态重采样
+（跨块保留滤波历史，块边不丢样），攒满 60ms 即出一个 opus 包。输出仍为
+16k/mono/s16le/60ms 裸 opus，与 `stream_opus` 本地路径逐比特同规格。
+超时同时从单一 `total=30` 拆为 connect/首字节/块间读/total 四段（可配，见
+settings DEFAULTS tts.cloud.*_timeout_s）：停摆的云端点几秒内失败 → 云→本地
+回落照旧即时触发。首字节与首帧两跳延迟全程打日志（[TTS] 云首字节/首帧、
+模型未就绪本轮等待、本地首帧）。
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import threading
 import time
@@ -82,6 +93,19 @@ _CACHE_MAX_BYTES = 4 << 20      # 4MB 硬闸（opus 32kbps×10s≈40KB/句，量
 
 
 _DEFAULT_SID = 18   # 本地定案默认音色 zf_026（云失败回落唯一用嗓，音色归属条款③）
+
+# ── 云档读超时（v1.0.52：整包 total=30 硬超时 → 分段可配）────────────
+# 现场形态：云端点"连上了但不出声"（平台排队/合成卡死/半开连接）时，旧实现
+# 要等满 30s total 才抛 → 云→本地回落白等 30s，用户听到的是长静音后才出声。
+# 拆四段后：连接慢 → connect；服务器不给首字节 → first_byte（几秒）；流中途
+# 静默 → read（sock_read，块间）；整段总闸 total 放宽到 > TTS_STREAM_BUDGET_S
+# （55s）——**慢而持续产出**的合成不得被误砍，只有"停摆"才快速失败。
+_CLOUD_CONNECT_TIMEOUT_S = 8.0      # TCP/TLS 建连
+_CLOUD_FIRST_BYTE_TIMEOUT_S = 6.0   # 响应头 + 首个数据块（停摆端 6s 内失败→快速回落本地）
+_CLOUD_READ_TIMEOUT_S = 10.0        # 块间静默（aiohttp sock_read）
+_CLOUD_TOTAL_TIMEOUT_S = 120.0      # 整流总闸（> const.TTS_STREAM_BUDGET_S）
+_CLOUD_CHUNK_BYTES = 8192           # iter_chunked 块大小
+_RIFF_MAX_HDR_BYTES = 8 << 20       # RIFF 头部缓冲硬闸（防 csz 撒谎导致无界缓冲）
 
 # ── 自定义音色（对模型包布局无感）──────────────────────────────────
 # 契约（与模型手动导入口同哲学）：投递目录 /data/tts_voices/*.bin，每文件
@@ -139,6 +163,288 @@ def merge_custom_voices(official, custom_dir, out, voices_count: int):
         skipped.append(f"合并落盘失败：{e}")
         return official, {}, skipped
     return out, names, skipped
+
+
+# ── 云档流式解码原语（v1.0.52）────────────────────────────────────
+
+def _unsupported_format(data: bytes) -> Optional[str]:
+    """mp3/ogg 等不可解码容器的显式指令文案（None=裸 PCM/可解码）。
+
+    与 `_unwrap_audio` 同一判据同一文案：现场靠这句话知道"去平台改输出格式"，
+    措辞不得改（整包路径与流式路径共用本函数）。"""
+    if data[:3] == b"ID3" or (data[:1] == b"\xff" and len(data) > 1 and data[1] & 0xE0 == 0xE0):
+        return "云 TTS 返回 mp3：请在该平台改输出格式为 pcm 或 wav"
+    if data[:4] == b"OggS":
+        return "云 TTS 返回 ogg/opus：请在该平台改输出格式为 pcm 或 wav"
+    return None
+
+
+async def _next_body_chunk(agen):
+    """取下一块响应体；流尽返回 None。
+
+    不直接在 `asyncio.wait_for(agen.__anext__(), ...)` 上等：StopAsyncIteration
+    穿过 Task 边界的语义在不同 Python 版本上易踩坑，这里收口成 None。"""
+    try:
+        return await agen.__anext__()
+    except StopAsyncIteration:
+        return None
+
+
+class _StreamResampler:
+    """有状态重采样：任意源率 s16le mono → 目标率 s16le（云档跨块流式用）。
+
+    `audio.resample_pcm16` 是**整包**语义：对每个输出点做 [-11,+12] 抽头的
+    Hamming 窗 sinc，越界抽头按零贡献。流式每 8KB 调一次整包实现 = 每个块
+    边界都从"信号起点"重新起算 → 块缝处丢样/断相 → 可闻咔哒。
+
+    这里逐输出点复用**同一公式、同一全局下标空间**：块内只算"抽头已全部到齐"
+    的输出点（base+12 ≤ 已到样本数-1），尾部样本留作下一块的滤波历史；flush()
+    按同式补齐尾段（越界抽头照旧零贡献）。因此拼接结果与一次性整包重采样在
+    容差内一致（同 tap 顺序同累加序，实测逐点等同）。
+    """
+
+    _HALF = 12          # 与 audio.resample_pcm16 的半带抽头数一致
+
+    def __init__(self, src_rate: int, dst_rate: int):
+        self.src_rate = int(src_rate) if int(src_rate or 0) > 0 else const.SAMPLE_RATE
+        self.dst_rate = int(dst_rate) if int(dst_rate or 0) > 0 else const.SAMPLE_RATE
+        self.passthrough = self.src_rate == self.dst_rate
+        self.ratio = self.dst_rate / self.src_rate
+        self.gain = min(1.0, self.ratio)
+        self._buf = np.zeros(0, dtype=np.float32)   # 未消费输入（含滤波历史）
+        self._buf_start = 0     # self._buf[0] 对应的全局样本下标
+        self._n_in = 0          # 已喂入的全局样本数
+        self._n_out = 0         # 已产出的全局输出点数
+        self._carry = b""       # 块边界上的半个样本（s16le 按 2 字节对齐）
+
+    # ── 输入 ────────────────────────────────────────────────────
+    def feed(self, chunk: bytes) -> bytes:
+        """喂一块源域 s16le，返回本次可确定的**已重采样** 16k s16le（可空）。"""
+        if not chunk:
+            return b""
+        if self.passthrough:
+            # 源率=目标率：**逐字节直通**，绝不做 float 往返——整包实现
+            # (audio.resample_pcm16) 在同率时是 `return pcm` 原样返回，
+            # 本路径必须逐比特对齐（±1LSB 都不许有）。
+            self._n_in += len(chunk) // 2
+            self._n_out = self._n_in
+            return chunk
+        if self._carry:
+            chunk = self._carry + chunk
+            self._carry = b""
+        if len(chunk) % 2:                 # 半个样本留到下一块（网络块边界任意）
+            self._carry = chunk[-1:]
+            chunk = chunk[:-1]
+        if not chunk:
+            return b""
+        x = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
+        self._buf = np.concatenate((self._buf, x)) if self._buf.size else x
+        self._n_in += x.size
+        return self._emit(ready_only=True)
+
+    def flush(self) -> bytes:
+        """响应体结束：补齐尾段（越界抽头零贡献，与整包实现同式）。"""
+        if self.passthrough:
+            return b""
+        if self._carry:
+            # 尾半个样本：低字节按原样保留、高字节补零（与 encode_stream 尾字节
+            # 补零同法），不得整样本丢弃。
+            x = np.frombuffer(self._carry[:1] + b"\x00", dtype=np.int16).astype(np.float32) / 32768.0
+            self._carry = b""
+            self._buf = np.concatenate((self._buf, x)) if self._buf.size else x
+            self._n_in += 1
+        return self._emit(ready_only=False)
+
+    # ── 内部 ────────────────────────────────────────────────────
+    def _emit(self, ready_only: bool) -> bytes:
+        total_out = int(math.ceil(self._n_in * self.ratio))
+        if ready_only:
+            # 抽头全在已到样本内的输出点（floor(i/ratio)+HALF ≤ n_in-1）
+            t_max = self._n_in - 1 - self._HALF
+            if t_max < 0:
+                return b""
+            i_hint = int(np.floor((t_max + 1) * self.ratio)) + 1
+            i_hint = min(i_hint, total_out)
+            if i_hint <= self._n_out:
+                return b""
+            i = np.arange(self._n_out, i_hint, dtype=np.float64)
+            base = np.floor(i / self.ratio).astype(np.int64)
+            keep = int(np.count_nonzero(base + self._HALF <= t_max))
+            if keep <= 0:
+                return b""
+            i, base = i[:keep], base[:keep]
+        else:
+            if total_out <= self._n_out:
+                return b""
+            i = np.arange(self._n_out, total_out, dtype=np.float64)
+            base = np.floor(i / self.ratio).astype(np.int64)
+        out = self._polyphase(i, base)
+        self._n_out += i.size
+        self._trim()
+        return audio.f32_to_pcm16(out)
+
+    def _polyphase(self, i: np.ndarray, base: np.ndarray) -> np.ndarray:
+        """与 audio.resample_pcm16 逐式同构（同 tap 序、同累加序）。"""
+        frac = i / self.ratio - base
+        out = np.zeros(i.shape[0], dtype=np.float32)
+        buf_len = self._buf.shape[0]
+        for m in range(-self._HALF + 1, self._HALF + 1):
+            pos = base + m
+            valid = (pos >= 0) & (pos < self._n_in)
+            t = (frac - m) * self.gain
+            with np.errstate(divide="ignore", invalid="ignore"):
+                st = np.pi * t
+                sinc = np.where(
+                    np.abs(t) < 1e-6, 1.0,
+                    np.sin(np.where(valid, st, 0.0))
+                    / np.where(valid & (np.abs(st) > 1e-6), st, 1.0))
+            w = sinc * (0.54 + 0.46 * np.cos(
+                np.pi * np.clip(t / (self._HALF * 2), -1, 1) * 2)) * self.gain
+            if buf_len:
+                vals = self._buf[np.clip(pos - self._buf_start, 0, buf_len - 1)]
+            else:
+                vals = np.zeros(i.shape[0], dtype=np.float32)
+            out += np.where(valid, vals, 0.0) * w
+        return out
+
+    def _trim(self) -> None:
+        """丢弃后续输出点再也用不到的输入（含滤波历史）。"""
+        keep_from = max(0, int(np.floor(self._n_out / self.ratio)) - self._HALF + 1)
+        drop = keep_from - self._buf_start
+        if drop > 0:
+            self._buf = self._buf[drop:]
+            self._buf_start = keep_from
+
+
+class _CloudOpusStream:
+    """云响应体 → 16k/mono/60ms 裸 opus 帧的**增量**解码器。
+
+    状态机：SNIFF（判定裸 PCM/RIFF/mp3-ogg 拒收）→ RIFF_HDR（增量解析块头直到
+    data 块）→ PAYLOAD（有状态重采样 + 攒满 const.FRAME_BYTES 即编码出包）。
+
+    与整包路径（`_unwrap_audio` + `_resample_encode`）同判据同输出规格：
+    · 头部字节永不进音频流水（RIFF 44B/扩展头逐块解析到 data 块为止）；
+    · 一个 opus 编码器实例贯穿整段（逐帧喂满帧 → 与一次性 encode_stream 逐比特一致）；
+    · 尾帧零填充到 60ms（与 encode_stream 尾帧同法）。
+    """
+
+    _SNIFF_BYTES = 12       # RIFF/WAVE 判定所需最短前缀
+
+    def __init__(self, default_rate: int):
+        self._default_rate = int(default_rate or const.SAMPLE_RATE)
+        self._state = "sniff"
+        self._head = bytearray()        # SNIFF 缓冲
+        self._rbuf = bytearray()        # RIFF 未解析头部字节
+        self._rate = 0
+        self._bits = 0
+        self._res = None
+        self._enc = None
+        self._pcm = bytearray()         # 待满帧的 16k s16le
+
+    # ── 输入 ────────────────────────────────────────────────────
+    def feed(self, chunk: bytes) -> list:
+        """喂一块响应体，返回本次可产出的完整 opus 帧（可能为空）。"""
+        if self._state == "sniff":
+            self._head += chunk
+            if len(self._head) < self._SNIFF_BYTES:
+                return []               # 前缀不足：等下一块（首块通常远大于 12B）
+            data = bytes(self._head)
+            self._head = bytearray()
+            self._decide(data)          # RIFF→头 12B 已入 _rbuf；裸 PCM→已起流
+            chunk = data if self._state == "payload" else b""
+        if self._state == "riff_hdr":
+            return self._parse_riff(chunk)   # chunk 可为空（前缀已由 _decide 存下）
+        if self._state == "payload":
+            return self._payload(chunk) if chunk else []
+        return []
+
+    def flush(self) -> list:
+        """响应体结束：补完尾段 + 尾帧（零填充），并做头部完整性收口。"""
+        out = []
+        if self._state == "sniff":
+            data = bytes(self._head)
+            self._head = bytearray()
+            if data:
+                self._decide(data)          # 短响应：仍按同判据处理
+                if self._state == "riff_hdr":
+                    out += self._parse_riff(b"")
+                elif self._state == "payload":
+                    out += self._payload(data)
+        if self._state == "riff_hdr":
+            # 头都没解析到 data 块就收流了（截断/撒谎 csz）→ 与整包路径同文案
+            raise RuntimeError("云 TTS wav 头损坏（缺 fmt/data 块）")
+        if self._state == "payload":
+            # ⚠ 这里只能喂**已重采样**的尾段给攒帧器；若误走 _payload（会再
+            # 过一次 _res.feed）尾段会被二次重采样后整段吞掉（尾帧短 32B 的前科）。
+            out += self._frame_pcm(self._res.flush())
+            tail = bytes(self._pcm)
+            self._pcm = bytearray()
+            if tail:
+                out.extend(self._enc.encode_stream(tail))   # 尾帧零填充（encode_stream 同法）
+        return out
+
+    # ── 内部 ────────────────────────────────────────────────────
+    def _decide(self, data: bytes) -> None:
+        if data[:4] == b"RIFF" and data[8:12] == b"WAVE":
+            # 12B（RIFF/size/WAVE）即容器头，**不进音频流水**；其余留待块头解析
+            self._rbuf = bytearray(data[12:])
+            self._state = "riff_hdr"
+            return
+        why = _unsupported_format(data)
+        if why:
+            raise RuntimeError(why)
+        self._start_payload(self._default_rate)
+
+    def _start_payload(self, rate: int) -> None:
+        self._res = _StreamResampler(rate, const.SAMPLE_RATE)
+        self._enc = audio.OpusPcmEncoder("voip")
+        self._state = "payload"
+
+    def _parse_riff(self, chunk: bytes) -> list:
+        """增量解析 RIFF 块头，只缓冲到 data 块为止；载荷即刻流出。"""
+        import struct
+        self._rbuf += chunk
+        while True:
+            if len(self._rbuf) < 8:
+                return []
+            cid = bytes(self._rbuf[:4])
+            csz = struct.unpack("<I", bytes(self._rbuf[4:8]))[0]
+            if cid == b"data":
+                if not self._rate:
+                    raise RuntimeError("云 TTS wav 头损坏（缺 fmt/data 块）")
+                if self._bits != 16:
+                    raise RuntimeError(f"云 TTS wav 位深 {self._bits} 不支持（仅 16-bit）")
+                payload = bytes(self._rbuf[8:])
+                self._rbuf = bytearray()
+                self._start_payload(self._rate)
+                return self._payload(payload)
+            need = 8 + csz + (csz & 1)          # 块按偶数字节对齐
+            if need > _RIFF_MAX_HDR_BYTES:
+                raise RuntimeError("云 TTS wav 头损坏（缺 fmt/data 块）")
+            if len(self._rbuf) < need:
+                return []                        # 块体不全：等下一块
+            if cid == b"fmt " and csz >= 16:
+                body = self._rbuf[8:24]
+                self._rate = struct.unpack("<I", bytes(body[4:8]))[0]
+                self._bits = struct.unpack("<H", bytes(body[14:16]))[0]
+            del self._rbuf[:need]
+
+    def _payload(self, chunk: bytes) -> list:
+        """喂响应体载荷块（**源域** s16le）：重采样 → 攒满 60ms 即出包。"""
+        return self._frame_pcm(self._res.feed(chunk))
+
+    def _frame_pcm(self, pcm16k: bytes) -> list:
+        """喂**已重采样**的 16k s16le：攒满 const.FRAME_BYTES 即编码出包。"""
+        if not pcm16k:
+            return []
+        self._pcm += pcm16k
+        step = const.FRAME_BYTES
+        out = []
+        while len(self._pcm) >= step:
+            frame = bytes(self._pcm[:step])
+            del self._pcm[:step]
+            out.extend(self._enc.encode_stream(frame))
+        return out
 
 
 class TtsEngine:
@@ -239,6 +545,7 @@ class TtsEngine:
         with self._lock:
             if self._tts is not None:
                 return True
+            t_load = time.perf_counter()          # v1.0.52：一次性加载耗时观测
             key = "tts_kokoro_multilang"
             d = self.store.model_dir_for(key) or (self.store.ensure(key) and self.store.model_dir_for(key))
             if not d:
@@ -311,6 +618,9 @@ class TtsEngine:
                 self.last_used = time.time()
                 logger.warning("[TTS] Kokoro multi-lang 已加载（%d 音色），sid=%s",
                                tts.num_speakers, self.settings.get("tts.sid", 18))
+                # v1.0.52：加载耗时独立成行（现场"首句慢"是加载还是合成，一眼可辨）
+                logger.info("[TTS] Kokoro 引擎就绪，耗时 %dms",
+                            int((time.perf_counter() - t_load) * 1000))
                 return True
             except Exception as e:
                 logger.error("[TTS] 加载失败: %s", e)
@@ -338,6 +648,10 @@ class TtsEngine:
         男声第二句女声"必须由日志一眼可辨，不再靠猜。
         """
         self.last_used = time.time()
+        # v1.0.52：本轮本地首帧观测起点。放在**函数入口**——云档失败回落时，
+        # 这个数=用户真正白等的那段静音（云尝试 + 本地起流），正是要盯的指标。
+        t_turn = time.perf_counter()
+        local_first_ms = None
         prov = str(self.settings.get("tts.provider", "local_kokoro"))
         fell_back = False
         if prov.startswith("cloud"):
@@ -371,11 +685,17 @@ class TtsEngine:
                 self.cache_hits += 1
                 self.last_used = time.time()
                 for pkt in hit[0]:
+                    local_first_ms = self._note_local_first(t_turn, local_first_ms)
                     yield pkt
                 continue
             # 首错 miss 才拉模型：全命中回合在省电档卸载态也能完整播出
             if not load_checked:
-                if not await loop.run_in_executor(None, self.ensure_loaded):
+                # v1.0.52：冷启动/预热门持锁时，本轮到底等了多久必须留痕
+                t_wait = time.perf_counter()
+                ok = await loop.run_in_executor(None, self.ensure_loaded)
+                logger.info("[TTS] 模型未就绪，本轮等待 %dms",
+                            int((time.perf_counter() - t_wait) * 1000))
+                if not ok:
                     return
                 load_checked = True
             pcm16 = await loop.run_in_executor(None, self._synth, sent, sid, speed)
@@ -386,8 +706,17 @@ class TtsEngine:
             if packets:
                 self._cache_put(key, packets)
             for pkt in packets:
+                local_first_ms = self._note_local_first(t_turn, local_first_ms)
                 yield pkt
         self.last_used = time.time()
+
+    @staticmethod
+    def _note_local_first(t_turn: float, shown: Optional[int]) -> Optional[int]:
+        """本地首帧观测：本轮第一个 opus 包距本轮起点的毫秒数（每轮只打一行）。"""
+        if shown is None:
+            shown = int((time.perf_counter() - t_turn) * 1000)
+            logger.info("[TTS] 本地首帧 %dms", shown)
+        return shown
 
     def _cache_put(self, key: tuple, packets: list) -> None:
         if not self.settings.get("tts.cache_enabled", True):
@@ -446,6 +775,30 @@ class TtsEngine:
         return out
 
     # ── 云档（OpenAI 兼容 /audio/speech）────────────────────────
+    @staticmethod
+    def _cloud_timeout(cloud: dict) -> tuple:
+        """把 tts.cloud.* 超时配置编成 (aiohttp.ClientTimeout, 首字节秒数)。
+
+        aiohttp 的 ClientTimeout 只有 total/connect/sock_connect/sock_read 四个
+        字段，**没有独立的"首字节"**；故 connect/块间读/总闸交给它，首字节由
+        调用方用 `asyncio.wait_for` 施加在「响应头 + 首个数据块」上。
+        缺省/空值/脏值一律回内置默认（云档不能因一处配置写坏而失去超时保护）。
+        """
+        import aiohttp
+
+        def _f(key: str, dflt: float) -> float:
+            try:
+                v = float((cloud or {}).get(key))
+            except (TypeError, ValueError):
+                return dflt
+            return v if v > 0 else dflt
+
+        connect = _f("connect_timeout_s", _CLOUD_CONNECT_TIMEOUT_S)
+        first = _f("first_byte_timeout_s", _CLOUD_FIRST_BYTE_TIMEOUT_S)
+        read = _f("read_timeout_s", _CLOUD_READ_TIMEOUT_S)
+        total = _f("total_timeout_s", _CLOUD_TOTAL_TIMEOUT_S)
+        return aiohttp.ClientTimeout(total=total, connect=connect, sock_read=read), first
+
     async def _cloud_stream(self, text: str) -> AsyncIterator[bytes]:
         import aiohttp
         cloud = self.settings.get("tts.cloud") or {}
@@ -467,19 +820,70 @@ class TtsEngine:
         # 平台预设透传：如硅基流动 pcm 默认 44.1kHz，须显式指定才与预期一致
         if sr_req := cloud.get("sample_rate"):
             body["sample_rate"] = int(sr_req)
-        timeout = aiohttp.ClientTimeout(total=30, connect=8)
+        # v1.0.52：分段超时（原本 total=30 一把梭）。speed 仍走请求体，未动。
+        timeout, first_byte_s = self._cloud_timeout(cloud)
+        default_rate = int(cloud.get("sample_rate") or 24000)
+        t0 = time.perf_counter()
         async with aiohttp.ClientSession(timeout=timeout) as sess:
-            async with sess.post(f"{base}/audio/speech", json=body, headers=headers) as r:
+            req = sess.post(f"{base}/audio/speech", json=body, headers=headers)
+            try:
+                # 首字节闸上半段：响应头也不给 = 停摆，几秒内失败 → 云→本地回落
+                r = await asyncio.wait_for(req.__aenter__(), first_byte_s)
+            except asyncio.TimeoutError as e:
+                raise RuntimeError(
+                    f"云 TTS 首字节超时（>{first_byte_s:g}s 无响应，"
+                    "可调 tts.cloud.first_byte_timeout_s）") from e
+            try:
                 if r.status != 200:
                     raise RuntimeError(f"HTTP {r.status}: {(await r.text())[:160]}")
-                raw = await r.read()
-        # 部分 OpenAI 兼容平台无视 response_format 直接回 wav，甚至 mp3——
-        # RIFF 嗅探自动拆封取真实采样率；不可解码格式报明确指令改配置
-        pcm, src_rate = self._unwrap_audio(raw, int(cloud.get("sample_rate") or 24000))
-        # F5：整段重采样+编码为秒级 CPU 活，出事件循环
-        loop = asyncio.get_running_loop()
-        for pkt in await loop.run_in_executor(None, self._resample_encode, pcm, src_rate):
-            yield pkt
+                content = getattr(r, "content", None)
+                if content is None or not hasattr(content, "iter_chunked"):
+                    # 无流式 body 的响应对象（老式适配器/测试桩，非 aiohttp）：
+                    # 退回整包路径，行为与旧版逐字一致（_unwrap_audio + _resample_encode）
+                    raw = await r.read()
+                    pcm, src_rate = self._unwrap_audio(raw, default_rate)
+                    loop = asyncio.get_running_loop()
+                    for pkt in await loop.run_in_executor(
+                            None, self._resample_encode, pcm, src_rate):
+                        yield pkt
+                    return
+                # ── 增量读：每块一到就解码出帧，不等整包 ──────────────
+                dec = _CloudOpusStream(default_rate)
+                agen = content.iter_chunked(_CLOUD_CHUNK_BYTES)
+                ttfb_ms = None
+                first_ms = None
+                while True:
+                    if ttfb_ms is None:
+                        # 首字节闸下半段：连上了但不给第一个数据块
+                        try:
+                            chunk = await asyncio.wait_for(
+                                _next_body_chunk(agen), first_byte_s)
+                        except asyncio.TimeoutError as e:
+                            raise RuntimeError(
+                                f"云 TTS 首字节超时（>{first_byte_s:g}s 无数据，"
+                                "可调 tts.cloud.first_byte_timeout_s）") from e
+                    else:
+                        chunk = await _next_body_chunk(agen)   # 块间静默由 sock_read 兜底
+                    if chunk is None:
+                        break
+                    if ttfb_ms is None:
+                        ttfb_ms = int((time.perf_counter() - t0) * 1000)
+                    for pkt in dec.feed(chunk):
+                        if first_ms is None:
+                            first_ms = int((time.perf_counter() - t0) * 1000)
+                            logger.info("[TTS] 云首字节 %dms / 首帧 %dms", ttfb_ms, first_ms)
+                        yield pkt
+                for pkt in dec.flush():
+                    if first_ms is None:
+                        first_ms = int((time.perf_counter() - t0) * 1000)
+                        logger.info("[TTS] 云首字节 %dms / 首帧 %dms",
+                                    ttfb_ms if ttfb_ms is not None else first_ms, first_ms)
+                    yield pkt
+                if first_ms is None:
+                    logger.warning("[TTS] 云合成无输出（首字节 %sms 后无完整帧）",
+                                   ttfb_ms if ttfb_ms is not None else -1)
+            finally:
+                await req.__aexit__(None, None, None)
 
     @staticmethod
     def _unwrap_audio(raw: bytes, default_rate: int) -> tuple:
@@ -503,10 +907,8 @@ class TtsEngine:
             if bits != 16:
                 raise RuntimeError(f"云 TTS wav 位深 {bits} 不支持（仅 16-bit）")
             return data, sr
-        if raw[:3] == b"ID3" or (raw[:1] == b"\xff" and len(raw) > 1 and raw[1] & 0xE0 == 0xE0):
-            raise RuntimeError("云 TTS 返回 mp3：请在该平台改输出格式为 pcm 或 wav")
-        if raw[:4] == b"OggS":
-            raise RuntimeError("云 TTS 返回 ogg/opus：请在该平台改输出格式为 pcm 或 wav")
+        if why := _unsupported_format(raw):
+            raise RuntimeError(why)
         return raw, default_rate
 
     @staticmethod

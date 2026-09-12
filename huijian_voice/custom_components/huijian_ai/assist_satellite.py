@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import io
 import json
 import logging
 import socket
-import wave
-from collections.abc import AsyncIterable
+from collections.abc import AsyncGenerator, AsyncIterable
 from functools import partial
 from itertools import chain
 from pathlib import Path
@@ -144,6 +142,138 @@ async def async_setup_entry(
         entry_data.api_version
     ):
         async_add_entities([EsphomeAssistSatellite(entry)])
+
+
+# ── v1.0.52：TTS 下行真流式（对齐上游 HA 的 stream_wav 语义，自包含实现）──────
+# 现场（2026-09-21）：设备在 TTS_STREAM_START 之后静音 31 秒才出声。根因是本文件
+# 里的 `data = b"".join([...])` 把整段 WAV 收完才按固定 0.9 倍速发声——上游任何
+# 合成延迟被 1:1 放大成设备静音。上游 HA 2026.8 早已改为 stream_wav(...)：
+# 边走边解 WAV 头、固定 512 样本块、按"设备环形缓冲水位"背压。本实现对齐其语义，
+# 但不依赖 HA 内部 helper（向下兼容老 HA），并把我们自己的 fail-loud（非 WAV 早退 /
+# 形态不符报错 / 0 帧告警）保留在流式路径上。
+#
+# 设备侧水位事实（固件 audio_service.h）：MAX_PLAYBACK_TASKS_IN_QUEUE=40 块 × 32ms
+# ≈ 1.28s，满则丢最旧并计数。沿用上游"目标 75% 水位"口径取 384ms（比设备容量更
+# 保守 → 抗欠载；代价是约 0.4s 预缓冲）。
+_DEVICE_BUFFER_TARGET_S = 0.384
+
+#: WAV 头最大攒量：坏流兜底（超过即判协议异常，绝不无限攒内存）
+_MAX_WAV_HEADER_BYTES = 64 * 1024
+
+
+def _parse_wav_header(buf: bytes | bytearray, expected: tuple[int, int, int]) -> int | None:
+    """解析 WAVE 容器直到 `data` 块，返回载荷起始偏移。
+
+    None = 还需更多字节（调用方继续累积）；形态不符 → ValueError（fail-loud）。
+    任意分块边界都成立——这是"边收边解"的前提。
+    """
+    if len(buf) < 12:
+        return None
+    if bytes(buf[0:4]) != b"RIFF" or bytes(buf[8:12]) != b"WAVE":
+        raise ValueError("不是 RIFF/WAVE 容器")
+    exp_rate, exp_width, exp_channels = expected
+    pos = 12
+    fmt_seen = False
+    while True:
+        if len(buf) < pos + 8:
+            return None
+        chunk_id = bytes(buf[pos:pos + 4])
+        chunk_size = int.from_bytes(buf[pos + 4:pos + 8], "little")
+        body = pos + 8
+        if chunk_id == b"fmt ":
+            if len(buf) < body + 16:
+                return None
+            audio_format = int.from_bytes(buf[body:body + 2], "little")
+            channels = int.from_bytes(buf[body + 2:body + 4], "little")
+            rate = int.from_bytes(buf[body + 4:body + 8], "little")
+            bits = int.from_bytes(buf[body + 14:body + 16], "little")
+            if audio_format not in (1, 0xFFFE):
+                raise ValueError("非 PCM WAV（audio_format=%d）" % audio_format)
+            if (rate, bits // 8, channels) != (exp_rate, exp_width, exp_channels):
+                raise ValueError(
+                    "只支持 %dHz/%dbit/%dch WAV，收到 %dHz/%dbit/%dch"
+                    % (exp_rate, exp_width * 8, exp_channels, rate, bits, channels)
+                )
+            fmt_seen = True
+        elif chunk_id == b"data":
+            if not fmt_seen:
+                raise ValueError("WAVE data 块先于 fmt 块")
+            return body
+        # 跳过本块（块体按偶数字节对齐），必要时等更多字节
+        pos = body + chunk_size + (chunk_size & 1)
+        if len(buf) < pos:
+            return None
+
+
+async def _iter_wav_pcm_chunks(
+    chunks: AsyncIterable[bytes],
+    *,
+    sample_rate: int,
+    sample_width: int,
+    sample_channels: int,
+    samples_per_chunk: int,
+) -> AsyncGenerator[tuple[bytes, bool], None]:
+    """增量解析 WAV 并切块：边收边出 (pcm_chunk, is_last)。
+
+    - 头未就绪前只攒不发；`data` 块出现即开始出块（首音 = 首块时间，与总时长无关）；
+    - `data` 声明长度用尽即收尾（忽略容器的填充/尾部字节），末块带 is_last=True；
+      声明长度不可知（0/0xFFFFFFFF）时按源结束收尾，同样给末块标 is_last；
+      消费端按 is_last 或迭代结束任一条件收尾均可。
+    """
+    block_align = sample_width * sample_channels
+    want = samples_per_chunk * block_align
+    buf = bytearray()
+    payload_ready = False
+    remaining: int | None = None
+    async for piece in chunks:
+        if not piece:
+            continue
+        buf += piece
+        if not payload_ready:
+            offset = _parse_wav_header(buf, (sample_rate, sample_width, sample_channels))
+            if offset is None:
+                if len(buf) > _MAX_WAV_HEADER_BYTES:
+                    raise ValueError("WAV 头异常（%d 字节仍未见到 data 块）" % len(buf))
+                continue
+            declared = int.from_bytes(bytes(buf[offset - 4:offset]), "little")
+            remaining = declared if 0 < declared < 0xFFFFFFFF else None
+            del buf[:offset]
+            payload_ready = True
+        while True:
+            if remaining is None:
+                if len(buf) < want:
+                    break
+                take = want
+            else:
+                if remaining <= 0:
+                    return
+                # data 声明长度是硬上限：尾块只能出声明内的整样本
+                take = min(want, remaining)
+                take -= take % block_align
+                if take <= 0:
+                    # 声明长度不足一个样本（异常容器）→ 视为结束，绝不吐多余字节
+                    return
+                if len(buf) < take:
+                    break
+            chunk = bytes(buf[:take])
+            del buf[:take]
+            if remaining is not None:
+                remaining -= len(chunk)
+                if remaining <= 0:
+                    # 声明长度用尽：末块直接带 is_last（上游同语义），
+                    # 消费端据此省掉最后一次背压等待（最多 0.384s）。
+                    yield chunk, True
+                    return
+            yield chunk, False
+        if remaining is not None and remaining <= 0:
+            return
+    if not payload_ready:
+        raise ValueError("WAV 流在头部完成前结束")
+    # 收尾尾巴同样受 data 声明长度约束（容器可能带填充字节）
+    tail = len(buf) if remaining is None else min(len(buf), remaining)
+    tail -= tail % block_align
+    if tail:
+        yield bytes(buf[:tail]), True
 
 
 class EsphomeAssistSatellite(
@@ -786,10 +916,20 @@ class EsphomeAssistSatellite(
         sample_channels: int = 1,
         samples_per_chunk: int = 512,
     ) -> None:
-        """Stream TTS audio chunks to device via API or UDP."""
+        """Stream TTS audio chunks to device via API or UDP.
+
+        v1.0.52：**真流式**——边收边发（旧实现 `b"".join(...)` 会等整段合成完，
+        把上游延迟 1:1 放大成设备静音，见本文件顶部 _DEVICE_BUFFER_TARGET_S 注释）。
+        背压口径对齐上游：保持设备环形缓冲约 75% 水位（384ms）。
+        fail-loud 原样保留：非 WAV 早退 / 形态不符报错 / 0 帧告警。
+        """
         self.cli.send_voice_assistant_event(
             VoiceAssistantEventType.VOICE_ASSISTANT_TTS_STREAM_START, {}
         )
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        frames_sent = 0
+        first_chunk_ms: int | None = None
 
         try:
             if not self._is_running:
@@ -801,32 +941,16 @@ class EsphomeAssistSatellite(
                 )
                 return
 
-            data = b"".join([chunk async for chunk in tts_result.async_stream_result()])
-
-            with io.BytesIO(data) as wav_io, wave.open(wav_io, "rb") as wav_file:
-                if (
-                    (wav_file.getframerate() != sample_rate)
-                    or (wav_file.getsampwidth() != sample_width)
-                    or (wav_file.getnchannels() != sample_channels)
+            audio_duration_sent = 0.0
+            try:
+                async for chunk, is_last in _iter_wav_pcm_chunks(
+                    tts_result.async_stream_result(),
+                    sample_rate=sample_rate,
+                    sample_width=sample_width,
+                    sample_channels=sample_channels,
+                    samples_per_chunk=samples_per_chunk,
                 ):
-                    _LOGGER.error("Can only stream 16Khz 16-bit mono WAV")
-                    return
-
-                frames = wav_file.getnframes()
-                if frames <= 0:
-                    # v1.0.25 fail-loud：0 帧 WAV 会让设备端「起流即收流」——
-                    # 灯照常执行、播报全哑，此前这里只有 debug 行，排查无从下手。
-                    _LOGGER.warning(
-                        "[TTS] 音频 0 帧（%d 字节 WAV），设备将静音", len(data)
-                    )
-                else:
-                    _LOGGER.info(
-                        "[TTS] 推流 %d 帧 %.2fs", frames, frames / sample_rate
-                    )
-
-                while self._is_running:
-                    chunk = wav_file.readframes(samples_per_chunk)
-                    if not chunk:
+                    if not self._is_running:
                         break
 
                     if self._udp_server is not None:
@@ -834,13 +958,49 @@ class EsphomeAssistSatellite(
                     else:
                         self.cli.send_voice_assistant_audio(chunk)
 
-                    # Wait for 90% of the duration of the audio that was
-                    # sent for it to be played.  This will overrun the
-                    # device's buffer for very long audio, so using a media
-                    # player is preferred.
                     samples_in_chunk = len(chunk) // (sample_width * sample_channels)
-                    seconds_in_chunk = samples_in_chunk / sample_rate
-                    await asyncio.sleep(seconds_in_chunk * 0.9)
+                    frames_sent += samples_in_chunk
+                    if first_chunk_ms is None:
+                        first_chunk_ms = int((loop.time() - started) * 1000)
+                        # 逐跳首块遥测：这一行的时间 = 上游合成/转换的首块延迟；
+                        # 与设备侧 `Downlink audio start` 相减即得本跳（HA→设备）耗时。
+                        _LOGGER.info(
+                            "[TTS] 首块 %dms 后发出（%d 样本，流式）",
+                            first_chunk_ms,
+                            samples_in_chunk,
+                        )
+
+                    audio_duration_sent += samples_in_chunk / sample_rate
+                    if is_last:
+                        break
+
+                    # 背压：把"已发音频时长 − 已用墙钟"压到水位以内（上游同口径）
+                    elapsed = loop.time() - started
+                    if (wait_time := (audio_duration_sent - _DEVICE_BUFFER_TARGET_S) - elapsed) > 0:
+                        await asyncio.sleep(wait_time)
+            except ValueError as err:
+                # fail-loud：非 WAV / 形态不符 / 头不完整 → 当场点名（旧实现是 error 行）
+                _LOGGER.error("[TTS] WAV 流不可播：%s", err)
+                return
+            except Exception as err:  # noqa: BLE001 —— 上游流异常也要留痕并收尾
+                # 加载项断连 / opus 解码失败 / 转换器异常等：这里必须吞掉并留痕，
+                # 否则异常会穿出后台任务变成 "Task exception was never retrieved"，
+                # 现场既看不到归因、收尾事件也依赖 finally（本处仍会走到 finally）。
+                # CancelledError 继承 BaseException，不受本分支影响。
+                _LOGGER.error("[TTS] 下行流异常：%s", err)
+                return
+
+            if frames_sent <= 0:
+                # v1.0.25 fail-loud 的流式等价物：0 帧会让设备「起流即收流」——
+                # 灯照常执行、播报全哑。流式下只能在流尾判定，故在此点名。
+                _LOGGER.warning("[TTS] 音频 0 帧（流结束仍无音频），设备将静音")
+            else:
+                _LOGGER.info(
+                    "[TTS] 推流 %d 帧 %.2fs（流式，首块 %sms）",
+                    frames_sent,
+                    frames_sent / sample_rate,
+                    first_chunk_ms if first_chunk_ms is not None else -1,
+                )
         except asyncio.CancelledError:
             return  # Don't trigger state change
         finally:
@@ -899,7 +1059,13 @@ class EsphomeAssistSatellite(
             self._pipeline_task.cancel()
 
     async def _start_udp_server(self) -> int:
-        """Start a UDP server on a random free port."""
+        """Start a UDP server on a random free port.
+
+        v1.0.52：先无条件停旧实例（幂等）。barge-in 的 stale done-callback 会
+        提前 return 跳过 handle_pipeline_finished 里的 _stop_udp_server()，
+        下一轮 start 若直接覆盖 self._udp_server 就泄漏一个绑死 socket。
+        """
+        self._stop_udp_server()
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setblocking(False)
         sock.bind(("", 0))  # random free port
