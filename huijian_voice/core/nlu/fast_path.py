@@ -36,8 +36,10 @@ _ACTION_PATTERNS: list[tuple[re.Pattern, str, Any]] = [
     # 关窗户/打开窗帘/关窗帘/关闭窗帘 七个常见说法全部 None，而 T1 明明判对）。
     # 另加 `(?!帘)`：窗帘是 cover 设备，不能被窗户动作吃掉前缀（否则"打开窗帘"残留
     # "帘"、且语义也从"开窗帘"错成"开窗"）；命中不了即落到下方通用 `^(打开|…)`。
-    (re.compile(r"^(打开窗户|开窗户|打开窗(?!帘)|开窗(?!帘)|窗户打开)"), "ControlWindow", "open"),
-    (re.compile(r"^(关闭窗户|关窗户|关闭窗(?!帘)|关窗(?!帘)|窗户关闭)"), "ControlWindow", "close"),
+    # 2026-09 开窗器护栏：`开窗(?!帘)` 会把「开窗器关闭」的 开窗 咬成动词、
+    # 残出「器关闭」，(?!帘|器) 让整词进 ② 前缀剥离/窗族纠正车道。
+    (re.compile(r"^(打开窗户|开窗户|打开窗(?!帘)|开窗(?!帘|器)|窗户打开)"), "ControlWindow", "open"),
+    (re.compile(r"^(关闭窗户|关窗户|关闭窗(?!帘)|关窗(?!帘|器)|窗户关闭)"), "ControlWindow", "close"),
     (re.compile(r"^(内倒|内导|内岛|内到|内道|内达|内打|内大|内藻)"), "ControlWindow", "A"),
     # 音乐带（2026-09-12）：后接音乐补语（播放/音乐/歌）时让位——"停止播放"
     # 是播控令不是窗帘暂停；裸"暂停/停"与"暂停窗帘"仍走窗户语义。
@@ -84,7 +86,9 @@ _ACTION_PATTERNS: list[tuple[re.Pattern, str, Any]] = [
     # 必须排在通用「开」前，否则 "开锁" 被 TurnDeviceOn(name=锁) 吃掉（语义还反了）。
     (re.compile(r"^(解锁|开锁|解开锁|打开锁)"), "HassUnlock", None),
     (re.compile(r"^(上锁|锁上|落锁)"), "HassLock", None),
-    (re.compile(r"^(打开|开启|开一下|开了|开)"), "TurnDeviceOn", None),
+    # 裸 开 加器字护栏：「开窗器/开合器」句首时不得从中间下刀（残「窗器…」），
+    # 让位给 ② 设备前缀剥离（开窗器∈KNOWN_DEVICES_PREFIX 后整词回捞）。
+    (re.compile(r"^(打开|开启|开一下|开了|开(?!窗器|合器))"), "TurnDeviceOn", None),
     (re.compile(r"^(关闭|关掉|关了|关一下|关)"), "TurnDeviceOff", None),
     (re.compile(r"^(open (?:the )?window)(?:\s+|$)", re.I), "ControlWindow", "open"),
     (re.compile(r"^(close (?:the )?window)(?:\s+|$)", re.I), "ControlWindow", "close"),
@@ -345,6 +349,12 @@ _PRON_ACT_TAIL = re.compile(
     r"(?:了吧|了|吧|呢|的|呀)*$")
 # 残句里的复合连接词残留（split_compound 未切/链被否时防单发错配）
 _COMPOUND_RESIDUE = re.compile(r"然后|接着|之后|顺便|并且|同时|再帮我")
+# 2026-09 多设备护栏（与 creation.split_actions 段数上限配套）：目标段里仍带
+# 「、/，+动作动词」= 多段连排句没被链发接住（超上限退化成整段）。旧实测：
+# 六段场景句退回单发被错配成「打开办公室平开窗」单动作、静默建出半截场景。
+# 只认分隔符后的强动词形态（不带裸 开/关），防"打开空调，26度"这类正常补语误伤。
+_SERIAL_RESIDUE = re.compile(
+    r"[、，,]\s*[^、，,]{0,14}?(?:打开|开启|关闭|关掉|关上|关了|开了|调|设|拉|锁)")
 
 
 def _extract_text(raw: Any) -> str:
@@ -945,6 +955,10 @@ class FastPath:
         if rest_text and _COMPOUND_RESIDUE.search(rest_text):
             trace.append("复合残余→拒猜目标")
             return None
+        # 连排残段（超限/链被否退回单发）：目标段仍带「、/，+动词」→ 绝不单执行
+        if rest_text and _SERIAL_RESIDUE.search(rest_text):
+            trace.append("分句残余→拒猜目标(交链发/上层)")
+            return None
         residue = re.sub(r"[调一些点把将了%％到亮暗度色温风量速为成设]", "", rest_text)
         if not residue.strip():
             rest_text = ""
@@ -986,6 +1000,31 @@ class FastPath:
                 intent = "ControlWindow"
                 extra = {**extra, "action": extra.get("action") or
                          ("open" if _was_on else "close")}
+            else:
+                # 2026-09 开窗器名称纠正（用户令优化第①项）：「关闭开窗器」
+                # 曾被 parse_target 剥成 name="窗" 残渣 + TurnDeviceOff 错意图
+                # ——集成按开关域找"窗"必败或错设备。开窗器/开合器=窗控设备词
+                # → ControlWindow 按压语义；整名保留编号限定（「3号开窗器」），
+                # 区域前缀已析出则从整名中剔除。集成端 extract_window_name 认
+                # 窗族词 + find_window_buttons 设备注册表按 original_name 寻径。
+                # 「窗帘开合器」= 开合帘设备（cover），上下文带帘族词一律不进
+                # ControlWindow——帘字必须看整段（rest+name），只看剥出的
+                # name 会把「开合器」单独摘出来误判成窗。
+                op = (None if any(w in f"{rest_text}{name}"
+                                  for w in ("帘", "纱窗", "百叶"))
+                      else _opener_word(name) or _opener_word(rest_text))
+                if op:
+                    full = T.clean_name(T.normalize_name(
+                        T.strip_modal(str(rest_text or ""))))
+                    if area and str(area) in full:
+                        full = full.replace(str(area), "", 1).strip(" 的地里得")
+                    if not _opener_word(full) or len(full) > 12:
+                        full = op
+                    name = full
+                    trace.append(f"开窗器纠正:{name}→ControlWindow")
+                    intent = "ControlWindow"
+                    extra = {**extra, "action": extra.get("action") or
+                             ("open" if _was_on else "close")}
         if name is None:
             # 全局类："开灯/关灯"（rest 为空但设备词在原文里）
             if intent in ("TurnDeviceOn", "TurnDeviceOff") and rest_text.strip():
@@ -1052,7 +1091,11 @@ class FastPath:
 # 长词在前防短词截胡）；窗帘/纱窗=标准 cover，不在此表。
 _WINDOW_TYPES = ("内开内倒窗", "外装平开窗", "单内倒窗", "平推窗", "平开窗",
                  "推拉窗", "内开窗", "外开窗", "推拉门", "智能窗", "天窗",
-                 "飘窗", "窗户")
+                 "飘窗", "窗户",
+                 # 2026-09 悬窗族 + 提升窗（用户点名「区域+窗户」机型）。_window_type
+                 # 是**先命中先返回**的子串扫描，下悬窗/上悬窗/提升窗（含悬窗/升窗
+                 # 形态）必须排在裸 悬窗 前，否则 "关闭下悬窗" 会被短词 悬窗 截胡。
+                 "下悬窗", "上悬窗", "提升窗", "悬窗")
 
 
 _AC_KEYWORDS = ("空调", "空調", "aircondition")
@@ -1101,6 +1144,22 @@ def _window_type(name: str) -> Optional[str]:
     n = str(name or "")
     for w in _WINDOW_TYPES:
         if w in n:
+            return w
+    return None
+
+
+# 开窗器/开合器/推窗器：窗控机型的设备词（与 12 窗型同族，button 按压体系），
+# 不是窗型细分——单独成表，免得污染 _WINDOW_TYPES↔KNOWN_DEVICES_PREFIX↔集成
+# valid names 的三方一致性守卫钉。帘族一律排除。
+_WINDOW_OPENER_WORDS = ("开窗器", "开合器", "推窗器")
+
+
+def _opener_word(text: str) -> Optional[str]:
+    t = str(text or "")
+    if any(w in t for w in ("帘", "纱窗", "百叶")):
+        return None
+    for w in _WINDOW_OPENER_WORDS:
+        if w in t:
             return w
     return None
 

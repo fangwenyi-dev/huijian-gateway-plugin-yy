@@ -19,6 +19,13 @@ WINDOW_NAME_MAPPING = {
     "单内倒窗": "单内倒窗",
     "外装平开窗": "外装平开窗",
     "智能窗": "智能窗",
+    # 2026-09 悬窗族/提升窗（用户点名：开窗器机型按「区域+窗名」命名）：
+    # extract_window_name 是**键序先命中先返回**的子串扫描，下悬窗/上悬窗
+    # 必须排在 悬窗 前、悬窗必须排在泛称 窗 前，否则被短词截胡。
+    "下悬窗": "下悬窗",
+    "上悬窗": "上悬窗",
+    "提升窗": "提升窗",
+    "悬窗": "悬窗",
     "窗户": "窗户",
     "窗": "窗户",
 }
@@ -92,13 +99,44 @@ def normalize_chinese_numbers(text: str) -> str:
     return _CN_NUM_PATTERN.sub(lambda m: _parse_chinese_number(m.group(0)), text)
 
 
+# 「全窗」泛称单一事实源：这些名字（或空名）表达"这个区域所有窗户"，允许升级
+# 到全窗；而**具体的、但没匹配上窗型的名字**（如旧版"内开窗"、ASR 丢字"内开"）
+# 绝不算泛称——否则 extract 返回 None 会被误当泛称开全窗（用户 2026-09 事故：
+# 一句"打开内开窗"连带开了推拉窗）。extract_window_name 与 is_generic_window_name
+# 共用此表，二者对"泛称"的判定必须一致。
+GENERIC_WINDOW_NAMES = ["所有窗户", "所有窗", "全部窗户", "全部窗",
+                        "每个窗户", "每扇窗户", "全部窗子", "所有窗子"]
+_BARE_WINDOW_NAMES = ("窗户", "窗", "窗子")
+
+
+def is_bare_window_name(name: str | None) -> bool:
+    """裸窗字名（窗户/窗/窗子）——「本区域所有窗户」的话术形态。
+    与 is_generic_window_name 的区别：显式全窗泛称（所有窗户…）在
+    extract_window_name 就被拦成 None 走泛称分支；裸窗字名会被 extract
+    归一成 "窗户"，只能在 handler 里按本判定识别（旧条件
+    device_name==window_name 漏掉"窗"，2026-09-21 复盘补）。"""
+    return (name or "").strip().lower() in _BARE_WINDOW_NAMES
+
+
+def is_generic_window_name(name: str | None) -> bool:
+    """是否应作为『区域内全窗』处理（真空/裸窗字/显式全窗泛称）。
+
+    仅当返回 True 时才允许把命令升级成"开/关本区域所有窗户"。具体窗型名
+    （哪怕 extract 失败返回 None）返回 False，调用方据此如实失败而非误伤。"""
+    n = (name or "").strip().lower()
+    if not n:
+        return True                      # 只有区域没有窗型（"打开办公室的窗"）
+    if n in _BARE_WINDOW_NAMES:
+        return True                      # 裸"窗户/窗"
+    return any(gn in n for gn in GENERIC_WINDOW_NAMES)
+
+
 def extract_window_name(name: str) -> str | None:
     if not name:
         return None
     name_lower = name.lower()
     # 通用名称（"所有窗户"、"全部窗"等）不匹配具体窗户类型，返回None触发全窗查找
-    generic_names = ["所有窗户", "所有窗", "全部窗户", "全部窗", "每个窗户", "每扇窗户"]
-    if any(gn in name_lower for gn in generic_names):
+    if any(gn in name_lower for gn in GENERIC_WINDOW_NAMES):
         _LOGGER.info("Detected generic window name '%s', will use fallback mode", name)
         return None
     # Check both keys AND values of WINDOW_NAME_MAPPING.
@@ -106,6 +144,12 @@ def extract_window_name(name: str) -> str | None:
     for key, value in WINDOW_NAME_MAPPING.items():
         if key.lower() in name_lower or value.lower() in name_lower:
             return value
+    # 2026-09 开窗器名称洞配套：「开合器」整名不含"窗"字，键值循环够不到——
+    # 作为窗控设备泛称兜底归"窗户"（开窗器/推窗器含"窗"，循环已命中）。
+    # 刻意不进 WINDOW_NAME_MAPPING 本体：加键即进 WINDOW_ALL_NAMES，
+    # _build_conflict_names 会把含"窗"的更长词当冲突名，反而误杀窗设备匹配。
+    if "开合器" in name_lower:
+        return "窗户"
     return None
 
 

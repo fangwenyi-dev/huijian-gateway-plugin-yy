@@ -39,9 +39,14 @@ _META_PREFIX = re.compile(
     r"(?:语音)?(?:场景|自动化|智能场景|智能)?\s*[，,、:：的]?\s*")
 
 # ① 语音场景：当我说X（的时候）就/帮我Y
+# 2026-09 「当我说我要通风，就…」击穿钉：懒惰 X + 自由连接词会在最短处腰斩
+# （trigger="我"，「要」被当连接词）。裁决改**贪婪 X=最右连接词**：X 本身禁止
+# 逗号，逗号后必接连接词即定界；无逗号句「吃饭的时候把餐厅灯打开」取最右的
+# 把/就/…，X 尾残留连接词由 _TRAIL_CONJ 清扫（trigger 存干净短语）。
 _SCENE_RE = re.compile(
-    r"^当我说(?P<x>[^，,。;；]{1,12}?)(?:的)?(?:时候|时|后)?"
+    r"^当我说(?P<x>[^，,。;；]{1,12})(?:的)?(?:时候|时|后)?"
     r"[，,、\s]*(?:就|帮我|请|要|给|把)(?P<y>.+)$")
+_TRAIL_CONJ = re.compile(r"[，,、\s]*(?:就|帮我|请|要|给|把|那么|于是)+$")
 
 # ①b 无连接词变体：ASR 常吞"就"（"当我说晚安关卧室灯"）——Y 必须以动作字
 # 开头才认，防"当我说晚安的时候"这类半句被吞成场景。
@@ -271,9 +276,12 @@ def _hour_minute(h_raw: str, am: str, m_raw: str) -> Optional[str]:
 # 动词连排切分（v1.0.34 真机句式「…就帮我同时打开办公室的空调关闭办公室的
 # 平台窗」——两动作间零标点）。只在**多字动词/客套词**前下刀：单字
 # 开/关/调 可能落在「办公室/空调」等名词里，绝不作切点。
+# 2026-09 过切修（多设备上限定格 3→8 时暴露的既有隐患）：「暂停播放器」里的
+# 播放 是名词「播放器」的头，不是第二个动作——切点加 (?!器) 护栏，段保持
+# 「暂停播放器」整体（暂停=动作、播放器=目标），链发不再腰斩。
 _SERIAL_CUT = re.compile(
     r"(?=帮我把|帮我|麻烦你|麻烦|请你|请|顺便|把|将|打开|关闭|关掉|关上|开启|"
-    r"开一下|调到|调成|调节|调整|设为|设成|设定|设置|播放|停止|暂停|锁上|解锁|"
+    r"开一下|调到|调成|调节|调整|设为|设成|设定|设置|播放(?!器)|停止|暂停|锁上|解锁|"
     r"拉上|拉下|全开|全关)")
 _SERIAL_LEAD = re.compile(
     r"^(?:同时|另外|并且|而且|然后|接着|之后|一并|再|就)+")
@@ -314,8 +322,12 @@ def _serial_expand(parts: list[str]) -> list[str]:
 
 
 def split_actions(y_text: str) -> list[str]:
-    """动作子句切分（2~3 段封顶；任何子句 <2 字判非复合）。
-    标点分句与无标点动词连排都支持。"""
+    """动作子句切分（2~8 段封顶；任何子句 <2 字判非复合）。
+    标点分句与无标点动词连排都支持。上限 3→8（2026-09 用户令第③项）：
+    「当我说我有点热，就打开空调、关闭平开窗、关闭窗帘、关闭新风…」
+    场景/自动化要能装多设备动作；链发全有全无纪律不变——任一段听不懂
+    仍整句回退，不会静默丢动作。超限溢出由 fast_path._SERIAL_RESIDUE 守卫
+    兜住（宁可如实拒收，绝不把多段句当单段半执行）。"""
     y_text = (y_text or "").strip().strip("。！？!?")
     if len(y_text) < 6:
         return [y_text] if y_text else []
@@ -324,8 +336,8 @@ def split_actions(y_text: str) -> list[str]:
     parts = _serial_expand(parts)
     if len(parts) < 2:
         return [y_text]
-    if len(parts) > 3 or any(len(p) < 2 for p in parts):
-        return [y_text]        # 切形可疑：整句单发，交级联判定
+    if len(parts) > 8 or any(len(p) < 2 for p in parts):
+        return [y_text]        # 切形可疑：整句单发，交级联判定（残渣守卫兜底）
     return parts
 
 
@@ -431,7 +443,10 @@ def parse(text: str) -> Optional[dict[str, Any]]:
 
     m = _SCENE_RE.match(t)
     if m:
-        x = m.group("x").strip().rstrip("的")
+        # 贪婪 X 可能把尾连接词/时间尾缀圈进来（"打开空调的时候就|帮我|同时…"、
+        # "吃饭|的时候|把灯打开"）——先清连接词再剥 的时候/时/后，对齐旧组语义。
+        x = _TRAIL_CONJ.sub("", m.group("x").strip())
+        x = re.sub(r"(?:的)?(?:时候|时|后)$", "", x).strip().rstrip("的")
         y = _clean_y(m.group("y"))
         if len(x) >= 1 and len(y) >= 2:
             return {"kind": "scene", "trigger_phrase": x, "y": y}

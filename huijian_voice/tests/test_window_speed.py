@@ -171,9 +171,10 @@ def test_slot_schema_declares_speed_and_strength():
     assert 'vol.Optional("strength")' in src, "strength 槽位未注册"
     assert "_apply_window_param" in src, "handler 未消费参数槽位"
     # 裁决位次：参数分发必须与 position 同在、赶在全窗兜底之前
+    # （2026-09-21 事故修复后，兜底入口=泛称闸 is_generic_window_name，标记随迁）
     i_pos = src.index('slots.get("position")')
     i_par = src.index('for _param in ("speed", "strength")')
-    i_fb = src.index("Could not extract window name")
+    i_fb = src.index("if is_generic_window_name(device_name):")
     assert i_pos < i_par < i_fb, "参数槽裁决位次错（会被全窗兜底吞掉）"
 
 

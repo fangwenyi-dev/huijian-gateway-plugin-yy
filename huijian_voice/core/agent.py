@@ -49,6 +49,8 @@ TOOLS: list[dict] = [
     {"type": "function", "function": {
         "name": "ControlWindow",
         "description": ("控制窗户：action=open 开 / close 关 / pause 暂停 / a 内倒；"
+                        "「开窗器/开合器/推窗器」就是窗户设备（button 域），一律用本工具，"
+                        "绝不用 TurnDeviceOn/Off、绝不给 domains=cover；"
                         "开窗器参数设定用 speed/strength(0-100，网关 v1.4.3+ 滑动条)，"
                         "如「平开窗速度设为30%」→ speed=30（不带 action）"),
         "parameters": {"type": "object", "properties": {
@@ -76,11 +78,13 @@ TOOLS: list[dict] = [
         "name": "HassCreateVoiceScene", "description": (
             "创建语音场景（「当我说X就Y」句式）。actions 每项固定 {intent, params}，"
             "intent ∈ TurnDeviceOn/TurnDeviceOff/ControlWindow/AdjustDeviceAttribute/"
-            "SetDeviceMode，params 与该意图直接下令的槽位一致"), "parameters": {
+            "SetDeviceMode，params 与该意图直接下令的槽位一致。"
+            "一句话涉及多个设备时，actions 数组一个动作一项（窗户→ControlWindow+button，"
+            "窗帘→TurnDeviceOn/Off+cover），不要把多种设备塞进同一个 action"), "parameters": {
             "type": "object", "properties": {
                 "trigger_phrase": {"type": "string"},
                 "actions": {"type": "array", "items": {"type": "object"},
-                            "description": "每动作 {intent, params}"}},
+                            "description": "每动作 {intent, params}，多设备=多项"}},
             "required": ["trigger_phrase", "actions"]}}},
     {"type": "function", "function": {
         "name": "HassDeleteVoiceScene", "description": "删除语音场景", "parameters": {
@@ -93,7 +97,8 @@ TOOLS: list[dict] = [
             "传感器阈值 trigger={entity_id:客厅温度, above:28}（低于用 below）；"
             "人体状态 trigger={entity_id:书房人体, to:'on'或'off'}；"
             "每天定时 trigger={at:'07:30'}（24小时制 HH:MM）。"
-            "actions 每项 {intent, params}，intent 同设备控制五类"), "parameters": {
+            "actions 每项 {intent, params}，intent 同设备控制五类；"
+            "一句话涉及多个设备时，每个设备动作在 actions 数组里单独占一项"), "parameters": {
             "type": "object", "properties": {
                 "trigger": {"type": "object", "properties": {
                     "entity_id": {"type": "string"},
@@ -132,6 +137,11 @@ SYSTEM_PROMPT = (
     "5) 用户报出的房间/设备若不在设备清单内，先反问确认，不要臆测执行。"
     "6) 「当我说X就Y」用 HassCreateVoiceScene；「当传感器/温度/时间到条件就Y」用"
     "HassCreateAutomation；两者的 actions 一律 {intent, params} 形态。"
+    "7) 窗/帘铁律：名称带「窗」或叫开窗器/开合器/推窗器且不带帘字的都是窗户"
+    "（清单里标 button(窗)）→ 一律 ControlWindow（domains=button），"
+    "禁用 TurnDeviceOn/Off 和 cover；带「帘/百叶」的才是窗帘 → Turn*（cover）。"
+    "8) 一句话要多件事（「打开空调，并关闭平开窗」）：同一轮并行发起多个工具调用"
+    "逐个执行；建场景/自动化时同理，每个设备动作在 actions 数组里单独占一项。"
 )
 
 
@@ -166,18 +176,29 @@ class Agent:
         if self._session and not self._session.closed:
             await self._session.close()
 
+    # 窗户在慧尖体系是 button 按压语义（开窗器/开合器），实体名多含"窗"；
+    # 这些域默认被简报过滤掉，若不点名 LLM 根本看不到窗户设备 → 只能靠
+    # 名称含"窗/开合器/内倒/推拉门"豁免纳入。
+    _BRIEF_DOMAINS = ("light", "cover", "climate", "fan", "switch", "media_player",
+                      "humidifier", "lock", "vacuum")
+    _WINDOW_HINT_WORDS = ("窗", "开合器", "内倒", "推拉门")
+
     async def _device_brief(self, limit: int = 60) -> str:
         """把 HA 实体清单压成一行一设备的简报（喂 system 尾部，控制 token 量）。"""
         states = await self.ha.states()
         lines = []
         for eid, ent in list(states.items()):
             dom = eid.split(".", 1)[0]
-            if dom not in ("light", "cover", "climate", "fan", "switch", "media_player",
-                           "humidifier", "lock", "vacuum"):
-                continue
             attrs = ent.get("attributes") or {}
+            fname = str(attrs.get("friendly_name", eid))
+            is_window = (dom == "button"
+                         and any(w in fname for w in self._WINDOW_HINT_WORDS)
+                         and "窗帘" not in fname and "纱窗" not in fname)
+            if dom not in self._BRIEF_DOMAINS and not is_window:
+                continue
             area = self.ha._entity_area.get(eid, "")
-            lines.append(f"{attrs.get('friendly_name', eid)}[{dom}]{('@' + area) if area else ''}={ent.get('state')}")
+            tag = "button(窗)" if is_window else dom
+            lines.append(f"{fname}[{tag}]{('@' + area) if area else ''}={ent.get('state')}")
             if len(lines) >= limit:
                 break
         return "\n".join(lines)

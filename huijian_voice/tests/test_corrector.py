@@ -1,10 +1,21 @@
-"""61 条 ASR 热词纠错表钉桩（口径裁定：061701 代码版=严格超集，58 条为移植基线；
-2026-09-16 现场增补「平×窗」插音族 3 条，计数以本钉为准）。"""
+"""66 条 ASR 热词纠错表钉桩（口径裁定：061701 代码版=严格超集，58 条为移植基线；
+2026-09-16 现场增补「平×窗」插音族 3 条；2026-09 开窗器名称优化增补 开窗器/开合器
+近音族 5 条，计数以本钉为准）。"""
 from core.nlu import corrector
 
 
-def test_table_has_61_entries():
-    assert len(corrector.BASE_CORRECTIONS) == 61
+def test_table_has_66_entries():
+    assert len(corrector.BASE_CORRECTIONS) == 66
+
+
+def test_opener_near_sound_pairs():
+    """开窗器/开合器近音对（用户令优化第①项配套）。"""
+    for wrong, right in [("开创器", "开窗器"), ("开窗气", "开窗器"),
+                         ("开床器", "开窗器"), ("开和器", "开合器"),
+                         ("开合气", "开合器")]:
+        assert corrector.BASE_CORRECTIONS[wrong] == right
+    # 不伤真词：近音键是三字整词，普通句不误触
+    assert corrector.apply("打开开创的设备") == "打开开创的设备"
 
 
 def test_core_pairs():

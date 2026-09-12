@@ -18,7 +18,8 @@ from .intent_window_const import (WINDOW_ACTION_MAPPING, WINDOW_NAME_MAPPING,
                                   find_all_window_buttons_by_action,
                                   find_covers_for_buttons,
                                   find_param_numbers_for_buttons,
-                                  find_window_buttons,
+                                  find_window_buttons, is_bare_window_name,
+                                  is_generic_window_name,
                                   normalize_chinese_numbers)
 
 _LOGGER = logging.getLogger(__name__)
@@ -33,26 +34,32 @@ def _resolve_window_button_ids(
 ) -> tuple[list[str], dict | None]:
     """窗类目标 → 按钮实体 id 表；返回 (button_ids, error_dict)。
 
-    区域泛称/无窗型 → 区域内全部窗，与「开所有窗」同口径（百分比定位与
-    速度/力度参数共用此寻径，2026-09 参数通道接入时自 _apply_window_position
-    原样提取，零行为改动）。
+    **只有显式泛称**（空名/裸窗字/所有窗户…）才升级为本区域全部窗——
+    具名窗型解析失败/找不到按钮一律如实报错，绝不静默扩成全窗（防"开一扇
+    变开一排"）。百分比定位与速度/力度参数共用此寻径（2026-09 参数通道接入
+    时自 _apply_window_position 原样提取；泛称闸为 2026-09-21 事故修复补上）。
     """
     button_ids: list[str] = []
     if window_name:
+        # 同主路径：摘区回捞删除（要么等价空转、要么跨区误动），区域是硬约束。
         buttons = find_window_buttons(
             hass, window_name, area_name, original_name=device_name
         )
-        if not buttons and area_name:
-            buttons = find_window_buttons(
-                hass, window_name, None, original_name=device_name
-            )
         button_ids = list(buttons.values())
-        generic_all = (not device_name) or str(device_name).strip().lower() in (
-            "窗户", "窗",
-        )
-        if area_name and (generic_all or not button_ids):
+        # 只有显式泛称才升级全窗。具名窗型找不到按钮时**绝不**降级去动别的
+        # 窗的 cover/number（v1.0.54 参数通道接入时遗留的 `or not button_ids`
+        # 升级=事故同族：'上悬窗开到50%' 未装却把全区域窗位都改了）。
+        if area_name and is_generic_window_name(device_name):
             button_ids = find_all_window_buttons_by_action(hass, area_name, "open")
     elif area_name:
+        # window_name=None：与主路径同一裁决——泛称/空名→全窗；具体名解析
+        # 失败→如实失败，不升级。
+        if not is_generic_window_name(device_name):
+            return [], {
+                "success": False,
+                "error": f"未识别的窗户名称 '{device_name}'——不敢按全窗执行，"
+                         f"请说完整窗型或明确说'所有窗户'",
+            }
         button_ids = find_all_window_buttons_by_action(hass, area_name, "open")
     else:
         return [], {"success": False, "error": "No target specified"}
@@ -327,7 +334,9 @@ class ControlWindowIntent(intent.IntentHandler):
         "携带时按「同设备 number 实体」设定，不动窗位. "
         "Examples: '内岛展厅窗户' -> action=A, area=展厅, name=窗户. "
         "'打开平推窗' -> action=open, name=平推窗. "
-        "Valid window names: 平推窗,平开窗,推拉窗,内开窗,外开窗,天窗,飘窗,推拉门,内开内倒窗,单内倒窗,外装平开窗,智能窗,窗户."
+        "Valid window names: 平推窗,平开窗,推拉窗,内开窗,外开窗,天窗,飘窗,推拉门,"
+        "内开内倒窗,单内倒窗,外装平开窗,智能窗,下悬窗,上悬窗,提升窗,悬窗,窗户. "
+        "开窗器/开合器/推窗器 是窗控机型设备名，同走本意图（extract_window_name 归窗族）."
     )
 
     @property
@@ -403,29 +412,36 @@ class ControlWindowIntent(intent.IntentHandler):
                 )
 
         if not window_name:
-            if area_name and action:
-                all_buttons = find_all_window_buttons_by_action(
-                    intent_obj.hass, area_name, action
-                )
-                if all_buttons:
-                    results, failed_msgs = await _press_multi_buttons(
-                        intent_obj.hass, intent_obj.context, action, all_buttons
+            # extract 返回 None 有两种截然不同的成因，必须分开裁决：
+            # ① device_name 是真空/裸窗/显式全窗泛称 → 意图就是"本区域所有窗"，
+            #    升级全窗正确；② device_name 是具体名但没匹配上窗型（旧版漏识、
+            #    ASR 丢字） → 绝不能升级成全窗（这正是"打开内开窗连带开推拉窗"
+            #    事故的放大器）。②一律如实失败，让用户听到"没找到这扇窗"。
+            if is_generic_window_name(device_name):
+                if area_name and action:
+                    all_buttons = find_all_window_buttons_by_action(
+                        intent_obj.hass, area_name, action
                     )
-                    return _all_window_result(area_name, action, results, failed_msgs)
+                    if all_buttons:
+                        results, failed_msgs = await _press_multi_buttons(
+                            intent_obj.hass, intent_obj.context, action, all_buttons
+                        )
+                        return _all_window_result(area_name, action, results, failed_msgs)
+                return {
+                    "success": False,
+                    "error": f"Could not find any {action} buttons in {area_name}",
+                }
             return {
                 "success": False,
-                "error": f"Could not extract window name from '{device_name}'",
+                "error": f"未识别的窗户名称 '{device_name}'——不敢按全窗执行，"
+                         f"请说完整窗型（如内开窗/推拉窗）或明确说'所有窗户'",
             }
 
-        # Detect when LLM sends just the bare general window name (e.g., name="窗户" or "窗")
-        # This means "all windows of this type in the area"
-        # Specific type names like "平推窗" should NOT trigger all-windows mode
-        is_all_windows = (
-            window_name
-            and device_name
-            and device_name.strip().lower() == window_name.lower()
-            and window_name.lower() in ("窗户", "窗")
-        )
+        # Bare general window name (name="窗户"/"窗"/"窗子") = all windows of the
+        # area. 旧条件 device_name==window_name 在裸"窗"上永不成立（extract 已把
+        # 它归一成"窗户"）——2026-09-21 复盘改裸名集合判定；"2号窗"等带名窗不命中
+        # 裸名集合，仍走精确单窗路径，语义不变。
+        is_all_windows = bool(window_name) and is_bare_window_name(device_name)
 
         if is_all_windows:
             if area_name and action:
@@ -451,15 +467,12 @@ class ControlWindowIntent(intent.IntentHandler):
         buttons = find_window_buttons(
             intent_obj.hass, window_name, area_name, original_name=device_name
         )
+        _LOGGER.info("Found buttons (area=%s): %s", area_name, buttons)
 
-        _LOGGER.info("Found buttons (with area filter): %s", buttons)
-
-        if action not in buttons and area_name:
-            buttons = find_window_buttons(
-                intent_obj.hass, window_name, None, original_name=device_name
-            )
-            _LOGGER.info("Found buttons (without area filter): %s", buttons)
-
+        # 曾有"本区域找不到→摘掉区域重找"回捞：区域注册名对不上时它是等价
+        # 空转（find_window_buttons 内部 target_area_id=None 本就不设限），区域
+        # 存在时它会把**别屋同型窗**当目标——静默跨区误执行，与 v1.0.42 R3
+        # 跨区错绑守卫同族，2026-09-21 事故复盘删除。用户点名的区域是硬约束。
         if action not in buttons:
             return {
                 "success": False,

@@ -17,8 +17,16 @@ WINDOW_KEYWORDS = [
     "单内倒窗",
     "外装平开窗",
     "智能窗",
+    # 2026-09 悬窗族/提升窗（与加内 _WINDOW_TYPES/KNOWN_DEVICES_PREFIX、
+    # intent_window_const.WINDOW_NAME_MAPPING 三方同步，守卫钉）。
+    "下悬窗",
+    "上悬窗",
+    "提升窗",
+    "悬窗",
 ]
-WINDOW_EXCLUDE_KEYWORDS = ["窗帘"]
+# 机器人：擦窗机器人/清洁机器人属家电（vacuum 族），名称带"窗"却绝不是
+# 按压窗控设备——进排除表，防 is_window_device 子串误判。
+WINDOW_EXCLUDE_KEYWORDS = ["窗帘", "机器人"]
 WINDOW_DOMAINS = {"window", "windows"}
 
 

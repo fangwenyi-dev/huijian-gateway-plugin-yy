@@ -232,11 +232,16 @@ def test_serial_split_real_case():
 
 
 def test_serial_split_no_overcut():
-    # 反例：单动作/含动形名词/把字句/超3段嫌疑 → 不切碎（回退整句）
+    # 反例：单动作/含动形名词/把字句 → 不切碎（回退整句）
     for keep in ("关闭所有灯", "把窗帘拉上", "把卧室灯亮度调到百分之三十",
-                 "调亮客厅灯", "关闭电视打开音响暂停播放器"):
+                 "调亮客厅灯"):
         got = cr.split_actions(keep)
         assert got == [keep], f"{keep} 被切碎: {got}"
+    # 「暂停播放器」整段保留（2026-09 切点 播放(?!器) 护栏）：全句本来就是
+    # 三件真动作，切 3 段是正解——旧版退整句只因「播放器」被腰斩成 4 碎段。
+    assert cr.split_actions("关闭电视打开音响暂停播放器") == \
+        ["关闭电视", "打开音响", "暂停播放器"]
+    assert cr.split_actions("暂停播放器") == ["暂停播放器"]
     p = cr.parse("当我说打开办公室空调的时候就帮我同时打开办公室的空调"
                  "关闭办公室的平台窗")
     assert p["kind"] == "scene" and p["y"] == \
