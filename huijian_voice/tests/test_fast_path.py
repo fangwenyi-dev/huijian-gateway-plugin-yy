@@ -156,10 +156,14 @@ def test_scene_prefix_fallback_after_guard_miss(tc, settings):
 
 
 def test_scene_priority_does_not_swallow_long_command(tc, settings):
-    """等值优先的回归护栏：短触发词"开灯"不得把「开灯亮度50」整句吞成场景。"""
+    """等值优先的回归护栏：短触发词"开灯"不得把「开灯亮度50」整句吞成场景。
+    v1.0.64 M3 定案：尾巴也不得再被吞成开关——属性尾巴落 Adjust 亮度通道
+    （CHANGELOG v1.0.37 白纸黑字承诺「依然是调亮度」，旧断言 TurnDeviceOn
+    正是违约形态本身，随修复改判据；护栏原意「不吞成场景」保持）。"""
     fp = FastPath(FakeScenes(triggers=("开灯",)), tc, settings)
     long_cmd = asyncio.run(fp.match("开灯亮度50"))
-    assert long_cmd is not None and long_cmd.intent == "TurnDeviceOn", long_cmd
+    assert long_cmd is not None and long_cmd.intent == "AdjustDeviceAttribute", long_cmd
+    assert long_cmd.args.get("attribute") == "brightness" and str(long_cmd.args.get("delta")) == "50"
     exact = asyncio.run(fp.match("开灯"))
     assert exact is not None and exact.intent == "HassTriggerVoiceScene", exact
 

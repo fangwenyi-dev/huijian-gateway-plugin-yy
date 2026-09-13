@@ -1,6 +1,6 @@
 import logging
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from typing import Any, Callable, Literal, get_args
 
@@ -666,7 +666,12 @@ class AdjustDeviceAttributeIntent(intent.IntentHandler):
                     raise intent.IntentHandleError("unsupported")
 
                 # Find the paramters to adjust.
-                prepare_adjustment(AdjustmentContext(state=state, delta=delta), target)
+                # M4（2026-09-23 深审）：adjust_light_temperature 等换算函数
+                # **就地**改写 ctx.delta（value %→K、unit 覆写），多实体
+                # （两台色温域不同的灯）时第二台跳过换算分支拿错值——
+                # 逐实体副本是数据卫生底线（同文件其它 target 本就逐实体新建）。
+                prepare_adjustment(
+                    AdjustmentContext(state=state, delta=replace(delta)), target)
                 target.service_data[ATTR_ENTITY_ID] = state.entity_id
 
                 # Perform adjustment.

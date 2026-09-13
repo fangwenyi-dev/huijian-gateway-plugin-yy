@@ -39,6 +39,10 @@ def test_version_four_point_consistency():
     import json
     vj = json.loads((ROOT / "www" / "version.json").read_text(encoding="utf-8"))
     assert vj["addon_version"] == ver, "version.json.addon_version 漂移"
+    # L1（2026-09-23 深审）：CLAUDE.md 明写 addon+integration 双键，测试此前
+    # 只钉一半——本地升版漏 integration_version 时六源回归假绿。
+    assert vj.get("integration_version") == ver, \
+        "version.json.integration_version 漂移（双键必须同链）"
     mf = json.loads((ROOT / "custom_components" / "huijian_ai" / "manifest.json")
                     .read_text(encoding="utf-8"))
     assert mf["version"] == ver, "vendored 集成 manifest 版本未与加载项同链（网关四源范式）"

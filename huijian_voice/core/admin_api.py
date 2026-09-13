@@ -46,6 +46,8 @@ def make_admin_app(ctx) -> web.Application:
     app.router.add_post("/api/system/reload_models", _reload_models)
     from . import tts_voices_api          # 自定义音色端点独立成模块（并行热区避让）
     tts_voices_api.setup(app, ctx)
+    from . import ota_api                 # 设备台账/固件仓（OTA 方案 Phase 2，同惯例）
+    ota_api.setup(app, ctx)
     return app
 
 
@@ -73,21 +75,93 @@ def _addon_version() -> str:
     return const.addon_version()  # 唯一版本链（曾自读 /data/version.txt+"dev" 兜底，与 const 漂移）
 
 
+# M8/H6（2026-09-23 深审批4）设置入口双闸。纪律出处：本文件 :505-507 已立
+# "NaN/inf 不得过闸"，通用入口漏上——aiohttp request.json() 默认收 NaN/Infinity
+# 字面量与 1e999→inf，落盘后 GET 回吐裸 NaN → 浏览器 JSON.parse 必抛 →
+# 设置页死开且 UI 无法自救；且 v<=0 型数值闸对 NaN 恒假直灌引擎。
+# H6：nlu.corrections_extra / spatial.satellite_areas 是**装用户数据的 dict**，
+# null/[] 过 _deep_merge+repair 会被"恢复默认 {}"静默清空已存数据还报「已保存」
+# ——对这两键非 dict 直接拒写（保全 > 猜测，宁缺勿错）。
+import json as _json
+import math
+
+
+def _strict_json_loads(text):
+    def _no_const(s):
+        raise ValueError(f"设置值不允许 JSON 常量 {s!r}（NaN/Infinity）")
+    return _json.loads(text, parse_constant=_no_const)
+
+
+def _walk_finite(obj) -> bool:
+    if isinstance(obj, float):
+        return math.isfinite(obj)
+    if isinstance(obj, dict):
+        return all(_walk_finite(v) for v in obj.values())
+    if isinstance(obj, (list, tuple)):
+        return all(_walk_finite(v) for v in obj)
+    return True
+
+
+_DICT_DATA_PATHS = (("nlu", "corrections_extra"), ("spatial", "satellite_areas"),
+                    ("music", "area_entities"))  # music.area_entities：v1.0.64 音乐批
+# 同型「装用户数据的 dict」（DEFAULTS 默认 {}），null/[] 过闸同样被 repair 清空——
+# H6 判据按语义族收口而非按报告逐键点名。
+
+
+def _dict_data_violation(patch):
+    try:
+        for path in _DICT_DATA_PATHS:
+            cur = patch
+            present = True
+            for k in path:
+                if isinstance(cur, dict) and k in cur:
+                    cur = cur[k]
+                else:
+                    present = False
+                    break
+            if present and not isinstance(cur, dict):
+                return ".".join(path)
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def _sanitize_nonfinite(obj):
+    """GET 面消毒：存量被旧版本写坏的 NaN/inf 数值回吐前换成 None——
+    否则面板 JSON.parse 死开且无自救路径（写闸已拦增量，这里救存量）。"""
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
+    if isinstance(obj, dict):
+        return {k: _sanitize_nonfinite(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_nonfinite(v) for v in obj]
+    return obj
+
+
 async def _get_settings(request):
     ctx = request.app[CTX_KEY]
-    return web.json_response(ctx.settings.masked())
+    return web.json_response(_sanitize_nonfinite(ctx.settings.masked()))
 
 
 async def _post_settings(request):
     ctx = request.app[CTX_KEY]
     try:
-        patch = await request.json()
+        patch = _strict_json_loads(await request.text())
     except Exception:
         return web.json_response({"message": "bad json"}, status=400)
     if not isinstance(patch, dict):
         return web.json_response({"message": "body must be object"}, status=400)
+    if not _walk_finite(patch):
+        return web.json_response({"message": "数值含 NaN/Infinity，拒写（M8）"},
+                                 status=400)
+    bad = _dict_data_violation(patch)
+    if bad:
+        return web.json_response(
+            {"message": f"{bad} 必须是 JSON 对象——拒写以保全已存数据（H6）"},
+            status=400)
     ctx.settings.update(patch)   # 热应用回调在 main 注册（TTS 音色/阈值/卸载策略等）
-    return web.json_response({"ok": True, "settings": ctx.settings.masked()})
+    return web.json_response({"ok": True,
+                              "settings": _sanitize_nonfinite(ctx.settings.masked())})
 
 
 async def _models(request):
@@ -101,7 +175,8 @@ async def _model_download(request):
     key = str(body.get("key", ""))
     if key not in ctx.store.keys():
         return web.json_response({"message": f"未知模型 {key}"}, status=400)
-    ctx.store.ensure_async(key)
+    ctx.store.ensure_async(key, force=True)  # M11：用户点按钮=明确重取意图，
+    # 旧实现不传 force，对错版「已就绪」包彻底 no-op（逃生门断）
     return web.json_response({"ok": True})
 
 

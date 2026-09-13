@@ -358,11 +358,16 @@ def find_window_buttons(
             continue
 
         entry = entity_registry.async_get(entity_id)
+        # M5（2026-09-23 深审）：注册表外实体（preview/discovery 态）
+        # async_get 返回 None，直接 .area_id 抛 AttributeError 炸整个
+        # ControlWindow 意图——同文件另两扫描口(:397/:454 形态)都有守卫。
+        # 无 entry = 区域未知，语义并入"无 area_id 放行"既有分支。
+        entry_area = entry.area_id if entry else None
 
-        if target_area_id and entry.area_id and entry.area_id != target_area_id:
+        if target_area_id and entry_area and entry_area != target_area_id:
             skip_area_count += 1
             continue
-        if target_area_id and not entry.area_id:
+        if target_area_id and not entry_area:
             _LOGGER.debug("Including button without area_id: %s (%s)", entity_id, name)
 
         for action, keywords in WINDOW_ACTION_MAPPING.items():

@@ -45,8 +45,43 @@ def _build_slots(params: dict) -> dict:
 _RISKY_LOCK_OFF_INTENTS = frozenset({"TurnDeviceOff", "HassTurnOff", "HassToggle"})
 
 
+# H2/M6（2026-09-23 深审批2）：原判据只认字面 "lock" in domains——而执行面
+# _expand_domains 用 DOMAIN_ALIASES 把 door 扩进锁域，`HassTurnDeviceOff{
+# name:大门,domains:["door"]}` 旁路免确认解锁。撤防族同并入：intent_turn D7
+# 映射 alarm×Off→alarm_disarm，一句话直撤家庭安防。
+# 本表与加载项 core/nlu/targets.py `_RISKY_DOMAIN_ALIASES` 双端同构（**受控重复**
+# ——闸须自包含，测试用 _claw_fn 空命名空间抽函数跑，函数体内 import 会退化）；
+# 执行面 intent_helper.DOMAIN_ALIASES 是唯一真源，三表 door/alarm 形由
+# tests/test_v1064_risk_batch.py 一致钉。行为矩阵双端同钉。
+_RISKY_DOMAIN_ALIASES: dict = {
+    "door": ("lock", "cover", "button"),
+    "doors": ("lock", "cover", "button"),
+}
+_LOCK_NAME_WORDS = ("锁", "大门", "房门", "卷帘门")
+_ALARM_NAME_WORDS = ("安防", "报警", "布防", "撤防")
+_ALARM_DOMAINS = ("alarm_control_panel",)
+
+
+def _risky_domain_closure(domains) -> set:
+    """domains（可混 entity_id 形）→ 小写裸域 + 别名闭包。永不抛。"""
+    out: set = set()
+    try:
+        stack = [str(d).lower().split(".", 1)[0].strip() for d in (domains or [])]
+        while stack:
+            d = stack.pop()
+            if not d or d in out:
+                continue
+            out.add(d)
+            for a in _RISKY_DOMAIN_ALIASES.get(d, ()):
+                if a not in out:
+                    stack.append(a)
+    except Exception:  # noqa: BLE001
+        return out
+    return out
+
+
 def _args_targets_lock(arguments):
-    """target 面是否命中锁域（name 含锁 / devices[].domains 含 lock）。"""
+    """target 面是否命中风险实体（锁域闭包 / 锁·安防中文词 / alarm 域）。"""
     if not isinstance(arguments, dict):
         return False
     try:
@@ -56,10 +91,22 @@ def _args_targets_lock(arguments):
             for d in t.get("devices") or []:
                 if not isinstance(d, dict):
                     continue
-                if "lock" in [str(x).lower() for x in (d.get("domains") or [])]:
+                name = str(d.get("name") or "")
+                if any(w in name for w in _LOCK_NAME_WORDS + _ALARM_NAME_WORDS):
                     return True
-                if "锁" in str(d.get("name") or ""):
+                closed = _risky_domain_closure(d.get("domains") or [])
+                if "lock" in closed or closed & set(_ALARM_DOMAINS):
                     return True
+        name_all = str(arguments.get("name") or "")
+        if any(w in name_all for w in _LOCK_NAME_WORDS + _ALARM_NAME_WORDS):
+            return True
+        eids = arguments.get("entity_id")
+        if isinstance(eids, str):
+            eids = [eids]
+        if isinstance(eids, (list, tuple)):
+            return any(isinstance(e, str)
+                       and e.split(".", 1)[0] in ("lock",) + _ALARM_DOMAINS
+                       for e in eids)
     except (TypeError, AttributeError):
         return False
     return False
@@ -438,8 +485,11 @@ class HuijianControlAPI(llm.API):
         # domains，锁设备在此刻才现形，故必须在回填后判。命中即拒并回话术给 LLM，
         # 引导用户回主语音通道走确认。与加载项 agent._tool C2 同构语义。
         if intent_type in _RISKY_LOCK_OFF_INTENTS and _args_targets_lock(arguments):
-            _LOGGER.warning("[custom_llm_api] 拒绝风险解锁目标 %s（引导至确认流）", intent_type)
-            return {"success": False, "error": "解锁是风险操作，我不能替您跳过确认——请直接说「解锁大门」这类指令，会先问您一声再执行"}
+            _LOGGER.warning("[custom_llm_api] 拒绝风险目标 %s（解锁/撤防引导至确认流）",
+                            intent_type)
+            return {"success": False,
+                    "error": "解锁/撤防是风险操作，我不能替您跳过确认——"
+                             "请直接说「解锁大门」「撤销布防」这类指令，会先问您一声再执行"}
         slots = _build_slots(arguments)
         if llm_context and llm_context.device_id:
             slots["_speaker_id"] = {"value": llm_context.device_id}

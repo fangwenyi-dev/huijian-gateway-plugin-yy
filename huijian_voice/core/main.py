@@ -24,6 +24,7 @@ from .admin_api import make_admin_app
 from .agent import Agent
 from .asr import AsrEngine
 from .executor import Executor
+from .firmware_store import FirmwareStore
 from .ha_client import HAClient
 from .mdns import Publisher, local_ip
 from .model_store import ModelStore
@@ -53,6 +54,7 @@ class Service:
     def __init__(self):
         self.settings = Settings()
         self.store = ModelStore(self.settings)
+        self.firmware = FirmwareStore()   # OTA 方案 Phase 2：固件仓（纯本地盘，无自动公网拉取）
         self.ha = HAClient()
         self.nlu_data = Path(os.environ.get("HUIJIAN_NLU_DATA", const.NLU_DATA_DIR))
         self.textcnn = TextCNN(self.nlu_data,
@@ -69,7 +71,8 @@ class Service:
         self.host = local_ip()
         self.ctx = AppContext(settings=self.settings, ha=self.ha, asr=self.asr, tts=self.tts,
                               pipeline=self.pipeline, scenes=self.scenes, textcnn=self.textcnn,
-                              store=self.store, started_at=time.time(), host=self.host)
+                              store=self.store, firmware=self.firmware,
+                              started_at=time.time(), host=self.host)
         self.mdns = Publisher(
             props={"stt": "/xiaozhi/v1/stt", "tts": "/xiaozhi/v1/tts",
                    "llm": "/xiaozhi/v1/llm", "version": self._version()},

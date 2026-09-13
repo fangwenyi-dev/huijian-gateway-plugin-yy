@@ -9,6 +9,9 @@ set -u
 bashio::log.info "═══ 慧尖语音助手 boot ═══"
 
 mkdir -p /data/models/import /data/run
+# OTA 方案 Phase 2（2026-09-23）：固件仓目录预建。import=投递口（放
+# <名>-x.y.z.bin 由 FirmwareStore 收编），public=验过可下发区（一次性令牌领取）。
+mkdir -p /data/firmware/import /data/firmware/public
 # v1.0.48：777→700。/data/run 唯一写/读者是 root 的主进程（endpoints.json 含
 # 真 ws_token）；nginx 静态根在 /usr/share/nginx/html，不触碰本目录——world-
 # writable 纯多余，且令容器内任何低权进程可替换凭据文件（软链劫持面）。

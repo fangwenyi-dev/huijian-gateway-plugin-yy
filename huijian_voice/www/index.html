@@ -14,8 +14,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#1d1750">
 <title>慧尖HA语音插件</title>
-<link rel="stylesheet" href="css/huijian.css?v=1.0.63">
-<link rel="stylesheet" href="css/voice.css?v=1.0.63">
+<link rel="stylesheet" href="css/huijian.css?v=1.0.64">
+<link rel="stylesheet" href="css/voice.css?v=1.0.64">
 </head>
 <body>
 <!-- 「星辰大海」背景层（与网关加载项同一设计标准/同一固定种子＝同一片天）：
@@ -44,6 +44,7 @@
   <button data-tab="status" class="on">状态</button>
   <button data-tab="settings">设置</button>
   <button data-tab="models">模型</button>
+  <button data-tab="ota">设备/固件</button>
   <button data-tab="scenes">场景/自动化</button>
   <button data-tab="debug">调试</button>
   <button data-tab="pair">设备配对</button>
@@ -142,7 +143,9 @@
   </div>
 
   <div class="card"><h3>音乐（语音点歌 · 过渡带）</h3>
-    <div class="hj-row"><div style="flex:1 1 100%"><label class="hj-field">播放端点 entity_id（需已装 Music Assistant 并由其托管该播放器；说"播放周杰伦/暂停/下一首/停止播放"即达。留空=点歌只回配置指引，不抢闲聊）</label><input id="music_player" placeholder="media_player.客厅音箱"></div></div>
+    <div class="hj-row"><div style="flex:1 1 100%"><label class="hj-field">播放端点 entity_id（需先安装 Music Assistant 加载项并把本地曲库/电台挂进它，由其托管该播放器；说"播放周杰伦/暂停/下一首/停止播放/现在放的是什么歌"即达。留空=点歌只回配置指引，不抢闲聊）</label><input id="music_player" placeholder="media_player.客厅音箱"></div></div>
+    <div class="hj-row"><div style="flex:1 1 100%"><label class="hj-field">区域→播放端点映射（JSON；"在客厅放音乐/用卧室的音箱播放周杰伦"按此选端点，未映射区域自动回退默认端点并如实播报。例：{"客厅": "media_player.客厅音箱", "卧室": "media_player.卧室音箱"}）</label><textarea id="music_areas" placeholder='{"客厅": "media_player.客厅音箱"}'></textarea></div></div>
+    <div class="hj-row"><div><label><input id="music_wait" type="checkbox" style="width:auto"> 点歌后提示"可能要等一小会儿"（慧尖卫星整曲下载形态的首音预期管理；第三方秒开音箱可关）</label></div></div>
   </div>
 
   <div class="card"><h3>大模型兜底（LLM，默认关闭）</h3>
@@ -187,6 +190,23 @@
   <div class="card"><h3>热操作</h3>
     <button class="act gray" id="reloadBtn">释放/重载模型（改配置后想立即生效可点）</button>
     <span id="reloadMsg" class="mut"></span>
+  </div>
+</section>
+
+<!-- ══ 设备/固件（OTA 方案 Phase 2：台账+固件仓+近场链接兜底，2026-09-23）══ -->
+<section id="tab-ota">
+  <div class="card"><h3>卫星台账</h3>
+    <table id="otaDevTable"><thead><tr><th>设备</th><th>区域</th><th>在线</th><th>固件版本</th><th></th><th></th></tr></thead><tbody></tbody></table>
+    <div id="otaDevNote" class="hint"></div>
+    <div class="hint">版本由设备入驻（小程序配网/CMD20）时自动上报；HA 重启后等设备重报，「未上报」属正常态。
+      「远程可用」徽标=该设备已暴露 OTA 接收口（固件 ≥v2.1.36 起支持）；现网固件为「近场链接」形态。</div>
+  </div>
+  <div class="card"><h3>固件仓 <span id="fwLatest" class="mut"></span></h3>
+    <table id="fwTable"><thead><tr><th>版本</th><th>来源</th><th>在盘</th><th>大小/哈希</th><th></th></tr></thead><tbody></tbody></table>
+    <div id="fwHint" class="hint"></div>
+  </div>
+  <div class="card"><h3>发放结果</h3>
+    <div id="otaOut" class="hint">点设备行「发放」生成一次性近场下发链接（10 分钟、单次消费），复制到小程序代发；设备支持远程后此按钮自动变「远程下发」。</div>
   </div>
 </section>
 
@@ -275,7 +295,7 @@
 
 <script>
 "use strict";
-const CURRENT_VERSION = "1.0.63";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
+const CURRENT_VERSION = "1.0.64";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
 // 音色表 = kokoro-multi-lang-v1_1 官方 103 sid 全表（k2-fsa docs sid 表实证；
 // 标注=对用户上传试听样本的 CAM++ 声纹溯源榜：v1_1 不含晓晓/云扬，
 // sid18=zf_026 女声最似晓晓(0.454 全场最近)，sid81=zm_055 最似云扬）
@@ -338,6 +358,7 @@ document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{
   if(b.dataset.tab==="models") loadModels();
   if(b.dataset.tab==="pair") loadEndpoints();
   if(b.dataset.tab==="scenes"){ loadScenes(); loadAutomations(); }
+  if(b.dataset.tab==="ota") loadOta();
 });
 
 /* ── 状态 ── */
@@ -468,6 +489,8 @@ async function loadSettings(){
   $("#dlg_confirm").checked = S.dialog?.confirm_risky !== false;
   try { $("#sat_areas").value = JSON.stringify(S.spatial?.satellite_areas||{},null,0); } catch(e){}
   $("#music_player").value = S.music?.player_entity || "";
+  try { $("#music_areas").value = JSON.stringify(S.music?.area_entities||{},null,0); } catch(e){}
+  $("#music_wait").checked = S.music?.expect_wait_note !== false;
   $("#llm_enabled").checked = !!S.llm.enabled;
   $("#llm_stream").checked = S.llm.stream !== false;
   $("#llm_scene_write").checked = S.llm.allow_scene_write !== false;
@@ -543,10 +566,16 @@ $("#saveBtn").onclick = async ()=>{
     dialog:{ fallback_text: $("#fallback").value, context_enabled:$("#dlg_context").checked,
              chain_enabled:$("#dlg_chain").checked, confirm_risky:$("#dlg_confirm").checked },
     spatial:{ satellite_areas: safeJson($("#sat_areas").value, {}) },
-    music:{ player_entity: $("#music_player").value.trim() },
+    music:{ player_entity: $("#music_player").value.trim(),
+            area_entities: safeJson($("#music_areas").value, {}),
+            expect_wait_note: $("#music_wait").checked },
   };
-  if($("#nlu_corr").value.trim() && typeof body.nlu.corrections_extra!=="object"){ toast("纠错词条不是合法 JSON"); return; }
-  if($("#sat_areas").value.trim() && typeof body.spatial.satellite_areas!=="object"){ toast("卫星区域映射不是合法 JSON"); return; }
+  // H6（2026-09-23 深审）：dict 数据字段三态守卫——undefined(解析失败)/null/
+  // 数组/标量全拦。旧判据 `typeof x!=="object"` 对 null、[] 恒假=死守卫。
+  const isObj = v => v !== undefined && v !== null && typeof v === "object" && !Array.isArray(v);
+  if(!isObj(body.nlu.corrections_extra)){ toast("纠错词条需为合法 JSON 对象"); return; }
+  if(!isObj(body.spatial.satellite_areas)){ toast("卫星区域映射需为合法 JSON 对象"); return; }
+  if(!isObj(body.music.area_entities)){ toast("音乐区域映射需为合法 JSON 对象"); return; }
   if(!$("#nlu_enabled").checked){
     const msg = llmReady()
       ? "关掉本地理解后：语音场景触发词、场景/自动化本地建・改・删、本地查询、音乐带全部停止，所有话改由大模型处理。确定保存？"
@@ -559,7 +588,7 @@ $("#saveBtn").onclick = async ()=>{
   try { await post("/api/settings", body); toast("已保存并即时生效"); $("#saveMsg").textContent="✓ "+new Date().toLocaleTimeString(); }
   catch(e){ toast("保存失败："+e.message); }
 };
-function safeJson(t, d){ if(!t||!t.trim()) return d; try{ return JSON.parse(t);}catch(e){ return null; } }
+function safeJson(t, d){ if(!t||!t.trim()) return d; try{ return JSON.parse(t);}catch(e){ return undefined; } }  // H6：解析失败必须与合法值可区分——旧版返回 null，而 typeof null==="object" 恒真，下方守卫全为死代码，脏输入 POST null 后端静默清空已存数据还报「已保存」
 
 /* ── 模型 ── */
 /* v1.0.42（F6）：后端 /api/models 发的是 model_store.snapshot() 形态
@@ -590,6 +619,77 @@ async function loadModels(){
   });
 }
 $("#reloadBtn").onclick = async ()=>{ try{ const r=await post("/api/system/reload_models",{}); $("#reloadMsg").textContent=r.note||"ok";}catch(e){toast(e.message);} };
+
+/* ── 设备/固件（OTA Phase 2，近场链接兜底形态）── */
+let _otaLatest = "";
+async function loadOta(){
+  let dv={devices:[]}, fw={items:[]};
+  try { dv = await api("/api/devices"); } catch(e){ dv={devices:[],error:e.message}; }
+  try { fw = await api("/api/firmware"); } catch(e){ fw={items:[],error:e.message}; }
+  _otaLatest = dv.latest || fw.latest || "";
+  $("#otaDevNote").textContent = dv.error || fw.error || "";
+  $("#fwLatest").textContent = _otaLatest ? ("最新在盘版本 v"+_otaLatest) : "（尚无已上架固件）";
+  const tb = $("#otaDevTable tbody"); tb.innerHTML="";
+  const devs = dv.devices||[];
+  if(!devs.length){
+    tb.innerHTML = `<tr><td colspan="6" class="mut">暂无已入驻卫星——小程序配网入驻后自动出现</td></tr>`;
+  }
+  for(const d of devs){
+    const tr=document.createElement("tr");
+    const remote=(d.ota_services||[]).length>0;
+    const badge = d.updatable ? pill("可升级→"+_otaLatest,"warn")
+                : (d.fw_version ? pill(remote?"已最新·可远程":"已最新","ok") : pill("未上报","mut"));
+    tr.innerHTML = `<td>${esc0(d.name||d.mac||d.speak_id)}<br><span class="mut code">${esc0(d.mac||"")}</span></td>
+      <td>${esc0(d.area||"-")}</td>
+      <td>${pill(d.online?"在线":"离线", d.online?"ok":"bad")}</td>
+      <td>${esc0(d.fw_version||"未上报")}</td>
+      <td>${badge}</td>
+      <td>${_otaLatest?`<button class="act" data-issue="${esc0(d.mac||d.name)}">${remote?"下发":"发放链接"}</button>`:""}</td>`;
+    tb.appendChild(tr);
+  }
+  tb.querySelectorAll("button[data-issue]").forEach(b=>b.onclick=()=>issueOta(b.dataset.issue));
+  const ft = $("#fwTable tbody"); ft.innerHTML="";
+  const items = fw.items||[];
+  if(!items.length){
+    ft.innerHTML = `<tr><td colspan="5" class="mut">尚无登记版本——投递口放包，或在 firmware.lock.json 登记后点「拉取」</td></tr>`;
+  }
+  for(const it of items){
+    const tr=document.createElement("tr");
+    const pull = (!it.on_disk && it.source==="lock" && (it.urls||[]).length)
+      ? `<button class="act" data-dl="${esc0(it.version)}">拉取</button>` : "";
+    tr.innerHTML = `<td>v${esc0(it.version)} ${it.version===_otaLatest?pill("最新","ok"):""}</td>
+      <td>${it.source==="lock"?"lock 登记":"投递收编"}</td>
+      <td>${it.on_disk?(it.sha_mismatch?pill("哈希不符!","bad"):pill("在盘","ok")):pill("未拉取","warn")}</td>
+      <td><span class="mut">${fmtBytes(it.size)}</span><br><span class="mut code">${esc0(String(it.sha256||"").slice(0,16))}…</span></td>
+      <td>${pull}</td>`;
+    ft.appendChild(tr);
+  }
+  ft.querySelectorAll("button[data-dl]").forEach(b=>b.onclick=async()=>{
+    toast("拉取中…（sha256 必核）");
+    try{ const r=await post("/api/firmware/download",{version:b.dataset.dl});
+      toast(r.success?("已上架 v"+b.dataset.dl):("拉取失败：" + (r.message||""))); }
+    catch(e){ toast("拉取失败："+e.message); }
+    loadOta();
+  });
+  $("#fwHint").textContent = "投递口："+(fw.import_dir||"/data/firmware/import")+
+    " —— 放 <-x.y.z.bin> 自动收编（现场算 sha256）；lock 版本点「拉取」显式下载（GitHub→Gitee 容灾序），加载项从不后台自动拉公网。"+
+    (fw.lock_override?"（持久卷 lock 覆盖中）":"");
+}
+async function issueOta(mac){
+  const out=$("#otaOut"); out.innerHTML="<span class='mut'>签发中…</span>";
+  try{
+    const r = await post("/api/firmware/issue",{mac, version:_otaLatest});
+    if(!r.success){ out.innerHTML = `<span class="pill bad">${esc0(r.error||"签发失败")}</span>`; return; }
+    out.innerHTML = `<div>目标 <b>v${esc0(r.version)}</b> · ${fmtBytes(r.size)} · sha256
+        <span class="code">${esc0(String(r.sha256).slice(0,16))}…</span> · ${esc0(r.expires_in)}s 一次性</div>
+      <p><input id="otaUrl" class="code" readonly style="width:100%" value="${esc0(r.url)}"></p>
+      <button class="act" id="otaCopy">复制链接</button>
+      <span class="mut">小程序近场代发（BLE CMD21）；固件支持远程接收口后本链接同源自动升级体验。</span>
+      <div class="hint">${esc0(r.warn_zh)}</div>`;
+    $("#otaCopy").onclick=()=>{ const i=$("#otaUrl"); i.select();
+      try{ document.execCommand("copy"); toast("已复制"); }catch(e){ toast("请手动长按复制"); } };
+  }catch(e){ out.innerHTML = `<span class="pill bad">${esc0(e.message)}</span>`; }
+}
 
 /* ── 调试 ── */
 /* v1.0.63 P0-1：NLU 理解漏斗（GET /api/telemetry，本进程累计） */
@@ -762,6 +862,6 @@ $("#regenBtn").onclick = async ()=>{
   try { await post("/api/token/regenerate",{}); toast("已重置"); loadEndpoints(); } catch(e){ toast(e.message); }
 };
 </script>
-<script src="js/starsky.js?v=1.0.63"></script>
+<script src="js/starsky.js?v=1.0.64"></script>
 </body>
 </html>

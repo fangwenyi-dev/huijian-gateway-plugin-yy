@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import math
 import os
 import secrets
 import threading
@@ -104,6 +105,12 @@ DEFAULTS: dict[str, Any] = {
         # 零改动音乐过渡带（用户定向 2026-09-12）：语音点歌/播控直连 HA 标准
         # media_player 服务；端点填 MA 托管播放器的 entity_id。空=点歌只回配置指引。
         "player_entity": "",
+        # P1 音乐批（2026-09-25）：区域→播放实体映射（{"客厅": "media_player.x"}）。
+        # 「在客厅放音乐」按此选端点；未映射区域回退默认端点并如实播报。
+        "area_entities": {},
+        # P2a 前慧尖卫星整曲下载形态的首音预期话术（"点了会等一会儿"）；
+        # 第三方秒开档音箱可关。电台/超长属固件 P2b，话术不改变事实。
+        "expect_wait_note": True,
     },
     "power": {
         "unload_when_idle_min": 0,             # 0=模型常驻；>0 空闲 N 分钟卸载（省电档）
@@ -281,6 +288,7 @@ class Settings:
                              ", ".join(f"{k}({type(patch[k]).__name__})" for k in dirty))
                 patch = {k: v for k, v in patch.items() if k not in dirty}
             self._scrub_masked(patch)
+            self._drop_nonfinite(patch)
             self._data = _deep_merge(self._data, patch)
             self._repair_nodes()          # v1.0.40：patch 也可能把节点写成非 dict
             self._ensure_secrets()
@@ -291,6 +299,26 @@ class Settings:
             except Exception:  # 订阅者炸不影响写入方
                 logger.exception("[配置] 热应用回调异常")
         return self.data
+
+    @staticmethod
+    def _drop_nonfinite(node, _path="") -> None:
+        """M8 纵深闸（2026-09-23 深审）：NaN/±Infinity 叶子就地丢弃+大声告警。
+
+        面板/第三方通道若绕过 admin_api 入口消毒直调 update()，非有限浮点随
+        json.dumps(allow_nan=True) 写成裸 NaN/Infinity——本文件自己都不再能
+        严格读回（settings.load 校验红），设备配置全员死开且无自救界面。
+        admin 侧 _strict_json_loads/_walk_finite 是第一枪，这里是最后一枪。
+        永不抛。"""
+        if not isinstance(node, dict):
+            return
+        for k in list(node.keys()):
+            v = node[k]
+            if isinstance(v, dict):
+                Settings._drop_nonfinite(v, f"{_path}{k}.")
+            elif isinstance(v, float) and not math.isfinite(v):
+                logger.error("[配置] 丢弃非有限数值写入（M8 纵深闸）: %s%s=%r",
+                             _path, k, v)
+                del node[k]
 
     @staticmethod
     def _scrub_masked(patch: dict) -> None:

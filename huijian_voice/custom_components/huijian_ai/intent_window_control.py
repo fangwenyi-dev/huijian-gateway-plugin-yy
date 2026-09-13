@@ -356,68 +356,99 @@ class ControlWindowIntent(intent.IntentHandler):
 
     async def async_handle(self, intent_obj: intent.Intent) -> JsonObjectType:
         """Handle window control intent."""
-        slots = self.async_validate_slots(intent_obj.slots)
-        _LOGGER.info("ControlWindow slots=%s", slots)
+        # M5（2026-09-23 深审）纵深兜底：窗控扫描/注册表面任何意外异常都不许
+        # 炸 500 让话术层空转——如实失败可复述（同 intent_turn「永不抛」铁律；
+        # root cause 已在 intent_window_const 判空守卫收口）。IntentHandleError
+        # 是 HA 正规失败通道，透传给 response 层不做二次折叠。
+        try:
+            slots = self.async_validate_slots(intent_obj.slots)
+            _LOGGER.info("ControlWindow slots=%s", slots)
 
-        action_slot = slots.get("action", {}).get("value")
-        targets: list[HaTargetItem] = slots.get("target", {}).get("value", [])
-        if not targets:
-            return {"success": False, "error": "No target specified"}
+            action_slot = slots.get("action", {}).get("value")
+            targets: list[HaTargetItem] = slots.get("target", {}).get("value", [])
+            if not targets:
+                return {"success": False, "error": "No target specified"}
 
-        target = targets[0]
-        area_name = target.get("area")
-        devices = target.get("devices", [])
+            target = targets[0]
+            area_name = target.get("area")
+            devices = target.get("devices", [])
 
-        device_name = None
-        domains = []
-        if devices:
-            domains = devices[0].get("domains", [])
-            device_name = devices[0].get("name")
+            device_name = None
+            domains = []
+            if devices:
+                domains = devices[0].get("domains", [])
+                device_name = devices[0].get("name")
 
-        _LOGGER.info(
-            "Input: device_name='%s', domains=%s, area_name='%s', action_slot='%s'",
-            device_name, domains, area_name, action_slot,
-        )
-
-        # 归一化中文数字（如"五号"->"5号"），提高与HA实体名称的匹配成功率
-        if device_name:
-            device_name = normalize_chinese_numbers(device_name)
-            _LOGGER.info("After number normalization: device_name='%s'", device_name)
-
-        window_name = extract_window_name(device_name or "")
-        action = find_action_in_text(device_name or "")
-
-        if not action and action_slot:
-            action = find_action_in_text(action_slot)
-
-        _LOGGER.info("Extracted: window_name='%s', action='%s'", window_name, action)
-
-        # 百分比开度定位（v1.7.20+ 网关开窗器）：与二值开/关同一套窗类解析，
-        # 命中后按「按钮→同设备 cover」下发 set_cover_position。
-        # 必须在 window_name 缺失的全窗兜底分支之前裁决——位置语义不需要
-        # action（"开到50%"剥掉动词尾巴后无独立动作词）。
-        pos_raw = (slots.get("position") or {}).get("value")
-        if pos_raw is not None:
-            return await _apply_window_position(
-                intent_obj, window_name, area_name, device_name, pos_raw
+            _LOGGER.info(
+                "Input: device_name='%s', domains=%s, area_name='%s', action_slot='%s'",
+                device_name, domains, area_name, action_slot,
             )
 
-        # 开窗器速度/力度参数（网关 v1.4.3+）：与开度同在，裁决同位次——
-        # 参数句不需要 action，必须赶在 window_name 缺失的全窗兜底分支之前。
-        for _param in ("speed", "strength"):
-            _raw = (slots.get(_param) or {}).get("value")
-            if _raw is not None:
-                return await _apply_window_param(
-                    intent_obj, window_name, area_name, device_name, _raw, _param
+            # 归一化中文数字（如"五号"->"5号"），提高与HA实体名称的匹配成功率
+            if device_name:
+                device_name = normalize_chinese_numbers(device_name)
+                _LOGGER.info("After number normalization: device_name='%s'", device_name)
+
+            window_name = extract_window_name(device_name or "")
+            action = find_action_in_text(device_name or "")
+
+            if not action and action_slot:
+                action = find_action_in_text(action_slot)
+
+            _LOGGER.info("Extracted: window_name='%s', action='%s'", window_name, action)
+
+            # 百分比开度定位（v1.7.20+ 网关开窗器）：与二值开/关同一套窗类解析，
+            # 命中后按「按钮→同设备 cover」下发 set_cover_position。
+            # 必须在 window_name 缺失的全窗兜底分支之前裁决——位置语义不需要
+            # action（"开到50%"剥掉动词尾巴后无独立动作词）。
+            pos_raw = (slots.get("position") or {}).get("value")
+            if pos_raw is not None:
+                return await _apply_window_position(
+                    intent_obj, window_name, area_name, device_name, pos_raw
                 )
 
-        if not window_name:
-            # extract 返回 None 有两种截然不同的成因，必须分开裁决：
-            # ① device_name 是真空/裸窗/显式全窗泛称 → 意图就是"本区域所有窗"，
-            #    升级全窗正确；② device_name 是具体名但没匹配上窗型（旧版漏识、
-            #    ASR 丢字） → 绝不能升级成全窗（这正是"打开内开窗连带开推拉窗"
-            #    事故的放大器）。②一律如实失败，让用户听到"没找到这扇窗"。
-            if is_generic_window_name(device_name):
+            # 开窗器速度/力度参数（网关 v1.4.3+）：与开度同在，裁决同位次——
+            # 参数句不需要 action，必须赶在 window_name 缺失的全窗兜底分支之前。
+            for _param in ("speed", "strength"):
+                _raw = (slots.get(_param) or {}).get("value")
+                if _raw is not None:
+                    return await _apply_window_param(
+                        intent_obj, window_name, area_name, device_name, _raw, _param
+                    )
+
+            if not window_name:
+                # extract 返回 None 有两种截然不同的成因，必须分开裁决：
+                # ① device_name 是真空/裸窗/显式全窗泛称 → 意图就是"本区域所有窗"，
+                #    升级全窗正确；② device_name 是具体名但没匹配上窗型（旧版漏识、
+                #    ASR 丢字） → 绝不能升级成全窗（这正是"打开内开窗连带开推拉窗"
+                #    事故的放大器）。②一律如实失败，让用户听到"没找到这扇窗"。
+                if is_generic_window_name(device_name):
+                    if area_name and action:
+                        all_buttons = find_all_window_buttons_by_action(
+                            intent_obj.hass, area_name, action
+                        )
+                        if all_buttons:
+                            results, failed_msgs = await _press_multi_buttons(
+                                intent_obj.hass, intent_obj.context, action, all_buttons
+                            )
+                            return _all_window_result(area_name, action, results, failed_msgs)
+                    return {
+                        "success": False,
+                        "error": f"Could not find any {action} buttons in {area_name}",
+                    }
+                return {
+                    "success": False,
+                    "error": f"未识别的窗户名称 '{device_name}'——不敢按全窗执行，"
+                             f"请说完整窗型（如内开窗/推拉窗）或明确说'所有窗户'",
+                }
+
+            # Bare general window name (name="窗户"/"窗"/"窗子") = all windows of the
+            # area. 旧条件 device_name==window_name 在裸"窗"上永不成立（extract 已把
+            # 它归一成"窗户"）——2026-09-21 复盘改裸名集合判定；"2号窗"等带名窗不命中
+            # 裸名集合，仍走精确单窗路径，语义不变。
+            is_all_windows = bool(window_name) and is_bare_window_name(device_name)
+
+            if is_all_windows:
                 if area_name and action:
                     all_buttons = find_all_window_buttons_by_action(
                         intent_obj.hass, area_name, action
@@ -431,69 +462,48 @@ class ControlWindowIntent(intent.IntentHandler):
                     "success": False,
                     "error": f"Could not find any {action} buttons in {area_name}",
                 }
-            return {
-                "success": False,
-                "error": f"未识别的窗户名称 '{device_name}'——不敢按全窗执行，"
-                         f"请说完整窗型（如内开窗/推拉窗）或明确说'所有窗户'",
-            }
 
-        # Bare general window name (name="窗户"/"窗"/"窗子") = all windows of the
-        # area. 旧条件 device_name==window_name 在裸"窗"上永不成立（extract 已把
-        # 它归一成"窗户"）——2026-09-21 复盘改裸名集合判定；"2号窗"等带名窗不命中
-        # 裸名集合，仍走精确单窗路径，语义不变。
-        is_all_windows = bool(window_name) and is_bare_window_name(device_name)
+            if not action:
+                return {
+                    "success": False,
+                    "error": f"Could not determine action from '{device_name}' or '{action_slot}'",
+                }
 
-        if is_all_windows:
-            if area_name and action:
-                all_buttons = find_all_window_buttons_by_action(
-                    intent_obj.hass, area_name, action
-                )
-                if all_buttons:
-                    results, failed_msgs = await _press_multi_buttons(
-                        intent_obj.hass, intent_obj.context, action, all_buttons
-                    )
-                    return _all_window_result(area_name, action, results, failed_msgs)
-            return {
-                "success": False,
-                "error": f"Could not find any {action} buttons in {area_name}",
-            }
-
-        if not action:
-            return {
-                "success": False,
-                "error": f"Could not determine action from '{device_name}' or '{action_slot}'",
-            }
-
-        buttons = find_window_buttons(
-            intent_obj.hass, window_name, area_name, original_name=device_name
-        )
-        _LOGGER.info("Found buttons (area=%s): %s", area_name, buttons)
-
-        # 曾有"本区域找不到→摘掉区域重找"回捞：区域注册名对不上时它是等价
-        # 空转（find_window_buttons 内部 target_area_id=None 本就不设限），区域
-        # 存在时它会把**别屋同型窗**当目标——静默跨区误执行，与 v1.0.42 R3
-        # 跨区错绑守卫同族，2026-09-21 事故复盘删除。用户点名的区域是硬约束。
-        if action not in buttons:
-            return {
-                "success": False,
-                "error": f"Could not find {action} button for {window_name} in {area_name or 'any area'}",
-            }
-
-        button_entity_id = buttons[action]
-
-        try:
-            await intent_obj.hass.services.async_call(
-                BUTTON_DOMAIN,
-                SERVICE_PRESS_BUTTON,
-                {ATTR_ENTITY_ID: button_entity_id},
-                context=intent_obj.context,
-                blocking=True,
+            buttons = find_window_buttons(
+                intent_obj.hass, window_name, area_name, original_name=device_name
             )
-            _LOGGER.info("Successfully pressed: %s", button_entity_id)
-            return {
-                "success": True,
-                "message": "已经帮你执行了",
-            }
-        except Exception as err:
-            _LOGGER.error("Failed to press %s: %s", button_entity_id, err)
-            return {"success": False, "error": str(err)}
+            _LOGGER.info("Found buttons (area=%s): %s", area_name, buttons)
+
+            # 曾有"本区域找不到→摘掉区域重找"回捞：区域注册名对不上时它是等价
+            # 空转（find_window_buttons 内部 target_area_id=None 本就不设限），区域
+            # 存在时它会把**别屋同型窗**当目标——静默跨区误执行，与 v1.0.42 R3
+            # 跨区错绑守卫同族，2026-09-21 事故复盘删除。用户点名的区域是硬约束。
+            if action not in buttons:
+                return {
+                    "success": False,
+                    "error": f"Could not find {action} button for {window_name} in {area_name or 'any area'}",
+                }
+
+            button_entity_id = buttons[action]
+
+            try:
+                await intent_obj.hass.services.async_call(
+                    BUTTON_DOMAIN,
+                    SERVICE_PRESS_BUTTON,
+                    {ATTR_ENTITY_ID: button_entity_id},
+                    context=intent_obj.context,
+                    blocking=True,
+                )
+                _LOGGER.info("Successfully pressed: %s", button_entity_id)
+                return {
+                    "success": True,
+                    "message": "已经帮你执行了",
+                }
+            except Exception as err:
+                _LOGGER.error("Failed to press %s: %s", button_entity_id, err)
+                return {"success": False, "error": str(err)}
+        except intent.IntentHandleError:
+            raise
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.exception("ControlWindow 未预期异常，如实失败: %s", err)
+            return {"success": False, "error": f"窗控内部错误：{err}"}

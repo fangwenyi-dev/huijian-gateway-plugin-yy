@@ -682,8 +682,26 @@ class AutomationManager:
                     assistant=None,
                     device_id=None,
                 )
-                _LOGGER.info("Automation action success: %s", intent_name)
-                results.append((str(intent_name), True, ""))
+                _LOGGER.info("Automation action done: %s", intent_name)
+                # H3 同构收口（2026-09-23 深审）：异常通道 F4 已修，但
+                # IntentResponse(result_type=ERROR) 与自定义 dict {"success":
+                # False} 两型折叠失败此前仍记 True——成败必须读返回值内容，
+                # 不能只读异常（本仓铁律：绝不吃一扇谎报成功）。
+                ok = True
+                if isinstance(response, dict):
+                    ok = response.get("success") is not False
+                elif getattr(response, "success", True) is False:
+                    ok = False
+                if ok:
+                    results.append((str(intent_name), True, ""))
+                else:
+                    if isinstance(response, dict):
+                        err = str(response.get("error") or "执行未成功")
+                    else:
+                        err = str(getattr(response, "error", None) or "执行未成功")
+                    _LOGGER.error("Automation action folded failure: %s: %s",
+                                  intent_name, err)
+                    results.append((str(intent_name), False, err))
             except Exception as e:
                 _LOGGER.error("Automation action failed: %s: %s", intent_name, e)
                 results.append((str(intent_name), False, str(e)))

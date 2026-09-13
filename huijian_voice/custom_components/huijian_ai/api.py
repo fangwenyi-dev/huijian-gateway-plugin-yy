@@ -111,6 +111,51 @@ def _get_action_summary(action: dict) -> str:
 _TRIGGER_ENTITY_RE = re.compile(r"[a-z0-9_]{1,64}\.[a-z0-9_]{1,64}")
 
 
+_SCENE_INTENT_WHITELIST = frozenset({
+    "TurnDeviceOn", "TurnDeviceOff", "ControlWindow", "WindowControl",
+    "AdjustDeviceAttribute", "SetDeviceMode",
+})  # 与 intent_voice_scene._execute_intent 的运行时白名单严格同步
+
+
+def _validate_scene_body(body) -> str:
+    """M7（2026-09-23 深审）PUT 场景形态闸（v1.0.41 F2 自动化侧同族）：
+    过闸返回 ""，违规返回字段名。
+
+    旧实现 `{"actions":"xx"}` 一发改渲染层 `for a in actions` 即 AttributeError
+    → CombinedManageView/TestSceneView 循环体在 try 外无兜底 → 管理页对全员
+    永久 500、脏值重启不消。规则：
+      · actions 若给必须 list[dict]，intent/name 在运行时白名单内（语音删不
+        掉的"僵尸动作"从一开始就不该进 .storage）；
+      · params 若给必须 dict；
+      · trigger_phrase 若给必须 1..40 字符非空白 str（绕 F8 字符闸造"语音
+        永远触发不到又删不掉"脏场景的 PUT 旁路）。
+    永不抛。"""
+    try:
+        if not isinstance(body, dict):
+            return "body"
+        tp = body.get("trigger_phrase")
+        if tp is not None:
+            if not isinstance(tp, str) or not (1 <= len(tp.strip()) <= 40) \
+                    or any(ord(c) < 32 for c in tp):
+                return "trigger_phrase"
+        acts = body.get("actions")
+        if acts is not None:
+            if not isinstance(acts, list) or len(acts) > 50:
+                return "actions"
+            for a in acts:
+                if not isinstance(a, dict):
+                    return "actions"
+                name = a.get("intent") or a.get("name")
+                if name not in _SCENE_INTENT_WHITELIST:
+                    return "actions.intent"
+                params = a.get("params") or a.get("parameters") or {}
+                if not isinstance(params, dict):
+                    return "actions.params"
+        return ""
+    except Exception:  # noqa: BLE001
+        return "body"
+
+
 def _validate_trigger(trigger) -> str:
     """PUT 形态闸（v1.0.41 F2）：过闸返回 ""，违规返回字段名。
 
@@ -157,8 +202,11 @@ class VoiceScenesListView(HomeAssistantView):
             scene_list = []
             for scene in scenes:
                 actions = scene.get("actions", [])
-                device_details = [_extract_device_info(a) for a in actions]
-                action_summaries = [_get_action_summary(a) for a in actions]
+                if not isinstance(actions, list):
+                    actions = []          # M7 存量脏形态韧性：非 list 按空处理
+                safe_actions = [a for a in actions if isinstance(a, dict)]
+                device_details = [_extract_device_info(a) for a in safe_actions]
+                action_summaries = [_get_action_summary(a) for a in safe_actions]
 
                 scene_list.append(
                     {
@@ -203,6 +251,15 @@ class VoiceSceneDeleteView(HomeAssistantView):
         try:
             body = await request.json()
             _LOGGER.info("Updating voice scene %s: body=%s", scene_id, body)
+            bad = _validate_scene_body(body)
+            if bad:
+                # M7（2026-09-23 深审）：F2 自动化侧入库闸的场景侧遗漏——
+                # 零校验直存 .storage 的 {"actions":"xx"} 一发改管理页全员
+                # 永久 500（重启不消）+ 绕 F8 造语音删不掉的脏场景。
+                _LOGGER.warning("拒绝非法场景 PUT %s：%s 形态不符", scene_id, bad)
+                return self.json(
+                    {"success": False, "error": f"字段 {bad} 形态非法，拒写"},
+                    status_code=400)
             store = get_voice_scene_store(hass)
             success, message = await store.update_scene(
                 scene_id,
@@ -258,6 +315,8 @@ class TestSceneView(HomeAssistantView):
                 )
 
             actions = scene.get("actions", [])
+            actions = [a for a in actions if isinstance(a, dict)] \
+                if isinstance(actions, list) else []   # M7 存量脏形态韧性
             if not actions:
                 return self.json(
                     {"success": False, "error": "场景没有配置任何动作"},
@@ -272,10 +331,23 @@ class TestSceneView(HomeAssistantView):
                 ha_slots = {k: {"value": v} for k, v in params.items()}
                 try:
                     async with asyncio.timeout(30):
-                        await ha_intent.async_handle(
+                        response = await ha_intent.async_handle(
                             hass, DOMAIN, intent_name, slots=ha_slots,
                         )
-                    executed.append({"intent": intent_name, "result": "success"})
+                    # H3 同判据（2026-09-23 深审）：test 路径不读 response 内容
+                    # =折叠失败也报「成功」——测试的意义就是见真相。
+                    ok = getattr(response, "success", True) is not False
+                    if isinstance(response, dict):
+                        ok = response.get("success") is not False
+                    if ok:
+                        executed.append({"intent": intent_name, "result": "success"})
+                    else:
+                        has_errors = True
+                        err = (response.get("error") if isinstance(response, dict)
+                               else str(getattr(response, "error", None)
+                                        or "执行未成功"))
+                        executed.append({"intent": intent_name, "result": "error",
+                                         "error": str(err or "执行未成功")})
                 except asyncio.TimeoutError:
                     has_errors = True
                     _LOGGER.error("Test scene action timed out: %s", intent_name)
@@ -355,6 +427,10 @@ class CombinedManageView(HomeAssistantView):
         auto_cards_html = ""
 
         for scene in scenes_raw:
+          try:
+            # M7（2026-09-23 深审）：单卡渲染异常（历史脏 .storage 形态）此前
+            # 裸抛 → 管理页对全员永久 500 且重启不消。入库闸（PUT
+            # _validate_scene_body）管增量，本兜底救存量：坏卡降级为提示卡。
             scene_id_raw = str(scene.get("scene_id", ""))
             trigger_raw = str(scene.get("trigger_phrase", ""))
             scene_id = html_mod.escape(scene_id_raw)
@@ -391,8 +467,19 @@ class CombinedManageView(HomeAssistantView):
         {actions_html}
     </div>
 </div>"""
+          except Exception as e:  # noqa: BLE001
+            _LOGGER.error("场景卡渲染异常（脏 .storage 形态），已降级提示卡: %s", e)
+            scene_cards_html += (
+                '<div class="card scene"><div class="card-header">'
+                '<div><span class="card-trigger scene">⚠ 数据异常场景</span>'
+                '<span class="card-tag scene">语音场景</span></div></div>'
+                '<div class="info">存储形态非法（已拒绝新写入，'
+                '请用 DELETE /api/huijian-ai/voice-scenes/{id} 或面板删除本条）</div></div>'
+            )
 
         for auto in automations_raw:
+          try:
+            # M7 同口收口：自动化卡一视同仁（trigger 非 dict 等脏形态）
             auto_id_raw = str(auto.get("automation_id", ""))
             auto_id = html_mod.escape(auto_id_raw)
             trigger_entity = auto.get("trigger", {}).get("entity_id", "")
@@ -472,6 +559,14 @@ class CombinedManageView(HomeAssistantView):
         {actions_html}
     </div>
 </div>"""
+          except Exception as e:  # noqa: BLE001
+            _LOGGER.error("自动化卡渲染异常（脏 .storage 形态），已降级提示卡: %s", e)
+            auto_cards_html += (
+                '<div class="card auto"><div class="card-header">'
+                '<div><span class="card-trigger auto">⚠ 数据异常自动化</span>'
+                '<span class="card-tag auto">自动化</span></div></div>'
+                '<div class="info">存储形态非法（请用面板删除本条）</div></div>'
+            )
 
         has_scenes = len(scene_cards_html) > 0
         has_autos = len(auto_cards_html) > 0

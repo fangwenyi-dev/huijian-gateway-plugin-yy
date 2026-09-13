@@ -7,7 +7,7 @@ from pathlib import Path
 APP_NAME = "huijian_voice"
 # 裸 docker build 会把 ENV 烘成占位值 0.0.0：毒值不得穿透成对外版本
 _env_ver = os.environ.get("HUIJIAN_VERSION", "")
-APP_VERSION = _env_ver if _env_ver and _env_ver != "0.0.0" else "1.0.63"
+APP_VERSION = _env_ver if _env_ver and _env_ver != "0.0.0" else "1.0.64"
 
 
 def addon_version() -> str:
@@ -34,6 +34,13 @@ SETTINGS_FILE = Path(os.environ.get("HUIJIAN_SETTINGS", str(DATA_DIR / "settings
 INSTALL_DIR = Path(os.environ.get("HUIJIAN_INSTALL_DIR", str(Path(__file__).resolve().parent.parent)))
 NLU_DATA_DIR = Path(os.environ.get("HUIJIAN_NLU_DATA", str(INSTALL_DIR / "nlu_data")))
 MODELS_LOCK_FILE = Path(os.environ.get("HUIJIAN_MODELS_LOCK", str(INSTALL_DIR / "models.lock.json")))
+# ── ESP32 固件仓（OTA 方案 Phase 2 加载项侧，2026-09-23）────────────────
+# public=验过可下发区（token 一次性领取）；import=投递口（同 models 导入口纪律）。
+# 发版锁可被持久卷同名文件覆盖（现场运维热修不重打镜像），与 models 双源惯例一致。
+FIRMWARE_DIR = Path(os.environ.get("HUIJIAN_FIRMWARE_DIR", str(DATA_DIR / "firmware")))
+FIRMWARE_PUBLIC_DIR = FIRMWARE_DIR / "public"
+FIRMWARE_IMPORT_DIR = FIRMWARE_DIR / "import"
+FIRMWARE_LOCK_FILE = Path(os.environ.get("HUIJIAN_FIRMWARE_LOCK", str(INSTALL_DIR / "firmware.lock.json")))
 
 # 事实文件（nginx 静态目录，网关 status.json 同款模式）
 STATUS_FILE = Path(os.environ.get("HUIJIAN_STATUS_FILE", "/usr/share/nginx/html/status.json"))

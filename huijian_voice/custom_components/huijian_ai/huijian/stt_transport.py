@@ -1,4 +1,14 @@
+"""STT 通道传输（v1.0.64 深审批5：全量迁移 TTS 已验证的锁+超时+清算三件套）。
+
+M9/H7/M10 三案同源（报告 2026-09-23）：全卫星共享一条 SttTransport，旧实现
+无事务锁、发送零超时、空/超时也回 SUCCESS——并发听写互相顶替帧序、悬挂
+writer 永久阻塞、假成功喂管线"空话"。TTS 侧 v1.0.45 已把同病灶三件套收口
+（_request_lock + wait_for + restart 清算），STT 从未迁移，本文件补齐。
+await_message 保留为兼容壳（新链路一律走 recognize）。
+"""
+import asyncio
 import logging
+import time
 
 import anyio
 from homeassistant.config_entries import ConfigEntry
@@ -10,6 +20,9 @@ from .ws_transport import WsTransport
 _LOGGER = logging.getLogger(__name__)
 ATTR_ENDPOINT = "stt_endpoint"
 ATTR_TRANSPORT = "stt_transport"
+
+_SEND_TIMEOUT_S = 10.0
+_STALE_DRAIN_BUDGET_S = 0.5
 
 
 def get_entry_transport(hass: HomeAssistant, entry: ConfigEntry) -> "SttTransport":
@@ -34,8 +47,83 @@ def get_entry_transport(hass: HomeAssistant, entry: ConfigEntry) -> "SttTranspor
 class SttTransport(WsTransport):
     _transport_type = "stt"
 
+    def __init__(self, hass, entry, endpoint, attr_endpoint, logger=None):
+        super().__init__(hass, entry, endpoint, attr_endpoint, logger)
+        # M9：整段对话上锁串行是唯一解（v1.0.45 TTS 定案原文同病同理）。
+        self._request_lock = asyncio.Lock()
+
+    def _drain_stale(self) -> int:
+        """事务前排净 reader 上已排队的残帧/残转录（上一轮超时/取消遗留）。"""
+        drained = 0
+        deadline = time.monotonic() + _STALE_DRAIN_BUDGET_S
+        while time.monotonic() < deadline:
+            try:
+                self._recv_reader.receive_nowait()
+            except (anyio.WouldBlock, anyio.EndOfStream, anyio.ClosedResourceError):
+                break
+            drained += 1
+        if drained:
+            self.logger.warning(
+                "STT 连接上清掉上一轮残留 %d 条（此前有识别被取消/超时），已丢弃",
+                drained)
+        return drained
+
+    async def recognize(self, chunks, timeout: int = 60):
+        """一整轮听写事务（hello→start→opus 帧→stop→收转录）。
+
+        返回 (text, error)：
+          - (str|None, None)：正常收口，"" 为合法空识别；
+          - (_, error 非空)：连接/发送/超时故障——调用方必须报
+            SpeechResultState.ERROR。旧形态超时/None 也 SUCCESS（H7），
+            管线播"空话"假成功；替身恒 wait_for(3) 的 e2e 测不出真机悬挂，
+            本方法栈就是判据本体。
+        发送段一律 wait_for 可超时（悬挂 writer 永堵=持锁永堵，TTS :118
+        原律）；任何非正常收口都 restart_connection 断连清算，残帧不跨轮。
+        """
+        async with self._request_lock:
+            if not await self.ensure_connected():
+                return None, "WebSocket connection unavailable"
+            self._drain_stale()
+            frames = 0
+            try:
+                await asyncio.wait_for(self.send_hello(), _SEND_TIMEOUT_S)
+                await asyncio.wait_for(
+                    self.send_message({"type": "listen", "state": "start"}),
+                    _SEND_TIMEOUT_S)
+                async for chunk in chunks:
+                    await asyncio.wait_for(self.send_message(chunk),
+                                           _SEND_TIMEOUT_S)
+                    frames += 1
+                await asyncio.wait_for(
+                    self.send_message({"type": "listen", "state": "stop"}),
+                    _SEND_TIMEOUT_S)
+            except Exception as err:  # noqa: BLE001（含 TimeoutError）
+                self.logger.warning("STT 发送段失败（已发 %d 帧）: %s", frames, err)
+                await self.restart_connection(f"STT 发送段失败: {err}")
+                return None, f"Send failed: {err}"
+            _LOGGER.debug("STT 发送完成：%d 帧，等待转录", frames)
+            text = None
+            try:
+                with anyio.fail_after(timeout):
+                    async for data in self._recv_reader:
+                        if data.type in ["stt", "tts"]:
+                            text = data.text
+                            break
+            except TimeoutError:
+                self.logger.warning("STT 等待转录超时（%ds，已发 %d 帧）",
+                                    timeout, frames)
+                return None, "Response timeout"
+            except Exception as err:  # noqa: BLE001 reader 被关闭等
+                self.logger.warning("STT 收取异常: %s", err)
+                return None, f"Receive failed: {err}"
+            finally:
+                if text is None:
+                    await self.restart_connection(
+                        "STT 未以转录消息收口（超时/异常），断连清算残留")
+            return text, None
+
     async def await_message(self, timeout: int = 60):
-        """Wait response message"""
+        """兼容壳（新链路一律走 recognize；保留仅防第三方直接调用）。"""
         try:
             with anyio.fail_after(timeout):
                 async for data in self._recv_reader:

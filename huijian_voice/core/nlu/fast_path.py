@@ -171,6 +171,20 @@ _ATTR_ONLY = re.compile(
     r"(?:调|整)*(?:高|低|亮|暗|大|小)?(?:到|至|为|成)?\s*(\d{1,3})?\s*[%％]?\s*(?:一半)?\s*(?:一点|一些|点|些)?\s*$")
 _ATTR_DOMAIN = {"亮度": "light", "色温": "light", "温度": "climate",
                 "风量": "climate", "风速": "climate", "位置": "cover", "开合度": "cover"}
+# M3（2026-09-23 深审）：T0 动词头吞掉目标后，「短前缀+属性词+数值/相对档」尾巴
+# 不得静默丢——「开灯亮度50」曾落 TurnDeviceOn(灯)谎报成功，「亮度50」蒸发，
+# 且违约 CHANGELOG v1.0.37 承诺「触发词是开灯时，说开灯亮度50依然是调亮度」。
+_T0_ATTR_WORD = {"亮度": "brightness", "色温": "color_temperature",
+                 "温度": "temperature", "风量": "fan_speed", "风速": "fan_speed",
+                 "开合度": "position", "位置": "position"}
+_T0_ATTR_TAIL = re.compile(
+    r"^(?P<dev>[\u4e00-\u9fffA-Za-z0-9]{0,6}?)"
+    r"(?P<attr>亮度|色温|温度|风量|风速|开合度|位置)"
+    r"\s*(?:调到|设为|设到|改成|改为|调高到|调低到|到|至|为|成)?\s*"
+    r"(?P<val>\d{1,5}\s*[%％Kk]?|(?:百分之)?[零一二三四五六七八九十百]{1,6}\s*[%％度Kk]?"
+    r"|一半|半数"
+    r"|(?:调高|调低|调亮|调暗|加大|减小|增大|高|低|大|小|亮|暗|暖|凉)\s*(?:一点|一些|些|点)?)"
+    r"$")
 # T1 Adjust 剥数值段后的**句首**调节动词（只收双字形——单字会误剥
 # "空调/拉窗"类设备名头部）。
 _ADJ_HEAD = re.compile(r"^(?:调高|调低|调亮|调暗|调大|调小|调到|调至|调成|调为|"
@@ -990,6 +1004,46 @@ class FastPath:
         residue = re.sub(r"[调一些点把将了%％到亮暗度色温风量速为成设]", "", rest_text)
         if not residue.strip():
             rest_text = ""
+        # M3（2026-09-23 深审）：Turn* 句残段仍带「属性词+数值/相对档」→ 绝不
+        # 按开关谎报（尾巴被吞=半执行）；能折算落属性通道，不能如实整句拒。
+        if intent in ("TurnDeviceOn", "TurnDeviceOff") and rest_text \
+                and (am := _T0_ATTR_TAIL.match(rest_text)):
+            attr_word = am.group("attr")
+            attribute = _T0_ATTR_WORD[attr_word]
+            _dl = None
+            vtail = rest_text[am.start("attr"):]
+            if (am.group("val") or "").strip() in ("一半", "半数"):
+                _dl = "50"          # 属性句的「一半」=绝对 50（v1.0.63 同口径）
+            scanned = _scan_delta(vtail, attribute)
+            if _dl is None and scanned:
+                _dl = scanned[0]
+            elif _dl is not None and scanned is None:
+                pass                # 一半已由上面定值
+            if _dl is None:
+                vm = re.match(r"^(\d{1,5})\s*[%％Kk]?$", (am.group("val") or "").strip())
+                if vm:
+                    _dl = vm.group(1)
+            if _dl is None:
+                return self._miss(trace, f"T0属性尾巴不可解:{rest_text}")
+            vraw = (am.group("val") or "").strip()
+            if (attr_word in ("位置", "开合度") and re.fullmatch(r"\d{1,2}", vraw)
+                    and "%" not in vraw and "％" not in vraw):
+                # 裸短数字对帘是「50%」还是「第1档按压」歧义——如实拒，不猜。
+                # 「一半/半数」无歧义（=50，v1.0.63 同口径），不在拒列。
+                return self._miss(trace, f"位置裸数字歧义:{rest_text}")
+            dev = T.clean_name(T.normalize_name(T.strip_modal(am.group("dev")))).strip("的地")
+            dom = _ATTR_DOMAIN.get(attr_word, "light")
+            if not dev:
+                tgt = [{"devices": [{"name": "", "domains": [dom]}]}]
+            elif dev.endswith(tuple(T.AREA_SUFFIX)):
+                tgt = [{"area": dev, "devices": [{"domains": [dom]}]}]
+            else:
+                tgt = [{"devices": [{"name": dev,
+                                      "domains": T.domain_hint(dev) or [dom]}]}]
+            trace.append(f"T0属性尾巴收编:{dev or dom}+{attr_word}→{_dl}")
+            return Plan(intent="AdjustDeviceAttribute",
+                        args={"attribute": attribute, "delta": str(_dl), "target": tgt},
+                        source=source, utterance=text, trace=trace)
         # Adjust + 「区域?+属性词」：目标=该区域属性域，属性词不吃成设备名
         if intent == "AdjustDeviceAttribute" and rest_text and (mm := _ATTR_ONLY.match(rest_text)):
             area, attr_word = mm.group(1) or "", mm.group(2)
@@ -1004,11 +1058,23 @@ class FastPath:
             trace.append(f"属性词快捷:{area or '全屋'}+{attr_word}→{dom}")
             return Plan(intent=intent, args=args, source=source, utterance=text, trace=trace)
         # 温度调节且无设备名 → HassClimateSetTemperature 改道（原 L695-701 保留）
+        # H1（2026-09-23 深审）：改道分支 `_to_int("+1")=1` 把**相对档静默变
+        # 绝对值**——「温度调高一点」全屋空调设到 1°C 且谎报「已调到1度」。
+        # 改道只对无符号绝对值合法；带符号相对档落 Adjust+climate 域通道
+        # （对照面：带设备名/带区域的同句一直保相对语义，非对称即缺陷）。
         if (extra.get("attribute") == "temperature" and extra.get("delta")
                 and not rest_text.strip()):
-            return Plan(intent="HassClimateSetTemperature",
-                        args={"temperature": _to_int(extra["delta"]), "area": ""},
-                        source=source, utterance=text, trace=trace + ["温度改道 ClimateSetTemperature"])
+            _d = str(extra["delta"]).strip()
+            if not _d.startswith(("+", "-")):
+                return Plan(intent="HassClimateSetTemperature",
+                            args={"temperature": _to_int(_d), "area": ""},
+                            source=source, utterance=text,
+                            trace=trace + ["温度改道 ClimateSetTemperature"])
+            return Plan(intent="AdjustDeviceAttribute",
+                        args={"attribute": "temperature", "delta": _d,
+                              "target": [{"devices": [{"name": "", "domains": ["climate"]}]}]},
+                        source=source, utterance=text,
+                        trace=trace + ["温度相对档→Adjust+climate(H1)"])
 
         _was_on = intent == "TurnDeviceOn"
         area, name, score = T.parse_target(rest_text, action_match=_any_action_match)

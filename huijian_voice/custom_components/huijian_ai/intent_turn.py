@@ -533,7 +533,7 @@ class TurnDeviceIntentBase(intent.IntentHandler):
         from .intent_window_const import (extract_window_name,
                                           find_all_window_buttons_by_action,
                                           find_window_buttons)
-        from .intent_window_control import _press_multi_buttons
+        from .intent_window_control import _all_window_result, _press_multi_buttons
 
         action = "open" if service == "turn_on" else "close"
 
@@ -550,7 +550,12 @@ class TurnDeviceIntentBase(intent.IntentHandler):
                 intent_obj.hass, area_name or "", action
             )
             if buttons:
-                results = await _press_multi_buttons(
+                # H4（2026-09-23 深审）：v1.0.52 A-F2 把 _press_multi_buttons 改
+                # 返回 (results, failed_msgs) 并给 window_control 两处解包，此处
+                # 第三消费者漏改——tuple 整体塞进 "buttons" 字段且无条件 success，
+                # 0/N 全败也播「已关闭所有窗户」。**改返回形态必须 grep 全消费点**
+                # （报告 §三 一族病第 3 次实锤，本钉含消费点计数断言）。
+                results, failed_msgs = await _press_multi_buttons(
                     intent_obj.hass, intent_obj.context, action, buttons
                 )
                 _LOGGER.info(
@@ -559,11 +564,10 @@ class TurnDeviceIntentBase(intent.IntentHandler):
                     area_name,
                     results,
                 )
-                return {
-                    "success": True,
-                    "control_targets": [{"name": "窗户", "area": area_name or ""}],
-                    "buttons": results,
-                }
+                out = _all_window_result(area_name, action, results, failed_msgs)
+                out.setdefault("control_targets",
+                               [{"name": "窗户", "area": area_name or ""}])
+                return out
             return None
 
         button_map = find_window_buttons(

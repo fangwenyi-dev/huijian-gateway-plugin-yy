@@ -279,12 +279,19 @@ class HAClient:
         eps.append(f"{b}/api/websocket")          # 直连 HA core 形态
         return eps
 
+    _WS_CMD_TIMEOUT_S = 10.0   # M1（2026-09-23 深审）：注册表命令级悬挂枪
+
     async def _ws_cmd(self, ws, mtype: str) -> Any:
         self._ws_id = getattr(self, "_ws_id", 0) + 1
         mid = self._ws_id
-        await ws.send_json({"id": mid, "type": mtype})
+        # M1：半开 TCP（NAT 静默丢会话，对端不再回帧）时 receive 永挂，调用方
+        # 挂在管线 await 点=整轮语音无响应且零报错。TTS v1.0.45 同律：
+        # wait_for 让悬挂可失败，异常沿 _ws_registries 端点循环换候选/降级。
+        await asyncio.wait_for(ws.send_json({"id": mid, "type": mtype}),
+                               timeout=self._WS_CMD_TIMEOUT_S)
         while True:
-            m = await ws.receive_json()
+            m = await asyncio.wait_for(ws.receive_json(),
+                                       timeout=self._WS_CMD_TIMEOUT_S)
             if m.get("id") == mid:
                 if m.get("type") == "result" and m.get("success"):
                     return m.get("result")
@@ -306,7 +313,9 @@ class HAClient:
                         first = {}
                     if first.get("type") == "auth_required":
                         await ws.send_json({"type": "auth", "access_token": self.token})
-                        a = await ws.receive_json()
+                        # M1 同病灶：auth 回帧同属可悬挂点（发完 token 永等）
+                        a = await asyncio.wait_for(ws.receive_json(),
+                                                   timeout=self._WS_CMD_TIMEOUT_S)
                         if a.get("type") != "auth_ok":
                             raise RuntimeError(f"WS 认证失败: {str(a)[:120]}")
                     elif first.get("type") in ("auth_invalid", "auth_error"):
@@ -345,6 +354,17 @@ class HAClient:
     async def states(self) -> dict[str, dict]:
         await self.refresh_states()
         return dict(self._states)
+
+    async def get_state(self, entity_id: str) -> Optional[dict]:
+        """单实体状态（P1 音乐「正在播放」查询用）。走 TTL 缓存 + WS 增量回灌，
+        不打网络单查；一切失败折叠 None，永不抛（查询失败绝不影响主链）。"""
+        if not entity_id:
+            return None
+        try:
+            await self.refresh_states()
+            return self._states.get(str(entity_id))
+        except Exception:
+            return None
 
     def apply_state_event(self, event: dict) -> None:
         """WS 订阅回灌（state_changed）。"""

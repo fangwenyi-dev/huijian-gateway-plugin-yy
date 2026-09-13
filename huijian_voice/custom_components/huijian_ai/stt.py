@@ -93,21 +93,19 @@ class HuijianSttEntity(BaseEntity):
             metadata.bit_rate,
             metadata.sample_rate,
         )
+        # H7/M9/M10（2026-09-23 深审批5）：整轮听写交给 transport.recognize
+        # 统一持锁+发送超时+残帧清算（TTS v1.0.45 三件套迁移）。旧形态三罪：
+        # ①发送裸调无超时，悬挂 writer 永久阻塞；②超时/连接死仍回
+        # SUCCESS(None)——管线播"空话"假成功；③每帧一条 INFO 刷屏。
+        # 帧级日志收进 transport（聚合 DEBUG），此处只留结论一条。
         transport = stt_transport.get_entry_transport(self.hass, self.entry)
-        if not await transport.ensure_connected():
-            _LOGGER.error("Failed to establish WebSocket connection for STT")
+        text, error = await transport.recognize(wav_to_opus(stream), timeout=60)
+        if error:
+            _LOGGER.error("STT 失败（如实报 ERROR，不再假成功）: %s", error)
             return SpeechResult(None, SpeechResultState.ERROR)
-        await transport.send_hello()
-
-        await transport.send_message({"type": "listen", "state": "start"})
-        async for chunk in wav_to_opus(stream):
-            await transport.send_message(chunk)
-            _LOGGER.info("Sent audio data, size: %s", len(chunk))
-        await transport.send_message({"type": "listen", "state": "stop"})
-
-        text = None
-        async for resp in transport.await_message(60):
-            _LOGGER.info("Received response: %s", resp)
-            if resp.type in ["stt", "tts"]:
-                text = resp.text
+        if text is None:
+            # 引擎无字可回=故障面（正常空识别是 ""），按 ERROR 收口
+            _LOGGER.error("STT 未获转录消息（服务端未回），按 ERROR 收口")
+            return SpeechResult(None, SpeechResultState.ERROR)
+        _LOGGER.info("STT 完成: %r", (text or "")[:40])
         return SpeechResult(text, SpeechResultState.SUCCESS)  # type: ignore

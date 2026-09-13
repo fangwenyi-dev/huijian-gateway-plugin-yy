@@ -36,6 +36,7 @@ class AppContext:
     scenes: object = None
     textcnn: object = None
     store: object = None
+    firmware: object = None
     started_at: float = 0.0
     sessions: set = field(default_factory=set)
     host: str = ""
@@ -47,7 +48,28 @@ def make_ws_app(ctx: AppContext) -> web.Application:
     app.router.add_get("/xiaozhi/v1/{channel}", _ws_handler)
     app.router.add_get("/healthz", _health)
     app.router.add_get("/discover", _discover)
+    app.router.add_get("/firmware/{fname}", _firmware_get)
     return app
+
+
+async def _firmware_get(request: web.Request) -> web.Response:
+    """固件领取口（OTA 方案 Phase 2「近场链接兜底」下发端，2026-09-23）：
+    GET /firmware/<file>?t=<一次性令牌>。令牌由面板 POST /api/firmware/issue
+    签发（10min TTL、消费即废、绑文件名——不可指使他包）。:8000 本就 LAN
+    开放（/discover 同面），匿名枚举被"无令牌 404 + 单次消费"挡住；HTTPS 与
+    包签名属固件仓 Phase 1 收口，本口不假装有——面板文案如实警示。"""
+    ctx = request.app[CTX_KEY]
+    store = getattr(ctx, "firmware", None)
+    fname = request.match_info.get("fname", "")
+    if store is None:
+        return web.json_response({"message": "no firmware store"}, status=404)
+    path = store.take(request.query.get("t", ""), fname)
+    if path is None:
+        logger.warning("[OTA] 领取被拒 %s from %s（无/废/过期令牌或名不符）",
+                       fname, request.remote)
+        return web.json_response({"message": "invalid token"}, status=404)
+    logger.info("[OTA] 发放 %s to %s", fname, request.remote)
+    return web.FileResponse(path)
 
 
 def _auth_fail(request: web.Request, why: str) -> web.Response:

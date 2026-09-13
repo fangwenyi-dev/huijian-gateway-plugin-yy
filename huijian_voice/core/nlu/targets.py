@@ -343,7 +343,7 @@ def parse_target(raw: str, action_match=None) -> tuple[str | None, str | None, i
             _hit_dev = True
             break
     if not _hit_dev:
-        for d in ("灯", "窗", "门"):
+        for d in _SINGLE_GENERIC:
             idx = stripped.find(d)
             if idx >= 0:
                 candidates.append((_area_of_prefix(stripped[:idx]), d, 4))
@@ -424,6 +424,16 @@ def _coord_ends_device(seg: str) -> bool:
     return any(seg.endswith(d) for d in _ALL_MIN2)
 
 
+# M2（2026-09-23 深审）：候选⑤特批的单字通用设备词（parse_target 认它们做
+# 目标），coord_refuse 的 ≥2 字判据却看不见——「关灯和窗」右片「窗」是设备
+# 词但整段长 1，不被拒 → 单发灯丢窗谎报成功。判据盲区=同病灶外延。
+_SINGLE_GENERIC = ("灯", "窗", "门")
+
+
+def _coord_refuse_seg_device(seg: str) -> bool:
+    return seg in _SINGLE_GENERIC or _coord_ends_device(seg)
+
+
 def _coord_split(text: str):
     """并列骨架分解：SVO「打开A和B」与 SOV「把A和B打开」同收。
 
@@ -474,8 +484,47 @@ def coord_clauses(text: str) -> list[str]:
     return out
 
 
+# H2/M6（2026-09-23 深审批2）风险目标判据扩容：
+# ① 域别名闭包——执行面 custom_components/huijian_ai/intent_helper.py
+#    DOMAIN_ALIASES{"door":["lock","cover","button"]} 会把 door 扩进锁域，
+#    闸只认字面 "lock" 即被 `domains:["door"]` 旁路（免确认解锁）。本表为
+#    **受控重复**（core 不 import 集成包，v1.0.62 双端同构惯例），
+#    由 test_v1064_risk_batch 拿集成侧 intent_helper 源码钉两表 door 形一致。
+# ② 撤防族——intent_turn D7 反转映射 alarm×TurnOff→alarm_disarm，三层闸
+#    原只认锁；一句话直撤家庭安防比拔锁更重。alarm 域 / 名含安防·报警·
+#    布防·撤防 并入同一判据（TurnOn=布防安全向，维持不入闸）。
+_RISKY_DOMAIN_ALIASES: dict[str, tuple[str, ...]] = {
+    "door": ("lock", "cover", "button"),
+    "doors": ("lock", "cover", "button"),
+}
+_LOCK_NAME_WORDS = ("锁", "大门", "房门", "卷帘门")
+_ALARM_NAME_WORDS = ("安防", "报警", "布防", "撤防")
+_ALARM_DOMAINS = ("alarm_control_panel",)
+
+
+def _risky_domain_closure(domains) -> set[str]:
+    """domains（可混 entity_id 形）→ 小写裸域 + 别名闭包。永不抛。"""
+    out: set[str] = set()
+    try:
+        stack = [str(d).lower().split(".", 1)[0].strip()
+                 for d in (domains or [])]
+        while stack:
+            d = stack.pop()
+            if not d or d in out:
+                continue
+            out.add(d)
+            for a in _RISKY_DOMAIN_ALIASES.get(d, ()):
+                if a not in out:
+                    stack.append(a)
+    except Exception:  # noqa: BLE001
+        return out
+    return out
+
+
 def args_target_lock(args: dict) -> bool:
-    """args 是否指向锁实体（D7 语义：对锁执行 TurnOff/Toggle = 解锁，风险闸必查）。
+    """args 是否指向**风险实体**（锁：D7 反转=TurnOff 即解锁；alarm：off 即
+    撤防）。函数名沿用 args_target_lock（三层闸三消费点不动名接入，
+    语义面已扩；pipeline/agent 的闸内文案仍按解锁族问句）。
 
     2026-09-22 审查批 C2：确认环旧判据只查设备名含「锁」——三种 args 形态里
     只罩住第一种，另两种旁路：
@@ -490,19 +539,23 @@ def args_target_lock(args: dict) -> bool:
         for ent in args.get("target") or []:
             for dev in (ent or {}).get("devices") or []:
                 d = dev or {}
-                if "锁" in str(d.get("name") or ""):
+                name = str(d.get("name") or "")
+                if any(w in name for w in _LOCK_NAME_WORDS + _ALARM_NAME_WORDS):
                     return True
                 doms = d.get("domains")
-                if isinstance(doms, (list, tuple)) and any(
-                        str(x).split(".")[0] == "lock" for x in doms):
-                    return True
-        if "锁" in str(args.get("name") or ""):
+                if isinstance(doms, (list, tuple)):
+                    closed = _risky_domain_closure(doms)
+                    if "lock" in closed or closed & set(_ALARM_DOMAINS):
+                        return True
+        name_all = str(args.get("name") or "")
+        if any(w in name_all for w in _LOCK_NAME_WORDS + _ALARM_NAME_WORDS):
             return True
         eids = args.get("entity_id")
         if isinstance(eids, str):
             eids = [eids]
         if isinstance(eids, (list, tuple)):
-            return any(isinstance(e, str) and e.split(".", 1)[0] == "lock"
+            return any(isinstance(e, str)
+                       and e.split(".", 1)[0] in ("lock",) + _ALARM_DOMAINS
                        for e in eids)
     except Exception:  # noqa: BLE001
         return False
@@ -519,8 +572,16 @@ def coord_refuse(text: str) -> bool:
     SOV 同判（「内倒窗和X关闭」单发同样半执行）。"""
     sp = _coord_split(text)
     if not sp:
+        # M2 补充（2026-09-23 深审）：裸 开/关 头按 v1.0.60 定案不入扩链头表
+        # （歧义大），但「关灯和窗」单发吃灯丢窗=同族半执行谎报。只在本拒绝
+        # 通道加窄判据：单字动词+单字通用设备词+连词+短尾 → 整句拒猜。
+        # （扩链 coord_clauses 不碰——右片是否真设备不在此判断，宁拒勿猜。）
+        if re.fullmatch(r"(?:开|关)(?:一下|掉|闭)?[灯窗门][和与、][\u4e00-\u9fffA-Za-z0-9]{1,10}", text):
+            return True
         return False
     _, segs = sp
-    if not (2 <= len(segs[0]) <= 12):
+    # M2：len≥2 判据对单字通用设备词（灯/窗/门）是盲区——"关灯和窗"右片
+    # 听不懂时单发怎么裁都错（v1.0.59 原话），单字形态同样适用。
+    if not (1 <= len(segs[0]) <= 12):
         return False
-    return _coord_ends_device(segs[0])
+    return _coord_refuse_seg_device(segs[0])

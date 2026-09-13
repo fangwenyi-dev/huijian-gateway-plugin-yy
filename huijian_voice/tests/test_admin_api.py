@@ -27,7 +27,7 @@ class StoreSnap:
                                              "detail": "已就绪", "ready": True}}
     def is_ready(self, k): return True
     def keys(self): return ["asr_paraformer_bilingual", "tts_kokoro_multilang"]
-    def ensure_async(self, key, cb=None): pass
+    def ensure_async(self, key, force=False): pass  # 对齐 model_store 真签名（M11 接 force）
 
 
 class ScenesFake:

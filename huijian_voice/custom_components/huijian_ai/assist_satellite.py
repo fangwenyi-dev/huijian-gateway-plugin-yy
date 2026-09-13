@@ -1009,6 +1009,15 @@ class EsphomeAssistSatellite(
                     frames_sent += samples_in_chunk
                     if first_chunk_ms is None:
                         first_chunk_ms = int((loop.time() - started) * 1000)
+                        # M13（2026-09-23 深审）：背压基准此前从 STREAM_START
+                        # 起算——冷缓存/云延迟下首块等 G 秒，G 已计入 elapsed，
+                        # wait_time 恒 ≤0 → 整段帧流零 sleep 毫秒级灌爆设备
+                        # 1.28s 环缓冲（audio_service 满则丢最旧=「缺头/丢头」
+                        # 症状族）。v1.0.52 真流式改造时把 started 挪前是回归
+                        # （上游 HA 是 join 完才起算）。首块实发瞬间才是
+                        # 「设备开始吃水」的零点：基准重置。
+                        started = loop.time()
+                        audio_duration_sent = 0.0
                         # 逐跳首块遥测：这一行的时间 = 上游合成/转换的首块延迟；
                         # 与设备侧 `Downlink audio start` 相减即得本跳（HA→设备）耗时。
                         _LOGGER.info(

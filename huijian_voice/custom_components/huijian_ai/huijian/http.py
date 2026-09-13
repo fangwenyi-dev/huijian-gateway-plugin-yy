@@ -2,9 +2,11 @@ import hashlib
 import hmac
 import json
 import logging
+import time
 
 from aiohttp import web
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.http import KEY_HASS, HomeAssistantView
 
@@ -23,6 +25,7 @@ async def async_setup_https(hass: HomeAssistant):
     hass.http.register_view(HuijianSetNameView)
     hass.http.register_view(HuijianTtsSttView)
     hass.http.register_view(HuijianDeviceInfoView)
+    hass.http.register_view(HuijianSatellitesView)
 
 
 class HuijianHttpView(HomeAssistantView):
@@ -113,6 +116,20 @@ class HuijianSetNameView(HuijianHttpView):
         if not entry:
             return self.json_message("params error", 400)
         data = await request.json() or {}
+        # OTA 设备台账（方案 Phase 2 集成侧收口，2026-09-23）：固件 CMD20 入驻
+        # 本就随 POST 附带 fw_version（固件 ble_manager.cc:761 esp_app_get_
+        # description，HA 侧 schema-free 已按定案留位），历史上被整个丢弃。
+        # 台账=运行期内存态（设备每次入驻都会重报，无需 .storage；HA 重启后
+        # 等设备重连补报——面板对缺报显示「未上报」而不是假数据）。
+        _ledger = hass.data.setdefault(DOMAIN, {}).setdefault("satellite_ledger", {})
+        _mac = str(entry.data.get("mac", "") or "").lower()
+        if _mac:
+            _rec = _ledger.setdefault(_mac, {})
+            _rec["ts"] = time.time()
+            if v := str(data.get("fw_version") or "").strip():
+                _rec["fw_version"] = v
+            if sn := str(data.get("speak_name") or "").strip():
+                _rec["speak_name"] = sn
         if not (name := data.get("speak_name")):
             return self.json_message("speak_name missing", 400)
         mac = entry.data.get("mac")
@@ -174,6 +191,68 @@ class HuijianDeviceInfoView(HuijianHttpView):
                 "config_type": entry.data.get("config_type", "device"),
             })
         return self.json_message("device not found", 404)
+
+
+class HuijianSatellitesView(HuijianHttpView):
+    """卫星台账（OTA 方案 Phase 2 集成侧，2026-09-23；加载项面板数据源）。
+
+    每行=一个已加载的卫星 config entry：身份(mac/speak_id/host:port)、展示名
+    与区域（device registry 单一事实源）、在线态（RuntimeEntryData.available，
+    API 连接真源）、固件版本（CMD20 入驻 POST 记入的 satellite_ledger，缺报
+    ""=未上报）、以及设备端 OTA 接收口探测（entry_data.services 里带 ota 字样的
+    user service——现网 v2.1.35 恒空，固件 Phase 1 落地后自动点亮，面板据此
+    在「近场代发」与「远程下发」两态间切换，无需再改集成）。
+
+    安全：requires_auth=True——含内网拓扑；加载项 ha_client 已持 HA 长期令牌，
+    经 rest_get 调用（同 /api/huijian-ai/manage 系列数据面口径）。
+    """
+
+    requires_auth = True
+    url = "/api/huijian-ai/satellites"
+    name = "api:huijian-ai:satellites"
+
+    async def get(self, request: web.Request):
+        hass = request.app[KEY_HASS]
+        domain_data = hass.data.setdefault(DOMAIN, {})
+        ledger = domain_data.get("satellite_ledger", {})
+        device_registry = dr.async_get(hass)
+        areas = ar.async_get(hass)
+        out = []
+        for entry in hass.config_entries.async_loaded_entries(DOMAIN):
+            if not entry.data.get("host"):
+                continue  # assist 引擎类条目不是卫星（与 device-info 同判定）
+            mac = str(entry.data.get("mac", "") or "").lower()
+            rd = getattr(entry, "runtime_data", None)
+            ota_services = []
+            for svc in (getattr(rd, "services", None) or {}).values():
+                name = getattr(svc, "name", "") or ""
+                if "ota" in name.lower() or "upgrade" in name.lower():
+                    ota_services.append(name)
+            area_name = ""
+            device_id = ""
+            if mac:
+                dev = device_registry.async_get_device(
+                    connections={(dr.CONNECTION_NETWORK_MAC, mac)})
+                if dev:
+                    device_id = dev.id
+                    if dev.area_id and (a := areas.async_get_area(dev.area_id)):
+                        area_name = a.name or ""
+            rec = ledger.get(mac, {})
+            out.append({
+                "entry_id": entry.entry_id,
+                "name": entry.title or entry.data.get("device_name", ""),
+                "mac": mac,
+                "speak_id": entry.data.get("speak_id", ""),
+                "host": entry.data.get("host", ""),
+                "port": entry.data.get("port", 6053),
+                "online": bool(getattr(rd, "available", False)),
+                "area": area_name,
+                "device_id": device_id,
+                "fw_version": str(rec.get("fw_version", "") or ""),
+                "fw_reported_at": rec.get("ts"),
+                "ota_services": ota_services,
+            })
+        return self.json({"devices": out})
 
 
 def parse_tts_stt_options(raw):

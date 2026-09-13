@@ -48,6 +48,7 @@ RUN set -e; ok=0; \
 # ── 应用与资产 ───────────────────────────────────────────────────
 COPY core/            /opt/huijian/app/core/
 COPY models.lock.json /opt/huijian/app/models.lock.json
+COPY firmware.lock.json /opt/huijian/app/firmware.lock.json
 COPY nlu_data/        /opt/huijian/app/nlu_data/
 # huijian_ai 集成：boot 阶段按版本戳落盘 /homeassistant/custom_components（run.sh 逻辑）
 COPY custom_components/ /opt/huijian/integration/custom_components/

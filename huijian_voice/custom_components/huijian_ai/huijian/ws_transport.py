@@ -129,12 +129,13 @@ class WsTransport:
                 # 若它正在退避睡觉，用 _connect_now 叫醒它立刻重试（否则白等 15s）。
                 self.logger.info(
                     "Connection loop already running, waiting for it to connect: %s",
-                    self.endpoint,
+                    self._redact_endpoint(self.endpoint),
                 )
                 self._connect_now.set()
             else:
                 self.logger.info(
-                    "On-demand connecting to WebSocket: %s", self.endpoint
+                    "On-demand connecting to WebSocket: %s",
+                    self._redact_endpoint(self.endpoint),
                 )
                 self._loop_task = self.entry.async_create_background_task(
                     self.hass,
@@ -453,7 +454,8 @@ class WsTransport:
                 and not self._current_ws.closed
             ):
                 await asyncio.sleep(55)
-                self.logger.debug("heartbeat ping for %s", self.endpoint)
+                self.logger.debug("heartbeat ping for %s",
+                                  self._redact_endpoint(self.endpoint))
                 await self._current_ws.ping()
         except Exception as err:
             self.ws_log("heartbeat ping failed: %s", err)
@@ -472,10 +474,18 @@ class WsTransport:
         self._is_connected = False
         self._connect_now.set()
         if ws is not None and not ws.closed:
+            # H8（2026-09-23 深审）：aiohttp ws.close() 要 writer drain+等 CLOSE
+            # 分手——半开 TCP 上无限挂，而本方法正被 stream() finally 在
+            # _request_lock 持有期内必经（v1.0.55 定案②），锁挂=全通道播报永堵
+            # （同文件 send 侧 :118 注释早立过此律，close 漏收=修一漏一）。
             try:
-                await ws.close()
-            except Exception as err:
-                self.logger.debug("restart close ignored: %s", err)
+                await asyncio.wait_for(ws.close(), 5)
+            except Exception as err:  # noqa: BLE001（含 TimeoutError）
+                self.logger.warning("restart close timeout, abort: %s", err)
+                try:
+                    ws.transport and ws.transport.abort()
+                except Exception:  # noqa: BLE001
+                    pass
 
     async def stop(self, reason: str = ""):
         if self.stop_event.is_set():
@@ -492,7 +502,15 @@ class WsTransport:
 
         if self._current_ws and not self._current_ws.closed:
             self.logger.info("Closing websocket")
-            await self._current_ws.close()
+            # H8 同口收口：stop 也走带闸 close——卸载路径挂死=条目删不掉。
+            try:
+                await asyncio.wait_for(self._current_ws.close(), 5)
+            except Exception as err:  # noqa: BLE001（含 TimeoutError）
+                self.logger.warning("stop close timeout, abort: %s", err)
+                try:
+                    self._current_ws.transport and self._current_ws.transport.abort()
+                except Exception:  # noqa: BLE001
+                    pass
         for stream in (
             self._recv_writer,
             self._recv_reader,

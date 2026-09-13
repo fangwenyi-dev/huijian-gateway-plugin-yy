@@ -392,9 +392,32 @@ class HassTriggerVoiceSceneIntent(intent.IntentHandler):
                 result = await self._execute_action_with_timeout(
                     intent_obj, intent_name, params
                 )
-                executed_actions.append(
-                    {"intent": intent_name, "result": "success", "detail": result}
-                )
+                # H3（2026-09-23 深审）：成败判定此前只认**异常**，而
+                # _execute_intent 把不支持类型/IntentHandleError 全折叠成
+                # {"success": False} 返回值——零动作生效也回「已执行场景」。
+                # 本文件 S1 折算的存在即意图反证。折叠值与 IntentResponse
+                # 对象双形态判据。
+                ok = True
+                if isinstance(result, dict):
+                    ok = result.get("success") is not False
+                elif getattr(result, "success", True) is False:
+                    ok = False
+                if ok:
+                    executed_actions.append(
+                        {"intent": intent_name, "result": "success", "detail": result}
+                    )
+                else:
+                    err = ""
+                    if isinstance(result, dict):
+                        err = str(result.get("error") or "")
+                    else:
+                        err = str(getattr(result, "error", "") or "执行未成功")
+                    _LOGGER.error("Scene action folded failure: %s: %s",
+                                  intent_name, err)
+                    executed_actions.append(
+                        {"intent": intent_name, "result": "error",
+                         "error": err or "执行未成功"}
+                    )
             except asyncio.TimeoutError:
                 _LOGGER.error("Action timeout: intent=%s", intent_name)
                 executed_actions.append(

@@ -44,6 +44,8 @@ class ModelStore:
         self._key_locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
         self.abort = threading.Event()
+        # M12：构造即清扫上次运行（含 SIGKILL/断电）遗留的 .part.* 孤儿。
+        self.sweep_orphans()
 
     def _key_lock(self, key: str) -> threading.Lock:
         with self._locks_guard:
@@ -89,6 +91,20 @@ class ModelStore:
         # 就绪判定升级为内容级原子。
         if not (self.models_dir / key / ".extracted_ok").is_file():
             return None
+        # M11（2026-09-23 深审）：完成章此前写 tar_path.name 却全码零读取——
+        # 就绪判定与 lock 当前包身份（tarball+sha256）脱钩，models.lock.json:6
+        # 自写处置预案「官方重传同版本包→人工回填 sha256」在存量设备上永不
+        # 生效（章不校、永不复下，fresh 与存量跑不同字节）。现在读章比对：
+        # 不符=不就绪（触发重下/force），旧格式章（仅包名）宽容为按名比对。
+        stamp = self._read_stamp(key)
+        if stamp is not None and stamp != "dev-migration":
+            exp_tarball = entry.get("tarball", "")
+            exp_sha = entry.get("sha256", "")
+            name_part, _, sha_part = stamp.partition("|")
+            if name_part != exp_tarball or (sha_part and sha_part != exp_sha):
+                logger.warning("[模型] %s 完成章与 lock 包身份不符（章=%r），判不就绪",
+                               key, stamp)
+                return None
         top = entry.get("top_dir", "")
         try:
             cand = self.models_dir / key / top if top else self.models_dir / key
@@ -110,6 +126,14 @@ class ModelStore:
             if not (base / rf).exists():
                 return False
         return True
+
+    def _read_stamp(self, key: str) -> Optional[str]:
+        try:
+            raw = (self.models_dir / key / ".extracted_ok").read_text(
+                encoding="utf-8").strip()
+            return raw or None
+        except OSError:
+            return None
 
     def is_ready(self, key: str) -> bool:
         return self.model_dir_for(key) is not None
@@ -164,8 +188,40 @@ class ModelStore:
                     pass
 
     # ── 下载/解包 ───────────────────────────────────────────────
+    def sweep_orphans(self) -> int:
+        """M12（2026-09-23 深审）：启动无条件回收下载残留 `.part.*`。
+        旧清理只在 except 分支，而本仓把 SIGKILL 写成收尾常态（shutdown
+        wait_for 5s < 下载块 60s）——半截 GB 级文件在 /data 永久堆积，
+        与 M11 复合最坏态直推盘满。返回删除数。"""
+        removed = 0
+        try:
+            for stale in self.models_dir.glob("*.part.*"):
+                try:
+                    stale.unlink()
+                    removed += 1
+                except OSError as e:
+                    logger.warning("[模型] 孤儿残留删除失败 %s: %s", stale, e)
+        except OSError as e:
+            logger.debug("[模型] 孤儿清扫异常（不阻断）: %s", e)
+        if removed:
+            logger.warning("[模型] 启动清掉 %d 个下载残留 .part.*", removed)
+        return removed
+
+    def _invalidate(self, key: str) -> None:
+        """force 逃生门：旧解包树+完成章整删（不清则新解包与旧文件混栈，
+        _files_ok 依旧放行=「彻底 no-op」根因之二）。import/ 是用户手动放
+        包口，绝不触碰。"""
+        import shutil
+        target = self.models_dir / key
+        try:
+            if target.is_dir():
+                shutil.rmtree(target)
+        except OSError as e:
+            logger.warning("[模型] %s 旧树删除失败: %s", key, e)
+
     def ensure(self, key: str, force: bool = False) -> bool:
-        """幂等确保模型就绪。同步执行（调用方放线程）。F2：per-key 锁 single-flight。"""
+        """幂等确保模型就绪。同步执行（调用方放线程）。F2：per-key 锁 single-flight。
+        force=True（M11 接线）：面板「重新下载」——清旧树旧章后重走校验下载。"""
         entry = self._manifest.get(key)
         if not entry:
             return False
@@ -179,14 +235,24 @@ class ModelStore:
         self._set_status(key, state="checking", pct=0, detail="检查导入/下载")
         # 1) 导入口
         imported = self.import_dir / entry["tarball"]
-        if imported.exists():
-            if self._extract(key, imported, entry):
-                return True
-        # 2) 三级 URL 下载
         auto = self.settings.get("power.auto_download", None)
         if auto is None:
             auto = True
         auto = auto and str(os.environ.get("HUIJIAN_OPT_MODEL_AUTO_DOWNLOAD", "true")).lower() != "false"
+        if force:
+            # M11：先删旧树再重取（旧树不清，新解包与旧文件混栈、_files_ok
+            # 照过=「下载」按钮对就绪错版包彻底 no-op 的第二根因）。但清树
+            # 只在**确有重取来源**时执行——force 不是摧毁现有就绪态的许可证。
+            if imported.exists() or auto:
+                self._invalidate(key)
+            else:
+                self._set_status(key, state="manual", pct=0,
+                                 detail="自动下载关闭且无导入包，拒绝清空重取")
+                return self.is_ready(key)
+        if imported.exists():
+            if self._extract(key, imported, entry):
+                return True
+        # 2) 三级 URL 下载
         if not auto:
             self._set_status(key, state="manual", pct=0, detail="自动下载关闭；放包到 import/ 或开开关")
             return self.is_ready(key)
@@ -197,10 +263,11 @@ class ModelStore:
             return True
         return self.is_ready(key)
 
-    def ensure_async(self, key: str) -> None:
+    def ensure_async(self, key: str, force: bool = False) -> None:
         if (t := self._threads.get(key)) and t.is_alive():
             return
-        t = threading.Thread(target=self.ensure, args=(key,), name=f"model-{key}", daemon=True)
+        t = threading.Thread(target=self.ensure, args=(key, force),
+                             name=f"model-{key}", daemon=True)
         self._threads[key] = t
         t.start()
 
@@ -278,12 +345,24 @@ class ModelStore:
                     tf.extractall(target, members=members, filter="data")
                 except TypeError:
                     tf.extractall(target, members=members)
-            # 全部成员解包成功后才盖章（见 model_dir_for 的原子性注释）
+            # 全部成员解包成功后才盖章（见 model_dir_for 的原子性注释）。
+            # M11：章内容升级为包身份 `tarball|sha256`（lock 当时期望值）——
+            # lock 回填新 sha 后章比对失配 → 自动判不就绪重验，处置预案生效。
             with open(target / ".extracted_ok", "w", encoding="utf-8") as mf:
-                mf.write(tar_path.name)
+                mf.write(f"{entry.get('tarball', tar_path.name)}|"
+                         f"{entry.get('sha256', '')}")
             if self.is_ready(key):
                 self._set_status(key, state="ready", pct=100, detail="已就绪")
                 logger.info("[模型] %s 就绪 @ %s", key, target)
+                # M12（2026-09-23 深审）：解包成功盖章后即删下载归档——
+                # SenseVoice+kokoro ≈1.4GB 死重再无删除点（本仓 _write_status
+                # S17-2「必关必删」同纪律）。import/ 目录是用户手动导入口
+                # （lock:5「放包即用」），**不动**；校验失败路径也不动（留待重试）。
+                if tar_path.parent == self.models_dir:
+                    try:
+                        tar_path.unlink(missing_ok=True)
+                    except OSError as e:
+                        logger.warning("[模型] 归档删除失败（不阻断）: %s", e)
                 return True
             self._set_status(key, state="incomplete", detail="解包后校验文件缺失")
             return False

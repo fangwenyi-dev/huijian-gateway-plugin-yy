@@ -37,6 +37,23 @@ def _claw_fn(name):
     fn = next(n for n in tree.body
               if isinstance(n, ast.FunctionDef) and n.name == name)
     ns = {}
+    # v1.0.64 H2 批升级：目标函数依赖模块级常量/兄弟小函数
+    # （_RISKY_DOMAIN_ALIASES、_risky_domain_closure、*_NAME_WORDS 等）——
+    # 先把**顶层**字面赋值与闸辅助函数喂进 ns 再抽目标（含 HA 符号的语句
+    # 静默跳过；执行面真函数永不伪造）。
+    for node in tree.body:
+        if node is fn:
+            continue
+        seg = ast.get_source_segment(src, node)
+        if seg is None:
+            continue
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            try:
+                exec(compile(seg, "<const>", "exec"), ns)  # noqa: S102
+            except Exception:  # noqa: BLE001
+                pass
+        elif isinstance(node, ast.FunctionDef) and node.name == "_risky_domain_closure":
+            exec(compile(seg, f"<{node.name}>", "exec"), ns)  # noqa: S102
     exec(compile(ast.get_source_segment(src, fn), f"<{name}>", "exec"), ns)  # noqa: S102
     return ns[name]
 
@@ -46,6 +63,9 @@ def test_gate_lock_forms():
     assert f({"target": [{"devices": [{"name": "大门", "domains": ["lock"]}]}]})
     assert f({"target": [{"devices": [{"name": "门锁"}]}]})       # 名字含锁（LLM 常不写 domains）
     assert f({"target": [{"devices": [{"name": "大门", "domains": ["Lock"]}]}]})  # 大小写免疫
+    # v1.0.64 H2：door 别名闭包形（旁路原形态）——旧字面钉恰好漏掉此形
+    assert f({"target": [{"devices": [{"name": "大门", "domains": ["door"]}]}]}), \
+        "H2 回退：domains=['door'] 被执行面扩进锁域而闸失罩"
     assert not f({"target": [{"devices": [{"name": "筒灯", "domains": ["light"]}]}]})
     assert not f({"target": [{"area": "客厅"}]})                   # 全屋/仅区域不误伤
     assert not f({})
