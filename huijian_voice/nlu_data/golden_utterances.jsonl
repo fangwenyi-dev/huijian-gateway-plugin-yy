@@ -44,7 +44,7 @@
 {"text": "让风扇转起来", "intent": null, "source": "miss"}
 {"text": "暗一点", "intent": "AdjustDeviceAttribute", "source": "t0"}
 {"text": "亮一些", "intent": "AdjustDeviceAttribute", "source": "t0"}
-{"text": "窗帘开一半", "intent": "TurnDeviceOn", "source": "t0_strip"}
+{"text": "窗帘开一半", "intent": "AdjustDeviceAttribute", "source": "t0_strip"}
 {"text": "把声音关掉", "intent": "TurnDeviceOff", "source": "t1"}
 {"text": "净化器启动", "intent": null, "source": "miss"}
 {"text": "加湿器开起来", "intent": "TurnDeviceOn", "source": "t0_strip"}

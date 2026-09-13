@@ -45,7 +45,11 @@ _ACTION_PATTERNS: list[tuple[re.Pattern, str, Any]] = [
     # 是播控令不是窗帘暂停；裸"暂停/停"与"暂停窗帘"仍走窗户语义。
     (re.compile(r"^(暂停|停止|停)(?!(?:播放|音乐|歌|一?首))"), "ControlWindow", "pause"),
     (re.compile(r"^(开到|打开到|关到)\s*(\d+)"), "AdjustDeviceAttribute", {"attribute": "position", "delta": "$2"}),
-    (re.compile(r"^关一半"), "AdjustDeviceAttribute", {"attribute": "position", "delta": "50"}),
+    # v1.0.63 开向位置缺陷修复（golden 建表实锤）：旧表只有 ^关一半——
+    # 「窗帘开一半」被 L91 ^(开|打开) 吃成 TurnDeviceOn、"一半"当残渣剥掉，
+    # 用户要半开得到**全开**：错误结果比拒答危险（cover 开向/关向的"一半"
+    # 目标位都是绝对 50，同 executor 既有落地，仅入口漏配）。
+    (re.compile(r"^(打开|开|关)(?:到)?一半"), "AdjustDeviceAttribute", {"attribute": "position", "delta": "50"}),
     (re.compile(r"^(调到|调为|调成|温度调到|温度设到|温度设为)\s*(\d+)\s*度"), "AdjustDeviceAttribute", {"attribute": "temperature", "delta": "$2"}),
     (re.compile(r"^(调到|调为|调成|温度调到|温度设到|温度设为)\s*([零一二三四五六七八九十百]+)\s*度?"), "AdjustDeviceAttribute", {"attribute": "temperature", "delta": "cn:$2"}),
     (re.compile(r"^(亮度设到|亮度调到|调亮到|亮度)\s*(\d+)"), "AdjustDeviceAttribute", {"attribute": "brightness", "delta": "$2"}),
@@ -152,7 +156,8 @@ _DELTA_SCANNERS: dict[str, list[tuple[re.Pattern, Any]]] = {
     "position": [
         (re.compile(r"开到\s*(\d+)\s*[%％]?"), "$1"),
         (re.compile(r"关到\s*(\d+)"), "$1"),
-        (re.compile(r"关一半"), "50"),
+        # v1.0.63：开向"一半"同判（把X开一半/开一半 残扫车道），绝对位 50。
+        (re.compile(r"(?:打开|开|关)一半"), "50"),
         (re.compile(r"打开到\s*(\d+)"), "$1"),
     ],
 }
