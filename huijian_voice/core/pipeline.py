@@ -335,6 +335,9 @@ class Pipeline:
         self._last: "OrderedDict[str, dict]" = OrderedDict()
         # P2-10 会话上下文（按 origin=卫星 IP / "panel" 分桶）
         self._turns: dict[str, deque] = {}
+        # P1 音乐批：端点→最近点歌记账（P2a 前卫星实体不报 media_title 时，
+        # 「现在放的是什么歌」的兜底事实源；有界+TTL，重启即清）
+        self._music_last: "OrderedDict[str, dict]" = OrderedDict()
         self._last_list: Optional[str] = None   # 上次清单播报对象（"删第2条"回指）
         self._last_target: dict[str, dict] = {}
         self._origin_ts: dict[str, float] = {}      # LRU 清扫用
@@ -567,7 +570,14 @@ class Pipeline:
                 logger.info("[级联] 跳过 LLM 复议（本地执行可能已部分生效/结果不确定）")
             self._remember_turn(origin, text, speech)
             return Reply(speech, plan.source, False, trace)
-        # ⑤ 查询族
+        # ⑤a 音乐带（P1 上移至查询族之前）：点歌/播控/正在播放查询直连 HA
+        # 标准 media_player 服务。上移原因：「音箱现在放的是什么歌」这类带
+        # 设备词前缀的问句会被查询族抢走；now_playing 在带内判序最先，
+        # 普通状态查询（"客厅温度""灯什么状态"）不受影响。
+        mcmd = music.parse_music(text, await self._music_areas())
+        if mcmd is not None:
+            return await self._music(mcmd, text, origin)
+        # ⑤b 查询族
         try:
             ans = await self.query.answer(text)
         except Exception:
@@ -576,11 +586,6 @@ class Pipeline:
         if ans:
             self._remember_turn(origin, text, ans)   # 查询轮也进 LLM 历史，防跨轮失忆
             return Reply(ans, "query", True, [f"query:{text}"])
-        # ⑤b 音乐过渡带（零改动，用户定向 2026-09-12）：点歌/播控直连 HA 标准
-        # media_player 服务，置于 LLM 前——点歌令绝不落入闲聊吞掉
-        mcmd = music.parse_music(text)
-        if mcmd is not None:
-            return await self._music(mcmd, text, origin)
         # ⑥ LLM
         if self.agent and self.agent.enabled:
             llm = await self._llm(text, origin, on_sentence)
@@ -595,33 +600,146 @@ class Pipeline:
     _MUSIC_SAY = {"pause": "好的，先暂停了", "resume": "继续播放",
                   "stop": "已停止播放", "next": "来，下一首",
                   "prev": "退回上一首"}
+    _MUSIC_LEDGER_TTL_S = 6 * 3600.0          # 点歌记账存活：超过即不作数
+    _MUSIC_LEDGER_MAX = 16                    # 有界（端点远超此值逐出最旧）
+    # MA 智能检索只吃明文检索词；URL/media-source 虚拟路径打给非托管实体
+    # 必挂（慧尖卫星固件是裸 GET）——源头拦一句，好过"端点没有响应"。
+    _VIRTUAL_ID = re.compile(r"^(?:https?://|media-source://|/|file://)", re.I)
+
+    async def _music_areas(self) -> set:
+        """区域定向词表：HA 区域注册表 ∪ satellite_areas 值 ∪ area_entities
+        键。注册表不可达只少一路来源，永不抛（词表缺=不定向，保守放行）。"""
+        out: set = set()
+        try:
+            amap = self.settings.get("music.area_entities", {}) or {}
+            if isinstance(amap, dict):
+                out |= {str(k) for k in amap if k}
+            sat = self.settings.get("spatial.satellite_areas", {}) or {}
+            if isinstance(sat, dict):
+                out |= {str(v) for v in sat.values() if v}
+            names = await self.ha.area_names()
+            if names:
+                out |= {str(n) for n in names if n}
+        except Exception:
+            pass
+        return out
+
+    def _resolve_music_entity(self, cmd: dict) -> tuple[str, str]:
+        """区域定向选端点 → (entity, 如实回退说明)。映射缺失**且**有默认端点
+        才回退并说明；两者皆无交调用方走配置指引（绝不静默放错房间）。"""
+        default = str(self.settings.get("music.player_entity", "") or "").strip()
+        area = str(cmd.get("area") or "").strip()
+        if not area:
+            return default, ""
+        amap = self.settings.get("music.area_entities", {}) or {}
+        if isinstance(amap, dict):
+            ent = str(amap.get(area) or "").strip()
+            if ent:
+                return ent, ""
+            if default:
+                return default, f"{area}没有单独的播放端点，先用默认音箱"
+        return default, ""
+
+    def _ledger_record(self, entity: str, query: str) -> None:
+        """点歌成功记账（P2a 前卫星不报曲目，查询兜底靠它）。永不抛。"""
+        try:
+            led = getattr(self, "_music_last", None)
+            if led is None:
+                led = self._music_last = OrderedDict()
+            led[entity] = {"q": query, "ts": time.time()}
+            led.move_to_end(entity)
+            while len(led) > self._MUSIC_LEDGER_MAX:
+                led.popitem(last=False)
+        except Exception:
+            pass
+
+    def _ledger_peek(self, entity: str) -> str:
+        try:
+            rec = (getattr(self, "_music_last", {}) or {}).get(entity) or {}
+            if rec and time.time() - float(rec.get("ts") or 0) \
+                    <= self._MUSIC_LEDGER_TTL_S:
+                return str(rec.get("q") or "")
+        except Exception:
+            pass
+        return ""
+
+    async def _now_playing_say(self, cmd: dict) -> Reply:
+        """正在播放查询：读端点态 media_title/artist（永不抛）；端点不报曲目
+        （P2a 前卫星）→ 回退本加载项的点歌记账（缺口②收口）。"""
+        entity, note = self._resolve_music_entity(cmd)
+        if not entity:
+            return Reply("先到 设置-音乐 里配置播放端点，我才知道问谁。",
+                         "music", ok=False, trace=["music:未配置端点"])
+        try:
+            ent = await self.ha.get_state(entity) or {}
+        except Exception:
+            ent = {}
+        st = str(ent.get("state") or "")
+        attrs = ent.get("attributes") or {}
+        title = str(attrs.get("media_title") or "").strip()
+        artist = str(attrs.get("media_artist") or "").strip()
+        if st in ("playing", "paused") and title:
+            say = f"正在播放{title}"
+            if artist:
+                say += f"，{artist}唱的"
+            if st == "paused":
+                say += "（目前是暂停状态）"
+        elif st in ("playing", "paused"):
+            q = self._ledger_peek(entity)
+            if q:
+                say = f"正在播放《{q}》（按你之前的点歌记录，端点没有上报曲目详情）"
+            else:
+                say = "正在放着，不过端点没有上报曲目信息。"
+        else:
+            say = "现在没有在放歌。"              # idle/off/unknown 折叠同款
+        if note:
+            say = f"{say}（{note}）"
+        return Reply(say, "music", True, [f"music:now_playing:{st or 'none'}"])
+
 
     async def _music(self, cmd: dict, text: str, origin: str) -> Reply:
-        """音乐过渡带执行：HA core 标准 media_player 服务族（永不抛，ha_client
-        已折叠）。端点未配置=一句配置指引；失败话术保「抱歉」前缀纪律。"""
-        entity = str(self.settings.get("music.player_entity", "") or "").strip()
+        """音乐带执行（P1）：端点解析（区域定向→映射→默认+如实回退）、
+        now_playing 查询（读端点态，缺曲目回退点歌记账）、play_media 虚拟
+        路径拦闸、首音预期话术。永不抛（ha_client 已折叠）；失败话术保
+        「抱歉」前缀纪律。"""
+        act = cmd["action"]
+        if act == "now_playing":
+            return await self._now_playing_say(cmd)
+        entity, note = self._resolve_music_entity(cmd)
         if not entity:
             return Reply("想点歌的话，先到 设置-音乐 里配置播放端点"
                          "（Music Assistant 托管的音箱实体）。",
                          "music", ok=False, trace=["music:未配置端点"])
-        act = cmd["action"]
         if act == "play":
-            if not cmd["query"]:
+            q = str(cmd["query"])
+            if not q:
                 return Reply("想听点什么？说歌名或歌手就行。",
                              "music", trace=["music:泛点歌"])
+            if self._VIRTUAL_ID.match(q):
+                return Reply("点歌只报歌名或歌手就行，网址和媒体路径我不接。",
+                             "music", ok=False, trace=["music:虚拟路径拦下"])
             res = await self.ha.call_service("media_player", "play_media", {
                 "entity_id": entity, "media_content_type": "music",
-                "media_content_id": cmd["query"]})
+                "media_content_id": q})
             ok = bool(res.get("success"))
-            speech = f"好的，正在播放《{cmd['query']}》" if ok \
+            if ok:
+                self._ledger_record(entity, q)
+            speech = f"好的，正在播放《{q}》" if ok \
                 else "抱歉，播放端点没有响应"
+            if ok and self.settings.get("music.expect_wait_note", True):
+                # P2a 前卫星=整曲下载形态，首音有可感等待；话术按"点了会等
+                # 一会儿"设计（方案 §6-R2 口径），第三方秒开档可关
+                speech += "，曲库联网取音频，可能要等一小会儿"
         else:
             res = await self.ha.call_service(
                 "media_player", self._MUSIC_SVC[act], {"entity_id": entity})
             ok = bool(res.get("success"))
             speech = self._MUSIC_SAY[act] if ok else "抱歉，播放端点没有响应"
+        if note:
+            speech = f"{speech}（{note}）"
         self._remember_turn(origin, text, speech)
-        return Reply(speech, "music", ok, [f"music:{act}"])
+        tag = f"music:{act}" + (f":{cmd['area']}" if cmd.get("area") else "")
+        return Reply(speech, "music", ok, [tag])
 
     async def _llm(self, text: str, origin: str = "",
                    on_sentence: Optional[Callable[[str], Any]] = None) -> Optional[Reply]:
