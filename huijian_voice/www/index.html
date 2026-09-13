@@ -14,8 +14,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#1d1750">
 <title>慧尖HA语音插件</title>
-<link rel="stylesheet" href="css/huijian.css?v=1.0.61">
-<link rel="stylesheet" href="css/voice.css?v=1.0.61">
+<link rel="stylesheet" href="css/huijian.css?v=1.0.62">
+<link rel="stylesheet" href="css/voice.css?v=1.0.62">
 </head>
 <body>
 <!-- 「星辰大海」背景层（与网关加载项同一设计标准/同一固定种子＝同一片天）：
@@ -229,6 +229,11 @@
 
 <!-- ══ 调试 ══ -->
 <section id="tab-debug">
+  <div class="card"><h3>NLU 理解漏斗（v1.0.62 · 本进程累计，重启清零）</h3>
+    <div id="funnelBox" class="hint">点「刷新」拉取 /api/telemetry。兜底/LLM 档占比偏高＝语料缺口信号（回流语料在 nlu_mining.jsonl，只存本机）。</div>
+    <div class="hj-row"><div style="flex:0 1 120px"><button class="act" id="funnelBtn">刷新</button></div>
+      <div id="funnelMeta" class="hint" style="flex:1"></div></div>
+  </div>
   <div class="card"><h3>一句话理解（干跑不执行；勾选后可真执行）</h3>
     <div class="hj-row">
       <div style="flex:3"><label class="hj-field">输入语句</label><input id="dbgText" placeholder="打开客厅的灯"></div>
@@ -270,7 +275,7 @@
 
 <script>
 "use strict";
-const CURRENT_VERSION = "1.0.61";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
+const CURRENT_VERSION = "1.0.62";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
 // 音色表 = kokoro-multi-lang-v1_1 官方 103 sid 全表（k2-fsa docs sid 表实证；
 // 标注=对用户上传试听样本的 CAM++ 声纹溯源榜：v1_1 不含晓晓/云扬，
 // sid18=zf_026 女声最似晓晓(0.454 全场最近)，sid81=zm_055 最似云扬）
@@ -587,6 +592,25 @@ async function loadModels(){
 $("#reloadBtn").onclick = async ()=>{ try{ const r=await post("/api/system/reload_models",{}); $("#reloadMsg").textContent=r.note||"ok";}catch(e){toast(e.message);} };
 
 /* ── 调试 ── */
+/* v1.0.62 P0-1：NLU 理解漏斗（GET /api/telemetry，本进程累计） */
+const SRC_NAMES = {t0:"字面表",t0_strip:"字面表·剥",t0_prefix:"字面表·前缀",t0_pinyin:"字面表·同音",
+  scene:"场景触发",t1:"TextCNN",klar:"klar 引擎",creation:"语音创作",query:"本地查询",
+  music:"音乐",llm:"LLM 兜底",fallback:"拒答/未定",clarify:"澄清追问",confirm:"待确认",
+  confirm_exec:"确认·执行",confirm_cancel:"确认·取消",dedup:"去重"};
+async function loadFunnel(){
+  try{
+    const r = await api("/api/telemetry");
+    const f = r.funnel||{by_source:{}}, rows = Object.entries(f.by_source||{}).sort((a,b)=>b[1].n-a[1].n);
+    if(!rows.length){ $("#funnelBox").innerHTML='<span class="mut">本进程尚无识别记录（说一句话或真执行干跑后再刷新）。</span>';
+      $("#funnelMeta").textContent=""; return; }
+    let h='<table><thead><tr><th>档位</th><th>命中数</th><th>成功率</th><th>平均时延</th><th>1h 滑窗</th></tr></thead><tbody>';
+    for(const [k,v] of rows) h+=`<tr><td>${SRC_NAMES[k]||k}</td><td>${v.n}</td><td>${v.ok_pct==null?"–":v.ok_pct+"%"}</td><td>${v.avg_ms==null?"–":v.avg_ms+" ms"}</td><td>${v.win1h||0}${v.win1h_ok_pct==null?"":" / 成功"+v.win1h_ok_pct+"%"}</td></tr>`;
+    $("#funnelBox").innerHTML = h+"</tbody></table>";
+    const mi = r.mining||{};
+    $("#funnelMeta").textContent = `累计 ${f.total||0} 句；回流语料 ${mi.file||""} ${mi.enabled?(mi.lines+" 条，仅本机"):"已停用"}`;
+  }catch(e){ $("#funnelBox").innerHTML='<span style="color:var(--bad)">读取失败：'+e.message+"</span>"; }
+}
+$("#funnelBtn").onclick = loadFunnel;
 $("#dbgBtn").onclick = async ()=>{
   const t = $("#dbgText").value.trim(); if(!t){ toast("输入一句话"); return; }
   $("#dbgOut").textContent = "…";
@@ -738,6 +762,6 @@ $("#regenBtn").onclick = async ()=>{
   try { await post("/api/token/regenerate",{}); toast("已重置"); loadEndpoints(); } catch(e){ toast(e.message); }
 };
 </script>
-<script src="js/starsky.js?v=1.0.61"></script>
+<script src="js/starsky.js?v=1.0.62"></script>
 </body>
 </html>

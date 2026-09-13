@@ -47,6 +47,20 @@ class PipelineFake:
         return {"plan": {"intent": "TurnDeviceOn", "args": {"target": []},
                          "source": "t0", "trace": ["测试轨迹"]}}
 
+    def __init__(self, with_telemetry=False):
+        # v1.0.62 P0-1：路由双态都要真过（带遥测/不带=旧构造纵深 getattr 兜底）
+        if with_telemetry:
+            import tempfile
+            from pathlib import Path as _P
+            from core.nlu.telemetry import Telemetry
+            from core.settings import Settings
+            self.telemetry = Telemetry(
+                Settings(_P(tempfile.mkdtemp()) / "s.json"), _P(tempfile.mkdtemp()))
+            self.telemetry.funnel.record("t0", True, 0.1)
+            self.telemetry.funnel.record("fallback", False, 0.2)
+        else:
+            self.telemetry = None
+
 
 class TtsFake:
     last_used = 0
@@ -77,8 +91,7 @@ class SettingsFake:
         return {c: f"ws://{host}:8000/xiaozhi/v1/{c}?token=tok123" for c in ("stt", "tts", "llm")}
 
 
-@pytest.fixture()
-def admin():
+def _admin_serve(with_telemetry=False):
     ha = FakeHAClient(
         states={"automation.auto1": {"entity_id": "automation.auto1", "state": "on",
                                      "attributes": {}},
@@ -91,7 +104,8 @@ def admin():
             # _automations 现在会如实挂 note，本 fixture 测的是双引擎"皆正常"路径。
             "/api/huijian-ai/automations": {"automations": []}})
     ctx = AppContext(settings=SettingsFake(), ha=ha, asr=None, tts=TtsFake(),
-                     pipeline=PipelineFake(), scenes=ScenesFake(), textcnn=None,
+                     pipeline=PipelineFake(with_telemetry=with_telemetry),
+                     scenes=ScenesFake(), textcnn=None,
                      store=StoreSnap(), started_at=time.time())
     app = make_admin_app(ctx)
     loop = asyncio.new_event_loop()
@@ -117,6 +131,16 @@ def admin():
     asyncio.run_coroutine_threadsafe(holder["runner"].cleanup(), loop).result(10)
     loop.call_soon_threadsafe(loop.stop)
     th.join(5)
+
+
+@pytest.fixture()
+def admin():
+    yield from _admin_serve()
+
+
+@pytest.fixture()
+def admin_tele():
+    yield from _admin_serve(with_telemetry=True)
 
 
 def _run(coro):
@@ -155,6 +179,24 @@ def test_health(admin):
     # 两个总开关都要透出：本地理解关掉＝场景触发词/本地建改删/查询族/音乐带全停，
     # 首页必须能一眼看见（settings 桩里 nlu 无键 → 默认按"开"）
     assert j["nlu_enabled"] is True and "llm_enabled" in j
+
+
+def test_telemetry_route(admin):
+    """v1.0.62 P0-1 降级路径：pipeline 无遥测件（旧构造/测试面）也必须 200。"""
+    st, body = _get(admin, "/api/telemetry")
+    assert st == 200
+    j = json.loads(body)
+    assert j["funnel"]["total"] == 0 and j["mining"]["enabled"] is False
+
+
+def test_telemetry_route_real(admin_tele):
+    st, body = _get(admin_tele, "/api/telemetry")
+    assert st == 200
+    j = json.loads(body)
+    assert j["funnel"]["total"] == 2
+    assert j["funnel"]["by_source"]["t0"]["n"] == 1
+    assert j["funnel"]["by_source"]["fallback"]["ok_pct"] == 0.0
+    assert j["mining"]["file"] == "nlu_mining.jsonl"
 
 
 def test_settings_roundtrip(admin):

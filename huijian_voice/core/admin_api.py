@@ -32,6 +32,7 @@ def make_admin_app(ctx) -> web.Application:
     app.router.add_get("/api/endpoints", _endpoints)
     app.router.add_post("/api/token/regenerate", _regen_token)
     app.router.add_post("/api/nlu/test", _nlu_test)
+    app.router.add_get("/api/telemetry", _telemetry)   # v1.0.62 P0-1 漏斗直读
     app.router.add_post("/api/tts/test", _tts_test)
     app.router.add_get("/api/scenes", _scenes)
     app.router.add_get("/api/automations", _automations)
@@ -120,6 +121,15 @@ async def _regen_token(request):
     import secrets
     ctx.settings.update({"security": {"ws_token": secrets.token_urlsafe(24)}})
     return web.json_response({"ok": True})
+
+
+async def _telemetry(request):
+    """v1.0.62 P0-1/P0-2：漏斗分档计数/成功率/时延 + 回流文件状态。只读。"""
+    ctx = request.app[CTX_KEY]
+    tele = getattr(ctx.pipeline, "telemetry", None)
+    return web.json_response(
+        tele.snapshot() if tele else {"funnel": {"total": 0, "by_source": {}},
+                                      "mining": {"enabled": False}})
 
 
 async def _nlu_test(request):

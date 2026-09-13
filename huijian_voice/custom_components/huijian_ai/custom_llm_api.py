@@ -35,6 +35,36 @@ def _build_slots(params: dict) -> dict:
     return slots
 
 
+# v1.0.62 P0-3（同构闸）：本包 intent_turn.py 是 D7 语义（注释实锤
+# `on = lock / off = unlock`），而工具面暴露 HassTurnDeviceOff——不拦就是与
+# 加载项 v1.0.61 级联 C2 完全同构的「HA 端配了 LLM 即免确认解锁」后门。
+# 逻辑对齐 core/nlu/targets.py args_target_lock（集成包不 import 加载项 core，
+# 属受控重复，行为由 tests/test_v1062_nlu_batch.py 双端同构钉桩）。
+# 无条件拒：集成侧读不到加载项 settings（confirm_risky 开关在加载项进程），
+# 拒答话术把用户引导回主语音通道——那边按用户配置要么先问要么直办。
+_RISKY_LOCK_OFF_INTENTS = frozenset({"TurnDeviceOff", "HassTurnOff", "HassToggle"})
+
+
+def _args_targets_lock(arguments):
+    """target 面是否命中锁域（name 含锁 / devices[].domains 含 lock）。"""
+    if not isinstance(arguments, dict):
+        return False
+    try:
+        for t in arguments.get("target") or []:
+            if not isinstance(t, dict):
+                continue
+            for d in t.get("devices") or []:
+                if not isinstance(d, dict):
+                    continue
+                if "lock" in [str(x).lower() for x in (d.get("domains") or [])]:
+                    return True
+                if "锁" in str(d.get("name") or ""):
+                    return True
+    except (TypeError, AttributeError):
+        return False
+    return False
+
+
 def _device_schema():
     return {
         vol.Optional("domains"): vol.All(cv.ensure_list, [cv.string]),
@@ -208,7 +238,9 @@ class HuijianControlAPI(llm.API):
             _Tool(
                 "HassTurnDeviceOff",
                 "Turn off/close device. e.g. '关闭卧室筒灯'(light), '关闭窗帘'(cover). "
-                "NOTE: 开窗/关窗 auto-forwarded to ControlWindow.",
+                "NOTE: 开窗/关窗 auto-forwarded to ControlWindow. "
+                "铁律：lock 域设备禁用本工具——关闭门锁=解锁，属风险操作会被拒绝；"
+                "用户提及时直接口播引导「请说解锁门锁，会先确认」。",
                 self._handle_turn_off,
                 vol.Schema({vol.Required("target"): _target_schema()}),
             ),
@@ -401,6 +433,13 @@ class HuijianControlAPI(llm.API):
 
     async def _call_intent(self, hass: HomeAssistant, intent_type: str, arguments: dict, llm_context: llm.LLMContext) -> dict:
         arguments = await self._enrich_target_domains(hass, arguments)
+        # v1.0.62 P0-3 同构闸（见文件头 _args_targets_lock 注释）：置于 enrich
+        # 之后——LLM 常不写 domains、只给中文设备名，enrich 会按 HA 真实状态回填
+        # domains，锁设备在此刻才现形，故必须在回填后判。命中即拒并回话术给 LLM，
+        # 引导用户回主语音通道走确认。与加载项 agent._tool C2 同构语义。
+        if intent_type in _RISKY_LOCK_OFF_INTENTS and _args_targets_lock(arguments):
+            _LOGGER.warning("[custom_llm_api] 拒绝风险解锁目标 %s（引导至确认流）", intent_type)
+            return {"success": False, "error": "解锁是风险操作，我不能替您跳过确认——请直接说「解锁大门」这类指令，会先问您一声再执行"}
         slots = _build_slots(arguments)
         if llm_context and llm_context.device_id:
             slots["_speaker_id"] = {"value": llm_context.device_id}

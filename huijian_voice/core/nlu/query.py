@@ -61,10 +61,13 @@ class QueryZone:
         area = self._find_area(text)
         # 体验批 P2-14①：设备属性读数（"空调设定温度多少/灯现在多亮"）——
         # 先于传感器规则：设备词+属性词是明确指向设备本身，不是房间传感器。
+        # v1.0.62 golden 实锤：「多亮」是"亮度"的口语变体，P2-14 注释承诺了
+        # 该句式但正则只认「亮度」二字——实现与承诺不符，此处补齐。
         m = re.search(r"(空调|灯|风扇|加湿器|净化器|除湿机|热水器|冰箱)[的]?.*?"
-                      r"(设定温度|目标温度|当前温度|温度|亮度|色温|湿度|风量|风速|档位)", text)
+                      r"(设定温度|目标温度|当前温度|温度|亮度|多亮|色温|湿度|风量|风速|档位)", text)
         if m and re.search(r"(多少|几|怎样|怎么样|如何|现在|是)", text):
-            ans = await self._attr_answer(area, m.group(1), m.group(2))
+            attr_word = "亮度" if m.group(2) == "多亮" else m.group(2)
+            ans = await self._attr_answer(area, m.group(1), attr_word)
             if ans:
                 return ans
         # 体验批 P2-14②：状态聚合计数（"有多少灯开着/几个设备没关"）
@@ -146,6 +149,24 @@ class QueryZone:
         ("冰箱", "温度"): ("temperature",),
     }
 
+    # v1.0.62 P1-6：手抄键表之上的**量纲闸**——实体带 unit_of_measurement 且与
+    # 属性词预期量纲冲突时整键不认（把 AQI/光照 lux 当"湿度"播报这类错标签的
+    # 根治：aqi 单位 "°AQI"/"AQI" ∉ % 白名单 → 拒报让位通用传感器分支，宁缺勿错）。
+    # 单位缺省=信任键表（大量集成不发布 unit，一票否决会砍掉可用读数）。
+    _UNIT_WHITELIST = {
+        "湿度": ("%", "rh", "%r.h.", "percent"),
+        "温度": ("°c", "°f", "celsius", "fahrenheit"),
+        "风量": ("%", "percent"), "风速": ("%", "percent"), "档位": ("%", "percent"),
+    }
+
+    @classmethod
+    def _unit_ok(cls, attr_word: str, attrs: dict) -> bool:
+        allow = next((v for k, v in cls._UNIT_WHITELIST.items() if k in attr_word), None)
+        if allow is None:
+            return True
+        u = str(attrs.get("unit_of_measurement") or "").strip().lower()
+        return (not u) or u in allow
+
     async def _attr_answer(self, area, dev_word: str, attr_word: str) -> Optional[str]:
         domains = _DEVICE_WORDS.get(dev_word, ())
         if not domains:
@@ -155,7 +176,8 @@ class QueryZone:
             return None
         keys = self._ATTR_KEYS.get((dev_word, attr_word)) or ()
         ent = next((e for e in ents
-                    if any((e.get("attributes") or {}).get(k) is not None for k in keys)),
+                    if self._unit_ok(attr_word, e.get("attributes") or {})
+                    and any((e.get("attributes") or {}).get(k) is not None for k in keys)),
                    None)
         if ent is None:
             return None
@@ -171,8 +193,17 @@ class QueryZone:
             pct = int(round(v * 100 / 255)) if 0 <= v <= 255 else int(round(v))
             return f"{prefix}{nm or dev_word}亮度约 {pct}%。"
         if attr_word == "色温":
-            return f"{prefix}{nm or dev_word}色温 {int(v)}K。"
+            # v1.0.62 P1-6：light 域 color_temp 惯例是 **mireds**（370 mired≈2700K），
+            # 旧代码裸报「色温 370K」=量纲错标签（与 aqi 事件同族）。≤1999 判为
+            # mireds 换算（mired 可视域 140-500 与 Kelvin 1700-6500 无交叠，判据稳）。
+            kelvin = int(round(1_000_000 / v / 50) * 50) if 0 < v < 2000 else int(v)
+            return f"{prefix}{nm or dev_word}色温约 {kelvin}K。"
         if attr_word in ("风量", "风速", "档位"):
+            # v1.0.62 P1-6：无单位的小整数是「档位」语义（1..12），percentage
+            # 才报百分比——把空调 2 档播成「风量 2%」也是错标签。
+            u = str(attrs.get("unit_of_measurement") or "").strip().lower()
+            if not u and v <= 12 and float(v).is_integer():
+                return f"{prefix}{nm or dev_word}现在是 {int(v)} 档。"
             pct = int(round(v)) if v <= 100 else int(round(v * 100 / 255))
             return f"{prefix}{nm or dev_word}风量约 {pct}%。"
         return f"{prefix}{nm or dev_word}{'设定' if '定' in attr_word else ''}{attr_word}是 {v:g}。"

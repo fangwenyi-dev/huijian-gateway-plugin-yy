@@ -39,7 +39,7 @@ TOOLS: list[dict] = [
         "name": "TurnDeviceOn", "description": "打开设备", "parameters": {
             "type": "object", "properties": {"target": _TARGET_SCHEMA}, "required": ["target"]}}},
     {"type": "function", "function": {
-        "name": "TurnDeviceOff", "description": "关闭设备", "parameters": {
+        "name": "TurnDeviceOff", "description": "关闭设备（锁域例外：关闭门锁=解锁属风险操作，会被执行闸拒绝，此类请引导用户直接说解锁指令走本地确认）", "parameters": {
             "type": "object", "properties": {"target": _TARGET_SCHEMA}, "required": ["target"]}}},
     {"type": "function", "function": {
         # v1.0.42 家电族：暂停运行中的设备（扫地机器人/电视音响/窗帘停走）。
@@ -142,6 +142,10 @@ SYSTEM_PROMPT = (
     "禁用 TurnDeviceOn/Off 和 cover；带「帘/百叶」的才是窗帘 → Turn*（cover）。"
     "8) 一句话要多件事（「打开空调，并关闭平开窗」）：同一轮并行发起多个工具调用"
     "逐个执行；建场景/自动化时同理，每个设备动作在 actions 数组里单独占一项。"
+    "9) 门锁铁律：对锁域设备**禁止**发 TurnDeviceOff/HassTurnOff/HassToggle——"
+    "本系统语义里关锁=解锁，属风险操作且执行闸会拒绝。用户说「关闭门锁/把锁关掉」"
+    "这类话时不要试调用，直接口播引导：「解锁要先确认，请说解锁门锁」。"
+    "打开/上锁（TurnDeviceOn 对锁）不受此限。"
 )
 
 

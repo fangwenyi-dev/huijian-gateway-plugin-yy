@@ -38,6 +38,7 @@ from typing import Any, Callable, Coroutine, Optional
 from . import const
 from .nlu.fast_path import FastPath, Plan, is_pronoun, is_whole_house, split_compound
 from .nlu import targets as T
+from .nlu.canonical import canonical
 from .nlu import music
 from .nlu import creation
 from .nlu.klar_client import KlarClient
@@ -342,6 +343,12 @@ class Pipeline:
         # P0-3/P2-15 后台 task 强引用袋（session F7b 纪律）
         self._pending: set[asyncio.Task] = set()
         self._vocab_ts = 0.0
+        # v1.0.62 P0-1/P0-2：漏斗指标 + 兜底语料回流（观测件，永不干预主链；
+        # 测试用 __new__ 构造的 Pipeline 无此属性，钩子端 getattr 容错）。
+        # 回流文件落**持久卷 DATA_DIR**（非安装目录）：加载项升级镜像重建
+        # 语料不丢；测试基建成 HUIJIAN_DATA→tmp，盘写天然出仓。
+        from .nlu.telemetry import Telemetry
+        self.telemetry = Telemetry(settings, const.DATA_DIR)
 
     # ── 后台 task 助手 ──────────────────────────────────────────
     def _spawn(self, coro: Coroutine) -> None:
@@ -370,6 +377,11 @@ class Pipeline:
             reply = Reply(self.settings.get("dialog.fallback_text", const.FALLBACK_TEXT),
                           "fallback", ok=False)
         self._dedup_settle(text, reply)
+        # v1.0.62 P0-1/P0-2：漏斗计数 + 兜底回流（观测件；_dedup_gate 早退的
+        # 共享方不经过此处，天然不重复计数；reply.source 已是最终收口档位）。
+        tele = getattr(self, "telemetry", None)
+        if tele is not None:
+            tele.observe(text, reply.source, reply.ok, time.time() - t0)
         # P0-3：事件旁路出回复路径（回合留痕对时序无强要求）
         self._spawn(self.ha.fire_event(const.EVENT_NAME, {
             "utterance": text, "reply": reply.text, "source": reply.source,
@@ -471,6 +483,11 @@ class Pipeline:
     # ── 级联主流程 ─────────────────────────────────────────────
     async def _cascade(self, text: str, origin: str = "",
                        on_sentence: Optional[Callable[[str], Any]] = None) -> Reply:
+        # v1.0.62 P1-7 全链统一起点：ASR 纠错+礼貌语剥离一次做净，确认环/创建
+        # 承接/复合拆分/fp∥klar/查询族/LLM 兜底吃同一文本（旧状：corrector 只在
+        # fp 内生效，「开床器电量多少」fp 认得、query 不认得——同句因档位而异
+        # 即漂移源）。幂等纪律见 canonical 模块头；fp 内部原调用保留作纵深。
+        text = canonical(text, self.settings)
         # P2-13 确认环优先：有 pending 时本句是对问句的回答（是/否/改口）
         answered = await self._confirm_answer(text, origin)
         if answered is not None:
@@ -1340,8 +1357,11 @@ class Pipeline:
         rounds = int(self.settings.get("llm.history_rounds", 10) or 10)
         msgs: list[dict] = []
         for ts, u, a in list(dq)[-rounds:]:
+            # v1.0.62 P2-10：历史窗独立成键（原 `context_ttl_s * 4` 魔法数——
+            # 调继承窗会意外拉扯历史窗，两窗语义本就不同）。缺省 360s 与旧
+            # 90*4 行为逐位一致，纯治理零行为漂移。
             if now - ts > float(self.settings.get(
-                    "dialog.context_ttl_s", CONTEXT_TTL_S)) * 4:   # 历史比目标继承耐存一点
+                    "dialog.history_ttl_s", CONTEXT_TTL_S * 4)):   # 历史比目标继承耐存一点
                 continue
             msgs.append({"role": "user", "content": u})
             if a:

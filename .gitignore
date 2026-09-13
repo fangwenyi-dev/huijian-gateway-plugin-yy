@@ -29,3 +29,6 @@ _tr_*.log
 
 # ASR A/B 台架（本地 scratch，模型与产物不入库）
 _bench/
+
+# v1.0.62 P0-2 回流语料运行期产物（持久卷文件；误配 HUIJIAN_DATA 时兜底防入库）
+huijian_voice/nlu_mining.jsonl

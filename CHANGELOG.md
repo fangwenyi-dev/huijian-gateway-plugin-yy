@@ -1,5 +1,53 @@
 # 变更日志
 
+## [1.0.62] - 2026-09-22 NLU 优化全量落地批（P0×3 + P1×4 + P2×3，十条建议逐条修复）
+
+- **P0-1 NLU 理解漏斗**：新 `core/nlu/telemetry.py` Funnel——级联各档
+  （reply.source 原值分档）命中数/成功率/平均时延/1h 滑窗，进程内观测件
+  永不干预主链；`pipeline.handle` 收口单点挂钩（dedup 共享方天然不重复计）。
+  `GET /api/telemetry` + 调试页「NLU 理解漏斗」卡片直读。回答「klar 上线
+  后 fp 掉没掉」「多少句落到拒答」这类以前只能翻日志的问题。
+- **P0-2 兜底语料回流**：Mining——固定拒答/LLM 兜底句/本地档执行失败三类
+  句子追加安装目录 `nlu_mining.jsonl`（**仅本机存放、从不外传、不进日志**，
+  行数超限保新轮转，`nlu.mining_enabled` 一键关）。把「平台窗→平开窗」式
+  人工挖日志固化为语料飞轮：版本周期审阅后分流字面表/klar 语料/训练集。
+- **P0-3 集成侧 LLM 通道同构闸**：v1.0.61 只闸了加载项 agent._tool，复审
+  确认集成 `custom_llm_api._call_intent` 是第二条无确认环通道（intent_turn
+  注释自证 off=unlock）——该通道无确认 UI 且读不到加载项设置，故**无条件
+  拒绝**风险解锁目标（TurnOff/Toggle×lock 域或名含锁），口播引导回主语音
+  通道走确认流；闸位钉在 `_enrich_target_domains` 之后（LLM 常不写
+  domains，enrich 回填真实域后才有牙）。
+- **P1-4 Golden 语料契约表**：`nlu_data/golden_utterances.jsonl` 82 句
+  （人工逐行终审）钉 FastPath+查询族两棵确定性引擎当前行为（intent/source
+  精确值，miss 行同钉——负样本不许被本地档误接）；`test_golden_set.py`
+  逐行漂移检测，表更新走 `tests/golden_gen.py` 重生成再审。建表实锤两货：
+  「灯现在多亮」P2-14 注释承诺了但正则只认「亮度」（本批修复）；
+  「窗户电池」类模糊指代确认宁缺勿滥拒绝正确。
+- **P1-5 提示层安全对齐**：agent SYSTEM_PROMPT 增「门锁铁律」第 9 条
+  （禁对锁发 Off/Toggle，引导口播「解锁要先确认」；On=上锁不受限），
+  TurnDeviceOff 工具描述与集成 HassTurnDeviceOff schema 同步点明锁域例外
+  ——schema 即治理：模型先知道规则，执行闸只兜底违规。
+- **P1-6 查询属性量纲闸**：`QueryZone._unit_ok`——实体带 unit_of_measurement
+  且与属性词预期量纲冲突（% vs AQI/ppm、°C vs %）时整键不认，把 P3-b
+  「AQI 播成湿度」错标签族从键表纪律升级为机器核验（unit 缺省=信任键表，
+  不砍可用读数）。附带：色温 mireds→K 换算（裸报 370K 是第二个量纲错），
+  无单位小整数报「N 档」不报「风量 2%」。
+- **P1-7 全链统一归一**：新 `core/nlu/canonical.py`（纠错→礼貌语剥离，幂等，
+  永不抛），`_cascade` 顶部执行一次——确认环/创建/复合/fp∥klar/查询族/LLM
+  吃同一文本。旧状 corrector 只在 fp 内生效，「开床器电量多少」fp 认得
+  query 不认得，同句因档位而异即漂移源。
+- **P2-8/P2-9 TextCNN margin 质量闸（不确定性让位）**：predict 增 top1-top2
+  差值闸（`nlu.textcnn_min_margin` 默认 0.15，0=关；阈值表 `__min_margin__`
+  键现场调参）。实测分布钉值：正常命中最低 0.457，险胜误判 0.06（「现在
+  几点」→SceneTrigger）——低置信不算本地命中，让位查询族/LLM/兜底，
+  不违「本地命中不经 LLM」铁律；funnel 记录让位后落点，数据说话。
+- **P2-10 上下文 TTL 治理补全**：目标继承/确认环 TTL 早已在settings；本批
+  把 LLM 历史窗从 `context_ttl_s × 4` 魔法数独立为 `dialog.history_ttl_s`
+  （缺省 360=旧行为逐位一致），两窗语义分离各调各的。
+- 测试：`tests/test_v1062_nlu_batch.py`（18 钉：AST 抽真函数行为钉+病灶复现
+  钉+回退防线钉）、`tests/test_golden_set.py`（83）、admin 遥测路由双态钉。
+  六源同版本 1.0.62。
+
 ## [1.0.61] - 2026-09-22 全量复审安全收口批（P1×1+P2×2+P3×2）+ v1.0.55 周期两闸并档
 
 - **P1 解锁确认环三形态补全（C2）**：P2-13 确认环旧判据只查「设备名含锁」，

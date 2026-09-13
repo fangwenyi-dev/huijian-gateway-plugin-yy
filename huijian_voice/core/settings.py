@@ -56,6 +56,11 @@ DEFAULTS: dict[str, Any] = {
         "creation_enabled": True,              # 场景/自动化语音句本地承接总开关（零 LLM）
         "thresholds_override": {},             # 按类阈值微调（默认用 intent.thresholds.json）
         "corrections_extra": {},               # 用户自定义热词纠错（追加到 61 条基础表）
+        "mining_enabled": True,                # v1.0.62 P0-2：兜底语料回流持久卷
+                                               # nlu_mining.jsonl（**仅本机存放永不外传**，关=停写）
+        "mining_max_lines": 1500,              # 回流上限轮转（保新丢旧）
+        "textcnn_min_margin": 0.15,            # v1.0.62 P2-8/P2-9：T1 top1-top2 质量闸
+                                               # （低置信不算本地命中，让位查询族/LLM/兜底；0=关）
     },
     "klar": {
         # 一级确定性 NLU（klar-ha-nlu 引擎，容器内 s6 服务 loopback :10520）。
@@ -84,6 +89,8 @@ DEFAULTS: dict[str, Any] = {
         "dedup_window_s": 2.0,                 # 相同文本短时去重（防重复执行，契约 §1.4-②）
         "context_enabled": True,               # 体验批 P2-10：跨轮目标继承 + LLM 真历史
         "context_ttl_s": 90.0,                 # 继承窗口：说"关掉它"距上一句不超过 90s 才复用目标
+        "history_ttl_s": 360.0,                # v1.0.62 P2-10：LLM 历史窗独立治理
+                                               # （旧=context_ttl_s*4 魔法数的显式化，缺省值等旧行为）
         "chain_enabled": True,                 # 体验批 P2-12：复合句分句链发（全命中才链）
         "confirm_risky": True,                 # 体验批 P2-13：解锁/删场景先问「确认」再办
         "confirm_ttl_s": 30.0,                 # 确认问句存活：超过 30s 不回即作废

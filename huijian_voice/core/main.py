@@ -56,7 +56,8 @@ class Service:
         self.ha = HAClient()
         self.nlu_data = Path(os.environ.get("HUIJIAN_NLU_DATA", const.NLU_DATA_DIR))
         self.textcnn = TextCNN(self.nlu_data,
-                               thresholds_override=self.settings.get("nlu.thresholds_override") or {})
+                               thresholds_override=self.settings.get("nlu.thresholds_override") or {},
+                               min_margin=self.settings.get("nlu.textcnn_min_margin", 0.15))
         self.scenes = SceneCache(self.ha)
         self.executor = Executor(self.ha, self.settings)
         self.agent = Agent(self.settings, self.ha, self.executor)
