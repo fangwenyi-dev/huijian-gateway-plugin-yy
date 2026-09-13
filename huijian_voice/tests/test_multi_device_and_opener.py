@@ -598,3 +598,58 @@ def test_coord_source_pins():
     assert mapping.index('"内开内倒窗"') < mapping.index('"内倒窗"')
     assert '"内倒窗"' in (HERE / "custom_components" / "huijian_ai" /
                           "intent_device_shared.py").read_text(encoding="utf-8")
+
+
+# ── 2026-09-21 二批：SOV 尾动/顿号/语气词并列（同族半执行洞）──────────
+
+@pytest.mark.parametrize("t", ["内倒窗和推拉窗打开", "把内倒窗和推拉窗打开"])
+def test_coord_sov_parallel_both_open(t):
+    """SOV「A和B打开」：T0 单发吃一扇+「内倒」动作a污染整句——必链发两全。"""
+    p, ex = _pipe()
+    r = asyncio.run(p.handle(t, origin="sov-p"))
+    assert r.source == "chain", (t, r.source)
+    pl = ex.plans[0]
+    steps = [(pl.intent, pl.args)] + [(s["name"], s["args"]) for s in pl.extra_steps]
+    assert len(steps) == 2
+    names = [a["target"][0]["devices"][0]["name"] for _, a in steps]
+    assert names == ["内倒窗", "推拉窗"]
+    assert all(a["action"] == "open" for _, a in steps)   # a 污染根除：分片各裁
+
+
+def test_coord_sov_close_direction():
+    p, ex = _pipe()
+    asyncio.run(p.handle("内开窗和推拉窗关闭", origin="sov-c"))
+    pl = ex.plans[0]
+    assert len(pl.extra_steps) == 1
+    assert all(a.get("action") == "close"
+               for a in [pl.args] + [s["args"] for s in pl.extra_steps])
+
+
+def test_coord_comma_ellipsis_and_modal():
+    """顿号省略「打开A、B」与语气尾巴「…吧」都要两全（strip_modal 片尾剥离）。"""
+    p, ex = _pipe()
+    asyncio.run(p.handle("打开平开窗、推拉窗", origin="ce-1"))
+    assert len(ex.plans[0].extra_steps) == 1
+    ex.plans.clear()
+    r = asyncio.run(p.handle("打开展厅内倒窗和推拉窗吧", origin="ce-2"))
+    assert r.source == "chain"
+    assert ex.plans[0]["target"][0]["area"] == "展厅" if isinstance(
+        ex.plans[0], dict) else ex.plans[0].args["target"][0]["area"] == "展厅"
+
+
+def test_coord_sov_unknown_piece_still_refuses():
+    """SOV 半执行同闸：右片不认识 → 一扇都不许开。"""
+    p, ex = _pipe()
+    asyncio.run(p.handle("内倒窗和不存在的xyz打开", origin="sov-neg"))
+    assert ex.plans == []
+
+
+def test_scene_sov_coord():
+    """场景 Y 段 SOV 并列同纪律。"""
+    p, ex = _pipe()
+    r = asyncio.run(p.handle("当我说有点闷，就把内倒窗和推拉窗打开", origin="sc-sov"))
+    assert r.source == "creation"
+    acts = ex.plans[0].args["actions"]
+    assert [a["intent"] for a in acts] == ["ControlWindow", "ControlWindow"]
+    assert [a["params"]["target"][0]["devices"][0]["name"] for a in acts] == \
+        ["内倒窗", "推拉窗"]

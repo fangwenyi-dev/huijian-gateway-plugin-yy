@@ -406,7 +406,12 @@ def parse_target(raw: str, action_match=None) -> tuple[str | None, str | None, i
 _COORD_HEAD = re.compile(
     r"^(打开|开启|关闭|关掉|关上|拉开|拉上|拉下|播放|停止|暂停)"
     r"(?:一下)?[把将]?[\s]*(?=\S)")
-_COORD_CONJ = re.compile(r"[和与]")
+# SOV 尾动形（2026-09-21 二批）：「内倒窗和推拉窗打开」「把A和B关闭」——
+# 实测 T0 单发吃一扇谎报成功，且「内倒」位置动作 a 污染整句到推拉窗。
+# 只收双字尾动词（裸"开/关"单字歧义大，不入）。
+_COORD_TAIL = re.compile(r"(?:把|将)?\s*(打开|开启|关闭|关掉|关上|拉开|拉上|拉下)$")
+# 顿号=汉语并列常规形（「打开平开窗、推拉窗」），一并收；设备词表无标点零冲突
+_COORD_CONJ = re.compile(r"[和与、]")
 # 动词片只认**双字动词形**——单字表会误杀设备词（"推_拉_窗""空_调_"），
 # 首版实测即栽在此（coord_clauses 恒 []）。宁可漏判（漏→原通道，不误伤）。
 _COORD_VERBISH = ("打开", "开启", "关闭", "关掉", "关上", "调高", "调低",
@@ -419,19 +424,37 @@ def _coord_ends_device(seg: str) -> bool:
     return any(seg.endswith(d) for d in _ALL_MIN2)
 
 
-def coord_clauses(text: str) -> list[str]:
-    """「打开A和B」→ ["打开A", "打开B的补区域形"]；不是并列形态 → []。"""
+def _coord_split(text: str):
+    """并列骨架分解：SVO「打开A和B」与 SOV「把A和B打开」同收。
+
+    返回 (verb, segs)（segs 已剥语气词/把字头/属格，≥2 片）；不是并列形态
+    → None。分片正确性判据（已知设备尾/无内藏动词）留在调用方——
+    coord_refuse 只需要"连词挂在设备尾之后"这一半。"""
     text = (text or "").strip().strip("。！？!?")
     if not (4 <= len(text) <= 30):
-        return []
+        return None
     m = _COORD_HEAD.match(text)
-    if not m:
-        return []
-    verb = m.group(1)
-    segs = [s.strip(" 的") for s in _COORD_CONJ.split(text[m.end():])]
+    if m:
+        verb, body = m.group(1), text[m.end():]
+    else:
+        stripped = re.sub(r"^[把将]\s*", "", text)   # SOV 把字头
+        mt = _COORD_TAIL.search(stripped)
+        if not mt or mt.start() < 2:
+            return None
+        verb, body = mt.group(1), stripped[:mt.start()]
+    segs = [strip_modal(s).strip(" 的") for s in _COORD_CONJ.split(body)]
     segs = [s for s in segs if s]
     if not (2 <= len(segs) <= 8):
+        return None
+    return verb, segs
+
+
+def coord_clauses(text: str) -> list[str]:
+    """「打开A和B」→ ["打开A", "打开B补区域"]；SOV「A和B打开」同收；否则 []。"""
+    sp = _coord_split(text)
+    if not sp:
         return []
+    verb, segs = sp
     fixed: list[str] = []
     for s in segs:
         s = re.sub(r"^(?:帮我把|帮我|请|麻烦|把)", "", s).strip(" 的")
@@ -452,18 +475,17 @@ def coord_clauses(text: str) -> list[str]:
 
 
 def coord_refuse(text: str) -> bool:
-    """「打开A和…」且 A 以已知设备词结尾 → 单发通路必须拒猜。
+    """并列句（连词挂在已知设备尾之后）→ 单发通路必须拒猜。
 
     coord_clauses 只在全部分片都是已知设备时扩链；「打开内倒窗和不存在的X」
     这类右片听不懂的并列句若放给 T0 单发，parse_target 会吃掉左片执行并
     谎报「办好了」——右片被静默丢弃=半执行。本判据说的是：**只要并列连词
-    挂在已识别设备尾之后**，单发怎么裁都错，如实交 fallback/LLM 兜底。"""
-    text = (text or "").strip().strip("。！？!?")
-    m = _COORD_HEAD.match(text)
-    if not m:
+    挂在已识别设备尾之后**，单发怎么裁都错，如实交 fallback/LLM 兜底。
+    SOV 同判（「内倒窗和X关闭」单发同样半执行）。"""
+    sp = _coord_split(text)
+    if not sp:
         return False
-    segs = [s.strip(" 的") for s in _COORD_CONJ.split(text[m.end():])]
-    segs = [s for s in segs if s]
-    if len(segs) < 2 or not (2 <= len(segs[0]) <= 12):
+    _, segs = sp
+    if not (2 <= len(segs[0]) <= 12):
         return False
     return _coord_ends_device(segs[0])
