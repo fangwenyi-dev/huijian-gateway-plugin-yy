@@ -23,7 +23,18 @@ from aiohttp import web
 # 采集期抓真 anyio 模块对象：test_integration_link_stability 在运行期把
 # sys.modules["anyio"] 换桩（fail_after→lambda None），届时任何懒 import
 # 拿到的都是假模块——recognize 超时分支将永不可测。
-import anyio as _ANYIO_REAL
+# CI（runner 依赖面 requirements.txt）不含 anyio（它是 HA 运行期依赖）：
+# 顶层裸 import 会炸整份收集（exit 2，2026-09-13 v1.0.64 CI 实证）——
+# 降级为可选，缺则只跳 recognize 系，其余 33 项照常跑。
+try:
+    import anyio as _ANYIO_REAL
+    _HAS_ANYIO = True
+except ImportError:
+    _ANYIO_REAL = None
+    _HAS_ANYIO = False
+
+_SKIP_NO_ANYIO = pytest.mark.skipif(
+    not _HAS_ANYIO, reason="CI 依赖面无 anyio（HA 运行期依赖），recognize 行为系跳过")
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE = ROOT / "core"
@@ -322,13 +333,19 @@ class _WouldBlock(Exception):
 class _Reader:
     def __init__(self, items):
         self._items = list(items)
+        self._ev = None
 
     def __aiter__(self):
         return self
 
     async def __anext__(self):
         if not self._items:
-            await asyncio.sleep(30)        # 服务端永不回（走超时分支）
+            # 真 anyio Event 永挂（跨后端安全，取消即解）；禁 asyncio.sleep
+            # 长睡——asyncio.run 收尾会直调 loop.close()，休眠任务未取消会炸
+            # "Event loop is closed"（本地 py313 必现、CI 缺 anyio 反而跳之）
+            if self._ev is None:
+                self._ev = _ANYIO_REAL.Event()  # 协程内惰性建（真模块引用）
+            await self._ev.wait()
             raise StopAsyncIteration
         await asyncio.sleep(0)
         return self._items.pop(0)
@@ -399,6 +416,7 @@ async def _chunks(n=2):
         yield b"\x00" * 8
 
 
+@_SKIP_NO_ANYIO
 def test_recognize_happy():
     sent = []
 
@@ -412,6 +430,7 @@ def test_recognize_happy():
     assert sum(1 for m in sent if isinstance(m, bytes)) == 3
 
 
+@_SKIP_NO_ANYIO
 def test_recognize_send_hang_errors_not_success():
     async def hang(m):
         await asyncio.sleep(30)         # buffer-0 悬挂 writer 实锤形态
@@ -424,6 +443,7 @@ def test_recognize_send_hang_errors_not_success():
     assert self.restarts, "发送段失败必须断连清算"
 
 
+@_SKIP_NO_ANYIO
 def test_recognize_timeout_not_success():
     self = _mk_transport(msgs=[])       # 永不回复
     text, err = asyncio.run(_get_recognize()(self, _chunks(1), timeout=0.3))
@@ -431,6 +451,7 @@ def test_recognize_timeout_not_success():
     assert self.restarts, "未以转录收口必须断连清算（残帧不跨轮）"
 
 
+@_SKIP_NO_ANYIO
 def test_recognize_serialized_by_shared_lock():
     """M9 生产拓扑钉：一 transport 两调用方——第二笔不得与第一笔发送段交错。"""
     lock = asyncio.Lock()
@@ -566,7 +587,7 @@ def test_m8_settings_depth_gate(tmp_path, caplog):
     import logging
     from core.settings import Settings
     st = Settings(tmp_path / "s.json")
-    with caplog.at_level(logging.ERROR, logger="huijian.settings"):
+    with caplog.at_level(logging.ERROR, logger="core.settings"):
         st.update({"power": {"unload_when_idle_min": float("nan"),
                              "keep": 1}})
     raw = (tmp_path / "s.json").read_text(encoding="utf-8")
