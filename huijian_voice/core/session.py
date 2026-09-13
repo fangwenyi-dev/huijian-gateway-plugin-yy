@@ -341,6 +341,7 @@ class LlmSession(BaseSession):
 
     def __init__(self, ws, ctx):
         super().__init__(ws, ctx)
+        self._gen = 0
         self._task: Optional[asyncio.Task] = None
 
     async def on_text(self, raw: str) -> None:
@@ -352,14 +353,22 @@ class LlmSession(BaseSession):
             return
         if obj.get("type") == "listen" and obj.get("state") == "detect":
             text = str(obj.get("text", ""))
+            # C1（2026-09-22 审查批）：抢占代次守卫——与 TtsSession._gen、
+            # SttSession「抢占方收束」纪律对称。此前被 cancel 的旧 _turn 在
+            # except CancelledError 里**无条件**补发 end：客户端 await_message
+            # 以 state=="end" 断流，新回合 start 刚出就被这条孤儿 end 掐死
+            # （拿回空/半截答案），随后新回合的句子帧再被下一请求错位消费。
+            # on_close 不 bump gen——断连路径保持「cancel 也收 end」旧行为。
+            self._gen += 1
+            gen = self._gen
             if self._task and not self._task.done():
                 self._task.cancel()
-            self._task = asyncio.create_task(self._turn(text))
+            self._task = asyncio.create_task(self._turn(text, gen))
 
     async def on_binary(self, data: bytes) -> None:
         pass    # llm 通道禁 binary（契约 §4）
 
-    async def _turn(self, text: str) -> None:
+    async def _turn(self, text: str, gen: int) -> None:
         await self.send_json({"type": "text", "state": "start"})
         reply_text = const.FALLBACK_TEXT
         streamed = False
@@ -367,6 +376,8 @@ class LlmSession(BaseSession):
         async def _on_sentence(sent: str) -> None:
             # P2-15：LLM 流式逐句下传（start 已发；end 帧永远由本协程收束）
             nonlocal streamed
+            if gen != self._gen:
+                return    # 已抢占：本句属旧回合，不发（孤儿句会把新回合掐流）
             # data 字段名是客户端硬约束（llm_transport 聚合读 data），勿改
             if await self.send_json({"type": "text", "state": "sentence_end", "data": sent}):
                 streamed = True
@@ -382,13 +393,27 @@ class LlmSession(BaseSession):
         except asyncio.TimeoutError:
             logger.warning("[LLM] 回合超预算 %ss", const.LLM_TURN_BUDGET_S)
         except asyncio.CancelledError:
-            await self.send_json({"type": "text", "state": "end"})
+            # C1：仅「非抢占」取消（on_close 清理，gen 未 bump）才收 end；
+            # 被新 detect 顶替时 end 归新回合发，旧回合静默退场并留痕
+            # （TtsSession v1.0.45「顶替必须点名」同款纪律）。
+            if gen == self._gen:
+                await self.send_json({"type": "text", "state": "end"})
+            else:
+                logger.warning("[LLM] 旧回合被新 detect 顶替，孤儿 end 已抑制 / %r",
+                               text[:30])
             raise
         except Exception:
             logger.exception("[LLM] 处理异常")
+        if gen != self._gen:
+            # 完成竞态窗口：handle 正常返回后、收 end 前被顶替——句子与 end
+            # 都不再补发，新回合的 start/sentence/end 自成闭环。
+            logger.warning("[LLM] 旧回合收尾前被顶替，剩余帧已抑制 / %r", text[:30])
+            return
         if not streamed:
             from .agent import _sentences
             for sent in _sentences(reply_text):
+                if gen != self._gen:
+                    break
                 if not await self.send_json({"type": "text", "state": "sentence_end", "data": sent}):
                     break
         await self.send_json({"type": "text", "state": "end"})

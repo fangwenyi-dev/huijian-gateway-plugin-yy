@@ -519,7 +519,9 @@ def test_light_set_maps_only_legal_keys():
         "domain": "light", "garbage": "x"})))
     d, s, data = ha.services[0]
     assert (d, s) == ("light", "turn_on")
-    assert data == {"entity_id": "light.x", "brightness": 50, "color_name": "红色"}
+    # v1.0.55：0–100 的引擎亮度槽改走官方百分比键 brightness_pct（HA light.turn_on
+    # 的 brightness 是 0–255 刻度，"50" 直塞实亮 ≈20%——现场量纲缺陷钉）。
+    assert data == {"entity_id": "light.x", "brightness_pct": 50.0, "color_name": "红色"}
 
 
 def test_list_entity_id_passthrough_and_no_table_intent():

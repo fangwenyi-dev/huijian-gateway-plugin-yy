@@ -368,11 +368,23 @@ class Agent:
 
     async def _tool(self, name: str, args: dict) -> tuple[bool, str]:
         from .nlu.fast_path import Plan
+        from .nlu.targets import args_target_lock
         # v1.0.41 安全（审查 S2 第一层）：白名单外的工具名直接拒（含一切路径形态），
         # 永不带入执行/回落链。非 str 名也在此拦下（LLM 可吐任意 JSON）。
         if not isinstance(name, str) or name not in _TOOL_NAMES:
             logger.warning("[Agent] LLM 回吐非法工具名，已拒绝: %r", str(name)[:80])
             return False, "工具名不合法"
+        # 2026-09-22 审查批 C2：pipeline 的 P2-13 确认环罩不住 LLM 工具通道——
+        # D7 语义下 TurnDeviceOff 对锁目标即解锁，不拦等于「开了 LLM 就有一条
+        # 免确认拔锁的后门」（工具白名单没有 HassUnlock/HassToggle，但
+        # TurnDeviceOff 完全够得着 lock 域）。拒答话术给正路：同一句话直接说
+        # 会命中本地字面表/klar 接地，由级联先问后办。confirm_risky=false
+        # 的用户已明示不要确认，此处随其配置放行（与 pipeline._risky 同开关）。
+        if (name in ("TurnDeviceOff", "HassTurnOff", "HassToggle")
+                and self.settings.get("dialog.confirm_risky", True)
+                and args_target_lock(args if isinstance(args, dict) else {})):
+            return False, ("解锁是风险操作，我不能替您跳过确认——请直接说「解锁大门」"
+                           "这类指令，会先问您一声再执行")
         if name == "huijianGetLiveContext":
             result = await self.ha.handle_intent(name, {})
             raw = json.dumps(result.get("raw", result), ensure_ascii=False)[:2000]

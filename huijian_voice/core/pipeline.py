@@ -14,7 +14,12 @@
       Adjust* 无目标句兜底继承）——代码注释里的 M2 就此落地；
   P2-11 空间化：satellite_areas 把卫星 IP 映射到区域，无目标句默认落本区域；
   P2-12 复合句切分：fp/klar 分句全命中才链发（all-or-nothing 同 klar 纪律）；
-  P2-13 风险操作确认环：解锁/删场景/删自动化先问后办（dialog.confirm_risky）；
+  P2-13 风险操作确认环：**解锁族**先问后办（dialog.confirm_risky）——含 t0 的
+      HassUnlock、慧尖形 TurnDeviceOff×名含锁、klar grounded HassTurnOff/Toggle×
+      lock.* 实体与多步 plan 的解锁步（2026-09-22 审查批 C2 补全三形态+extra_steps）；
+      LLM 工具通道对锁目标直接拒办并指回本地确认流程。删场景/删自动化不走本环：
+      创建通道要求精准命中触发词/ID（多义与未命中一律拒办并列表引导），命中即
+      执行、落点由播报复述点名（test_pipeline_creation 钉死现行为，本注释此前超售）；
   P2-15 LLM 流式钩子：on_sentence 逐句回调，Reply.streamed 防重复播报；
   P2-17 触发 targets 动态词表节流同步（friendly_name 派生）。
 """
@@ -134,6 +139,44 @@ def _mentions_window_device(args: Any) -> bool:
     return any(w in t for w in ("窗", "开合器", "内倒", "推拉门"))
 
 
+# v1.0.55 主裁决窗闸（2026-09-12 现场 16:10/16:41 双案实锤）：
+# 「办公室瓶盖窗速度设为百分之三十五」被 klar 回放兜底（引擎 draft.rs：未知
+# 目标+任意数字 → 硬套上一个可见灯 + HassLightSet+brightness）点亮了摄影灯。
+# v1.0.12 的窗闸只护**降级方向**且查 args——klar grounded args 里只有 pinyin
+# entity_id（无任何中文），查不到窗。此闸补主裁决方向：**原话文本** × **目标
+# 域** 交叉核验。误伤面刻意收得很窄：
+#   · 窗帘/纱窗先行剔除（它们是 klar 该干的标准 cover）；
+#   · 目标本来就是 cover/fan 放行（窗/风扇的速度语义合法）；
+#   · 句内同时提了灯（「窗户旁边的灯」）放行——用户真在说灯；
+#   · 只 veto 明确的"开关/亮度类意图 × light/switch 实体"，其余（空调温度等）
+#     不动。弃用后走级联下层（TextCNN/查询/LLM），宁可不执行也绝不错开灯。
+_KLAR_WINDOW_GUARD_INTENTS = frozenset({
+    "HassLightSet", "HassSetPosition",
+    "HassTurnOn", "HassTurnOff", "HassToggle",
+})
+
+
+def _klar_window_lamp_conflict(kl: Optional[Plan]) -> bool:
+    """True = 该 klar 计划与句内窗/速度语义冲突，主裁决必须弃用。永不抛。"""
+    try:
+        if kl is None or kl.intent not in _KLAR_WINDOW_GUARD_INTENTS:
+            return False
+        eid = str((kl.args or {}).get("entity_id") or "")
+        if "." not in eid:
+            return False                      # 未 grounded 步 → intent 通道自理，不在此闸职责
+        dom = eid.split(".", 1)[0]
+        if dom in ("cover", "fan"):
+            return False                      # 窗/风扇的速度·位置语义合法
+        t = (kl.utterance or "").replace("窗帘", "").replace("纱窗", "")
+        if not any(w in t for w in ("窗", "开合器", "内倒", "推拉门", "速度", "力度")):
+            return False
+        if dom == "light" and any(w in t for w in ("灯", "照明", "亮")):
+            return False                      # 句里同时点了灯：用户真在说灯
+        return dom in ("light", "switch")
+    except Exception:  # noqa: BLE001 —— 守卫自身故障不得拦正常句
+        return False
+
+
 def select_primary_plan(fp: Optional[Plan], kl: Optional[Plan]) -> Optional[Plan]:
     """纯裁决函数（可单测）：scene 契约 > 慧尖独占 > klar 标准 > 字面表剩余。"""
     if fp is not None:
@@ -142,6 +185,10 @@ def select_primary_plan(fp: Optional[Plan], kl: Optional[Plan]) -> Optional[Plan
         if fp.intent in HUIJIAN_ONLY_INTENTS or _mentions_window_device(fp.args):
             return fp
     if kl is not None:
+        # v1.0.55：见 _klar_window_lamp_conflict——句在说窗、klar 却指向
+        # 灯/开关时**整条弃用**（返回 None 落级联下层，宁可不执行）。
+        if _klar_window_lamp_conflict(kl):
+            return None
         return kl
     return fp
 
@@ -1356,11 +1403,29 @@ class Pipeline:
     def _risky(self, plan: Plan) -> bool:
         if not self.settings.get("dialog.confirm_risky", True):
             return False
-        if plan.intent in _RISKY_INTENTS:
-            return True
-        if plan.intent in ("TurnDeviceOff", "HassTurnOff") \
-                and any("锁" in n for n in _target_names(plan.args or {})):
-            return True                           # D7 反转语义：关锁=解锁
+        return self._plan_has_risky_step(plan)
+
+    @staticmethod
+    def _plan_has_risky_step(plan: Plan) -> bool:
+        """整案风险扫描（主步骤 + extra_steps 全查）。
+
+        2026-09-22 审查批 C2 两修：
+        1) 目标判据升级为 T.args_target_lock——klar grounded 形（args 只有
+           entity_id=lock.* 的拼音实体 id、无中文）与全屋域形（domains 含 lock、
+           名为空）此前旁路确认环，「解锁大门」被引擎接地后直接拔锁；
+        2) 多分句 plan 的 extra_steps 此前完全不设防——「关灯并且解锁大门」
+           主步 HassTurnOff light.x 不风险，第二步解锁裸奔。
+        HassTurnOn×lock=上锁（D7 安全向），不在闸内。"""
+        pairs = [(plan.intent, plan.args or {})]
+        pairs += [(st.get("name"), st.get("args") or {})
+                  for st in (getattr(plan, "extra_steps", None) or [])
+                  if isinstance(st, dict)]
+        for intent, args in pairs:
+            if intent in _RISKY_INTENTS:
+                return True
+            if intent in ("TurnDeviceOff", "HassTurnOff", "HassToggle") \
+                    and T.args_target_lock(args):
+                return True                       # D7 反转语义：关锁=解锁
         return False
 
     def _confirm_ask(self, plan: Plan, origin: str) -> Optional[Reply]:
@@ -1374,7 +1439,20 @@ class Pipeline:
         elif plan.intent == "HassDeleteAutomation":
             act = "删除该自动化"
         else:
-            what = "、".join(_target_names(args) or _target_areas(args) or ["该设备"])
+            # C2 配套：多步 plan 的问句按**风险步**取目标——主步是灯、第二步
+            # 才解锁时，拿主步 args 问「解锁该设备」会问错对象。
+            rargs = args
+            for st in (getattr(plan, "extra_steps", None) or []):
+                if not isinstance(st, dict):
+                    continue
+                sn, sa = st.get("name"), st.get("args") or {}
+                if sn in _RISKY_INTENTS or (
+                        sn in ("TurnDeviceOff", "HassTurnOff", "HassToggle")
+                        and T.args_target_lock(sa)):
+                    rargs = sa
+                    break
+            what = "、".join(_target_names(rargs) or _target_areas(rargs)
+                             or ["该设备"])
             act = f"解锁{what}"
         self._confirm[origin] = {"plan": plan, "ts": time.time()}
         self._origin_ts[origin] = time.time()

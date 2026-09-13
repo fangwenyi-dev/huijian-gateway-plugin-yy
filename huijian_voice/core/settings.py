@@ -159,14 +159,33 @@ class Settings:
         `"security": null` 这类非 dict 值时，旧实现会在 `_ensure_secrets` 直接
         `AttributeError: 'NoneType' object has no attribute 'get'` **崩在启动路径**
         （真机形态：改过文件/写盘被截断 → 服务起不来）。按 DEFAULTS 恢复为默认
-        dict，只警告不崩。返回是否发生修复。"""
+        dict，只警告不崩。返回是否发生修复。
+
+        C3（2026-09-22 审查批）：旧实现只查**顶层**节点——S9 钉的是 ws_token 位
+        的脏叶子，但 DEFAULTS 里 dict 套 dict（stt.cloud / tts.cloud）脏一层就
+        漏一层：`{"stt":{"cloud":"garbage"}}` 经 _deep_merge 覆写落盘后，
+        masked() 的 `c.get("api_key")` AttributeError → **GET /api/settings 恒
+        500，Web 设置面板永久打不开**（唯一出路是手改 /data/settings.json）。
+        现按 DEFAULTS 结构递归核验：凡默认是 dict 的位置，实际非 dict 即整子树
+        恢复默认（脏值本就不可用，回默认是语义最近的修复）。"""
         fixed = False
-        for key, default in DEFAULTS.items():
-            if isinstance(default, dict) and not isinstance(self._data.get(key), dict):
-                logger.warning("[配置] %s 节点类型异常(%s)，已恢复默认",
-                               key, type(self._data.get(key)).__name__)
-                self._data[key] = copy.deepcopy(default)
-                fixed = True
+
+        def walk(dst: dict, ref: dict, path: str) -> None:
+            nonlocal fixed
+            for key, default in ref.items():
+                if not isinstance(default, dict):
+                    continue
+                cur = dst.get(key)
+                sub = f"{path}{key}"
+                if not isinstance(cur, dict):
+                    logger.warning("[配置] %s 节点类型异常(%s)，已恢复默认",
+                                   sub, type(cur).__name__)
+                    dst[key] = copy.deepcopy(default)
+                    fixed = True
+                else:
+                    walk(cur, default, sub + ".")
+
+        walk(self._data, DEFAULTS, "")
         return fixed
 
     def _ensure_secrets(self) -> bool:
@@ -222,7 +241,9 @@ class Settings:
         d = self.data
         for prov in ("stt", "tts"):
             c = d[prov].get("cloud") or {}
-            if c.get("api_key"):
+            # C3 读侧纵深：脏 cloud 节点（str/None/int）不得让脱敏崩成 500——
+            # _repair_nodes 已递归兜底，这里再挡一切手工塞进来的怪值（S9 同款思路）。
+            if isinstance(c, dict) and c.get("api_key"):
                 c["api_key"] = "****"
         if d["llm"].get("api_key"):
             d["llm"]["api_key"] = "****"

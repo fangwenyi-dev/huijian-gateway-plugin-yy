@@ -1,5 +1,43 @@
 # 变更日志
 
+## [1.0.61] - 2026-09-22 全量复审安全收口批（P1×1+P2×2+P3×2）+ v1.0.55 周期两闸并档
+
+- **P1 解锁确认环三形态补全（C2）**：P2-13 确认环旧判据只查「设备名含锁」，
+  复审实测三种形态旁路——① klar 接地把「解锁大门」落成 HassTurnOff+
+  entity_id=lock.*（args 只有拼音实体 id、无任何中文）直通拔锁，与窗户闸门
+  「查不到窗」同病灶同方向；② 全屋形「关闭所有门锁」name 为空只带
+  domains=[lock]，失罩；③ 多分句 plan 只裁主步——「关灯并且解锁大门」第二
+  步解锁裸奔。另 LLM 工具通道根本不过级联闸：开了大模型=留一条免确认拔锁
+  后门。修复：T.args_target_lock 单一判据罩三形态；_risky 整案扫描（含
+  extra_steps）；确认问句按**风险步**取目标；agent._tool 对锁目标
+  TurnDeviceOff 拒办并指回本地确认流程（同随 dialog.confirm_risky 开关）。
+  HassTurnOn×lock=上锁（D7 安全向）零误伤。
+- **P2 LLM 通道抢占孤儿帧收口（C1）**：detect 顶替旧回合时被 cancel 的 _turn
+  在 except CancelledError 里**无条件**补发 end——客户端 await_message 以 end
+  断流，新回合 start 刚出即被掐死（空/半截答案+后续帧错位）。Tts/Stt 通道
+  皆有代次守卫，独漏 LLM。修复=照 TtsSession 纪律补 _gen：抢占 bump、孤儿
+  sentence/end 全抑制并留痕；断连清理路径旧语义不变。
+- **P2 设置面板嵌套脏值容错（C3）**：{"stt":{"cloud":"x"}} 一类脏值经深合并
+  落盘后，节点修复只查顶层 → 脱敏视图 AttributeError → **GET /api/settings
+  恒 500、Web 设置面板永久打不开**（v1.0.41 S9 同族，当时只修了 security
+  叶子位）。修复=按 DEFAULTS 结构递归核验恢复默认 + 读侧 isinstance 纵深。
+- **P3 本地音色指纹含模型包身份（P3-a）**：指纹只认 sid 数值，Kokoro 换包
+  （v1_0→v1_1 真实发生过：同 sid 不同嗓）不换键=HA 消息哈希盘缓存（无 TTL）
+  永远播旧包嗓音——09-21 speed 漏入键的教训同族。修复=指纹尾挂
+  `+m{lock sha256 前 8 位}`，取不到回落 u；发布后已缓存句按新键重合成一次。
+- **P3 净化器「湿度」不再报 AQI（P3-b）**：("净化器","湿度")→("aqi",) 把 AQI
+  读数冠以「湿度是 35」——量纲错标签即假成功。改认设备真实 humidity 属性，
+  未发布则让位通用湿度传感器分支（宁缺勿错）。
+- **v1.0.55 周期两闸并档**（当时未并入 58~60，本批随全绿树合并上线）：
+  `_klar_window_lamp_conflict`——句子在说窗/灯而 klar 接地目标不含任何
+  cover/light 实体时让位字面表；HassLightSet 双闸——非 light 域不直调服务，
+  引擎 0-100 亮度槽改走官方 brightness_pct（HA light.turn_on 的 brightness
+  是 0-255 刻度，「亮度30」直塞实亮≈12%，差 3 倍量纲的现场缺陷钉）。
+- 测试：新增 tests/test_v1061_review_fixes.py 14 项钉（每项含病灶复现形制）；
+  v1055 两闸 9 项钉与 v1048 指纹 4 处钉桩同批更新。全量回归 py3.13
+  **1040 passed**、py3.14 **1035 passed / 5 skipped**，零失败零新增。
+- 六源同版本 1.0.61。
+
 ## [1.0.60] - 2026-09-21 并列宾语 SOV 语序补全批（1.0.59 同族洞收口）
 
 - **尾动语序并列两全执行**：1.0.59 只修了 SVO「打开A和B」，实测**同一语义的

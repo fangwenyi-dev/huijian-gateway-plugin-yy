@@ -64,6 +64,11 @@ class ModelStore:
     def keys(self):
         return list(self._manifest.keys())
 
+    def lock_entry(self, key: str) -> dict:
+        """manifest 条目只读浅拷贝（v1.0.61 审查批 P3-a：TTS 指纹等需要
+        **包身份**的调用方使用——换包不换 sid 时旧盘缓存永不轮换）。缺 key → {}。"""
+        return dict(self._manifest.get(key) or {})
+
     def voices_count_for(self, key: str) -> int:
         """TTS 包官方音色数（lock 的 voices_count 字段；缺省 0=不启用自定义注入）。
         单音尺寸由它推导：官方 voices.bin 字节数 ÷ 音色数（纯张量拼接、无 magic，

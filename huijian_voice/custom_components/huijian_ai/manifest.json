@@ -38,7 +38,7 @@
     "opuslib_next>=1.0.0",
     "edge-tts>=6.1.0"
   ],
-  "version": "1.0.60",
+  "version": "1.0.61",
   "zeroconf": [
     "_esphomelib._tcp.local."
   ]

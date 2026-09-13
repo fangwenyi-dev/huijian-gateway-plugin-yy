@@ -474,6 +474,41 @@ def coord_clauses(text: str) -> list[str]:
     return out
 
 
+def args_target_lock(args: dict) -> bool:
+    """args 是否指向锁实体（D7 语义：对锁执行 TurnOff/Toggle = 解锁，风险闸必查）。
+
+    2026-09-22 审查批 C2：确认环旧判据只查设备名含「锁」——三种 args 形态里
+    只罩住第一种，另两种旁路：
+      ① 慧尖形态设备名含「锁」（t0/T1/LLM 车道，原有判据）；
+      ② klar grounded 平铺 entity_id=lock.*——引擎命中锁实体时 args 里只有
+         拼音 entity_id、**无任何中文**（与窗户闸门「查不到窗」同病灶同方向），
+         「解锁大门」被 grounded 成 HassTurnOff lock.x 后原闸失罩、直接拔锁；
+      ③ devices[].domains 显式含 lock——「关闭所有门锁」全屋形 name 为空、
+         只有域过滤，同样失罩。
+    永不抛：形制异常按 False（漏判面由级联话术兜底，绝不误拦正常句）。"""
+    try:
+        for ent in args.get("target") or []:
+            for dev in (ent or {}).get("devices") or []:
+                d = dev or {}
+                if "锁" in str(d.get("name") or ""):
+                    return True
+                doms = d.get("domains")
+                if isinstance(doms, (list, tuple)) and any(
+                        str(x).split(".")[0] == "lock" for x in doms):
+                    return True
+        if "锁" in str(args.get("name") or ""):
+            return True
+        eids = args.get("entity_id")
+        if isinstance(eids, str):
+            eids = [eids]
+        if isinstance(eids, (list, tuple)):
+            return any(isinstance(e, str) and e.split(".", 1)[0] == "lock"
+                       for e in eids)
+    except Exception:  # noqa: BLE001
+        return False
+    return False
+
+
 def coord_refuse(text: str) -> bool:
     """并列句（连词挂在已知设备尾之后）→ 单发通路必须拒猜。
 

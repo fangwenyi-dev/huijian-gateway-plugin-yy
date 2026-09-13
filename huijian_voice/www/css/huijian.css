@@ -614,6 +614,30 @@ input[type="range"]:focus-visible { outline: 2px solid var(--primary-light); }
     .gateway-name { font-size: 15px; }
     .toast { left: 12px; right: 12px; bottom: 12px; max-width: none; justify-content: center; }
 }
+/* v1.7.22 手机端滑块防误触（用户报：位置/速度/力度三滑块距离过近，
+   手动调节容易误触发）。根因：行距仅 7px、滑杆可视轨道 6px 即全部命中
+   高度、拇指珠 19px——三行热区在指尖下几乎重叠，蹭过相邻滑杆即改值，
+   onchange 松手就把 set_position/set_speed/set_strength 发上空口。
+   按触摸能力（hover:none + pointer:coarse）判定而非 ≤640px 宽度——
+   手机横屏/小平板窗口同样受益；鼠标端外观零变化：
+   ① 行距 7→18px，三行明确分组；
+   ② 命中区用透明 padding 撑到 30px 高，background-clip: content-box
+      让可见轨道仍是那条 6px 细线（thumb 依旧居中于内容盒中线）；
+      30px 命中 + 18px 行距 = 48px 轨距 ≥ Apple HIG 44px 最小触控目标，
+      且相邻命中区之间留 18px 安全带，压错滑杆概率归零；
+   ③ 拇指珠 19→26px（Firefox 15→22px），更好捏住起拖。
+   "轻碰轨道即跳值"的行为面由 v1.7.21 位置命令合并 + 三滑块均为
+   change 提交（松手才发令）兜底，本批为纯 CSS，不动 JS 行为。 */
+@media (hover: none) and (pointer: coarse) {
+    .slider-group { gap: 18px; }
+    input[type="range"] {
+        height: 30px;
+        padding: 12px 0;
+        background-clip: content-box;
+    }
+    input[type="range"]::-webkit-slider-thumb { width: 26px; height: 26px; }
+    input[type="range"]::-moz-range-thumb { width: 22px; height: 22px; }
+}
 @media (prefers-reduced-motion: reduce) {
     /* 标准哲学"运动宁慢勿快"，无障碍场景停掉星空动画与视差 */
     *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }

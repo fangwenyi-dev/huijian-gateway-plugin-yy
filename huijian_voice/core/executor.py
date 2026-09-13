@@ -257,6 +257,14 @@ class Executor:
                 svc = "lock" if name == "HassTurnOn" else "unlock"
                 return "lock", svc, {"entity_id": raw}
             if name == "HassLightSet":
+                # v1.0.55 双闸（2026-09-12 窗案次生缺陷）：
+                # ① 意图说灯、grounded 目标却不是 light 域 → 不直调，交回
+                #   intent 通道由 HA 自己解析（防"亮度"打到别的域实体）。
+                # ② 引擎亮度槽是 0–100 百分数（常为字符串），而 light.turn_on
+                #   的 brightness 是 0–255 刻度——"30" 透传实亮 ≈12%，差 3 倍
+                #   量纲；改用官方百分比键 brightness_pct，语义与话术一致。
+                if edomain != "light":
+                    return None
                 data = {"entity_id": raw}
                 for k in self._KLAR_KEYS["HassLightSet"]:
                     v = args.get(k if k != "color_name" else "color")
@@ -264,6 +272,14 @@ class Executor:
                         v = args.get("color")
                     if v is not None:
                         data[k] = v
+                b = data.get("brightness")
+                try:
+                    pct = float(str(b).strip().rstrip("%"))
+                    if 0.0 <= pct <= 100.0:
+                        data["brightness_pct"] = pct
+                        del data["brightness"]
+                except (TypeError, ValueError):
+                    pass                       # 非数值/越界（如已是 0-255）维持原样透传
                 return "light", "turn_on", data
             if name == "HassSetPosition" and edomain == "fan":
                 return "fan", "set_percentage", {

@@ -137,8 +137,11 @@ class QueryZone:
         ("空调", "当前温度"): ("current_temperature",), ("空调", "温度"): ("temperature", "current_temperature"),
         ("灯", "亮度"): ("brightness",), ("灯", "色温"): ("color_temp", "color_temperature"),
         ("风扇", "风量"): ("percentage",), ("风扇", "风速"): ("percentage",), ("风扇", "档位"): ("percentage",),
+        # P3-b（2026-09-22 审查批）：原 ("净化器","湿度")→("aqi",) 会把 AQI 数值
+        # 冠以「湿度是 35」报给用户——量纲错标签即假成功。只认设备真实发布的
+        # humidity 属性；没有就返回 None 让位下方通用湿度传感器分支（宁缺勿错）。
         ("加湿器", "湿度"): ("humidity",), ("加湿器", "档位"): ("fan_speed",),
-        ("净化器", "湿度"): ("aqi",), ("净化器", "档位"): ("fan_speed",),
+        ("净化器", "湿度"): ("humidity",), ("净化器", "档位"): ("fan_speed",),
         ("除湿机", "湿度"): ("humidity",), ("热水器", "温度"): ("temperature", "current_operation"),
         ("冰箱", "温度"): ("temperature",),
     }

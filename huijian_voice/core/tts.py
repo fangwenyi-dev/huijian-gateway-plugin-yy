@@ -603,7 +603,11 @@ class TtsEngine:
         命中旧语速盘缓存（消息哈希键无 TTL，仅 clear_cache 可清），与当初
         修的"换嗓不轮换"同族同病灶。speed 入指纹（本地+云）；云档另补
         model/response_format/base_url host（换平台同 voice 名=不同嗓）。
-        **api_key 永不入指纹**（指纹随 WS 帧与 INFO 日志走，凭据不上链）。"""
+        **api_key 永不入指纹**（指纹随 WS 帧与 INFO 日志走，凭据不上链）。
+        2026-09-22 审查批 P3-a：本地档再补**模型包身份**（lock sha256 前 8 位）——
+        本指纹只认 sid 数值，Kokoro 换包（v1_0→v1_1 那次真实发生过：同 sid 不同嗓）
+        不换键=HA 消息哈希盘缓存永远命中旧包音频，与 speed 漏入同族同病灶。
+        取不到 lock（假件/缺条目）回落 "u"，行为确定。"""
         prov = str(self.settings.get("tts.provider", "local_kokoro"))
         speed_s = f"s{self._speed():g}"
         if prov.startswith("cloud"):
@@ -617,7 +621,14 @@ class TtsEngine:
                     f":{str(cloud.get('response_format') or 'pcm')}"
                     f":{host}"
                     f":{speed_s}")
-        return f"local:sid{self.resolve_sid()}+c{len(self._custom_sids)}+{speed_s}"
+        tag = "u"
+        try:
+            entry = self.store.lock_entry("tts_kokoro_multilang") if self.store else {}
+            tag = str(entry.get("sha256") or "")[:8] or "u"
+        except Exception:  # noqa: BLE001 假件 store/异常形制：指纹照出，回落 u
+            pass
+        return (f"local:sid{self.resolve_sid()}+c{len(self._custom_sids)}"
+                f"+{speed_s}+m{tag}")
 
     def reset_cloud_pin(self, reason: str = "") -> None:
         """v1.0.55（定案⑤）：云失败钉扎的复位开关=云配置热变更。
