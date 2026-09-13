@@ -154,12 +154,29 @@ class TtsTransport(WsTransport):
                             break
                         else:
                             self.logger.info("Received unknown message: %s", data)
+                    else:
+                        # v1.0.65（TTS 深审 T1）：for 无 break 自然耗尽 = reader
+                        # 收到 EndOfStream（连接被静默关闭）。触发口：条目
+                        # unload/reload 先 stop() 依序 aclose 四条 stream，正在
+                        # 消费的一轮拿到 EOF。此处若不 error 收口，实体链把截断
+                        # 音频按「正常收束」交给 HA core 缓存任务（属 core，不随
+                        # 条目卸载取消）→ 截断写进消息哈希盘缓存（无 TTL），同一
+                        # 句永久缺尾不自愈——与 v1.0.55 truncated-stop 同毒、不同
+                        # 入口；不变量「非 stop 收口必须异常收口」自此全支路成立。
+                        self.logger.warning(
+                            "TTS 流未收到 stop 即断流（按错误收口，防缓存毒化）: %r",
+                            text[:40],
+                        )
+                        yield Dict(error="huijian TTS 流提前断开（未收到 stop）")
             except TimeoutError:
                 yield Dict(error="Response timeout")
             except anyio.get_cancelled_exc_class():
                 raise
             except Exception as err:  # reader 被关闭等
                 self.logger.warning("TTS 对话读取异常: %s", err)
+                # v1.0.65（T1 第二支路）：ClosedResourceError 等被吞后同样不得
+                # 以「正常耗尽」收口——error yield 让实体 raise、core pop 缓存。
+                yield Dict(error=f"huijian TTS 读取失败: {err}")
             finally:
                 if not clean:
                     await self.restart_connection(

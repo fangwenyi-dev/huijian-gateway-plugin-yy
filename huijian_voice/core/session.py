@@ -28,6 +28,10 @@ from . import audio, const
 
 logger = logging.getLogger("huijian.session")
 
+# v1.0.65（TTS 深审 F1）：tts detect 文本硬上限（字）。正常播报远小于此
+# （场景话术 ≤ 数十余字）；4000 字 ≈ 十几分钟音频，已是预算外极限形态。
+_TTS_TEXT_CAP = 4000
+
 
 def _json(obj: dict) -> str:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
@@ -58,24 +62,34 @@ class BaseSession:
             t.cancel()
 
     async def send_json(self, obj: dict) -> bool:
-        async with self._send_lock:
-            if self.ws.closed:
-                return False
-            try:
-                await self.ws.send_str(_json(obj))
-                return True
-            except Exception:
-                return False
+        return await self._send(lambda: self.ws.send_str(_json(obj)))
 
     async def send_bytes(self, data: bytes) -> bool:
-        async with self._send_lock:
-            if self.ws.closed:
-                return False
-            try:
-                await self.ws.send_bytes(data)
+        return await self._send(lambda: self.ws.send_bytes(data))
+
+    # v1.0.65（TTS 深审 F2）：v1.0.45 的 wait_for 只包住了生成侧，发送侧此前
+    # 无闸——aiohttp 对端零窗口（连着但不读）时 ws.send_* 在内部 drain 无限期
+    # 挂起，且挂在 _send_lock 内：同会话 pong/hello 全部堵死并堆积；ws 又是
+    # heartbeat=None，服务端零自保，恢复全靠对端重连。与生成侧同构收口：
+    # 发送有界，超时=按断连处理（truncated 语义由各调用点承接）。正常帧发送
+    # 微秒级，5s 触发即确凿异常，WARN 不致刷屏。
+    _SEND_TIMEOUT_S = 5.0
+
+    async def _send(self, coro_fn) -> bool:
+        async def _locked() -> bool:
+            async with self._send_lock:
+                if self.ws.closed:
+                    return False
+                await coro_fn()
                 return True
-            except Exception:
-                return False
+        try:
+            return await asyncio.wait_for(_locked(), self._SEND_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            logger.warning("[%s] 发送超 %ss（对端停读/积压），按断连处理",
+                           self.channel or "?", self._SEND_TIMEOUT_S)
+            return False
+        except Exception:
+            return False
 
     async def on_text(self, raw: str) -> None:
         raise NotImplementedError
@@ -220,6 +234,18 @@ class TtsSession(BaseSession):
         if typ == "tts":
             state = obj.get("state")
             text = str(obj.get("text", "")).strip()
+            # v1.0.65（TTS 深审 F1）：detect 文本硬上限。max_msg_size=64KB 单帧
+            # 可载 ~2 万字无标点文本：generate 非流式（整段合成完才返回）且
+            # executor 线程不可取消——一段巨型合成持 _gen_lock 分钟级，期间全部
+            # 播报/试听堵锁各自 55s 预算耗尽（全线 truncated），8 线程默认池堵满
+            # 连带 asr 同池排队（STT 停摆），数百 MB 样本驻留（OOM）。默认
+            # require_token=false，LAN 未认证单帧即可触发。截断优于拒绝：播报
+            # 保序出声，WARN 留痕对账。
+            if len(text) > _TTS_TEXT_CAP:
+                logger.warning("[TTS] detect 文本 %d 字超上限 %d，截断合成"
+                               "（防单帧全栈 DoS）: %r",
+                               len(text), _TTS_TEXT_CAP, text[:30])
+                text = text[:_TTS_TEXT_CAP]
             # 宽容：detect 为主形态；sentence_start/无状态带 text 也接单条合成（stop 回显忽略）
             # 审查修复（2026-09-21）：不再以 `and text` 静默忽略空文本 detect——自家
             # 契约「每 detect 必有 stop」，旧形态空 detect（tts.speak message=""，

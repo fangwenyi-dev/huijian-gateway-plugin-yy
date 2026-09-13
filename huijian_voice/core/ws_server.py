@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import Optional
@@ -48,7 +49,10 @@ def make_ws_app(ctx: AppContext) -> web.Application:
     app.router.add_get("/xiaozhi/v1/{channel}", _ws_handler)
     app.router.add_get("/healthz", _health)
     app.router.add_get("/discover", _discover)
-    app.router.add_get("/firmware/{fname}", _firmware_get)
+    # allow_head=False（v1.0.65 审查批 F-OTA-03）：微信/企业微信/浏览器的链接
+    # 预览器会对 URL 先发 HEAD——默认 allow_head=True 时 HEAD 复用同一 handler，
+    # 一次性令牌在设备真 GET 之前就被烧掉（现场表现「链接刚发就失效」）。
+    app.router.add_get("/firmware/{fname}", _firmware_get, allow_head=False)
     return app
 
 
@@ -63,12 +67,14 @@ async def _firmware_get(request: web.Request) -> web.Response:
     fname = request.match_info.get("fname", "")
     if store is None:
         return web.json_response({"message": "no firmware store"}, status=404)
-    path = store.take(request.query.get("t", ""), fname)
+    # to_thread（v1.0.65 F-OTA-08）：take 抢的 _lock 可能与 scan_import 收编同锁——
+    # 直调会在 :8000 语音事件循环热路径上等磁盘哈希，拖停全部在流会话。
+    path = await asyncio.to_thread(store.take, request.query.get("t", ""), fname)
     if path is None:
-        logger.warning("[OTA] 领取被拒 %s from %s（无/废/过期令牌或名不符）",
-                       fname, request.remote)
+        # 拒绝原因分类日志在 store.take 内（v1.0.65）；此处只留匿名面取证要素
+        logger.warning("[OTA] 领取被拒 from %s", request.remote)
         return web.json_response({"message": "invalid token"}, status=404)
-    logger.info("[OTA] 发放 %s to %s", fname, request.remote)
+    logger.info("[OTA] 发放 %s to %s", fname[:120], request.remote)
     return web.FileResponse(path)
 
 

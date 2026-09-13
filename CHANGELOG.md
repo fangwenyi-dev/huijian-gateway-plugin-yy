@@ -1,5 +1,86 @@
 # 变更日志
 
+## [1.0.66] - 2026-09-26 ESP OTA 深审批 + TTS 深审批（双 finder 全量收口）
+
+对语音加载项的 **OTA 链路**与 **TTS 链路**做双路对抗审查（正确性/安全/
+跨端契约三镜头 + TTS 引擎/传输两镜头），确认项全量修复。回归 1275 全绿。
+
+**OTA / 固件仓（core/firmware_store、ota_api、ws_server、main + 集成 http/config_flow）**
+
+- **端到端如实定位**：现网链路断点在小程序（v1.4.14 无 CMD21 发送帧）与
+  固件（无远程接收口），加载项机制真实可用——面板与签发话术改口：
+  「小程序尚无 CMD21 代发入口」「链接一次性 10 分钟，过期回本页重签」
+  「仅限设备局域网内打开」。**不再对用户侧假承诺**。
+- **面板"看不到设备"分诊**：根因=加载项与 HA 集成是两份代码，HA 侧
+  `custom_components/huijian_ai` 须升级到同版本并重启 HA——空表行现在
+  直接分辨并写明「HA 桥未连」vs「集成版本过旧」两种病因。
+- **台账断链修复（跨端契约 F-02）**：固件唯一带 fw_version 的入驻 POST
+  落 /setup/qrcode 口而非 speakname 口——现在按 speak_id 入账 +
+  config_flow 建账时持久化「入驻时」版本（跨重启存续）+ 卫星视图三级
+  回退（实时→入驻→建账）并给面板标源；顺带修 SetupView 整包日志
+  **泄漏 noise_psk** 的凭据面。
+- **领取口**：HEAD 不再消费一次性令牌（allow_head=False，链接预览器实测
+  会烧掉令牌）；take 的哈希读盘挪出事件循环；签发 host 实时取局域网 IP，
+  无可路由地址如实 503 不发废链接；拒发原因分类留痕。
+- **供应链闸（download）**：lock file 字段写侧路径闸（绝对/相对逃逸全拒，
+  实测 pathlib 绝对路径吞前缀）；urls 拒 file:// 等本地协议；流式字节闸
+  （声明 size×1.2、硬顶 256MB）+ 总时限 + 同版本单飞；记账与落盘同一临界
+  区原子收口（消除与投递收编的交叉坏账）。
+- **投递口完整性**：静止闸（mtime<2s 视为拷贝中不收编）+ 收编中大小突变
+  判废；0 字节包拒收拒签（设备按 content_length==0 拒收）；文件名超 BLE
+  string8 URL 预算（255B）拒收拒签；签发前复核在盘 size 与账目一致。
+- **鲁棒性**：index.json 损坏按 public 实盘重建（fsync+原子替换）；手编
+  lock 脏 size（如 "10KB"）折叠 0 不再毒死全表/500；固件仓初始化失败
+  降级为「OTA 面板不可用」，**语音主链不受否决**；日志字段净化（CRLF
+  注入面）；对外状态面 urls 脱敏（只留条数+主机名，lock 内嵌访问串不
+  进数据面）。
+
+**TTS（加载项引擎侧 F1-F16 / 集成传输播放侧 T1-T7）**
+
+- **F1 单帧全栈 DoS（high）**：tts detect 文本此前无上限——64KB 帧 ~2 万
+  字无标点文本可让非流式合成持引擎锁分钟级，全线播报 55s 预算耗尽、
+  executor 池堵死连带 STT 停摆+OOM 风险（LAN 未认证可触发）。现入口
+  4000 字截断留痕 + 无标点长句 300 字强制切块。
+- **T1 截断缓存毒化（high）**：条目 reload/unload 关流时，transport 两条
+  支路以「正常耗尽」收场——截断音频被 HA core 当完整结果写进消息哈希
+  盘缓存（无 TTL），同一句永久缺尾不自愈。现在凡未收到 stop 的收口
+  一律 error 传播（真 anyio 行为钉双支路）。
+- **T2 ffmpeg 孤儿/挂死（medium）**：消费端提前关停时 finally 跳过 kill/
+  收尸——满管道下 ffmpeg 永久阻塞或 core 任务永挂。按同仓
+  ffmpeg_proxy「Terminate hangs, so kill is used」纪律收口（有界 await+
+  必 kill+正常收束才报错归因）。
+- **F2 发送侧有界**：v1.0.45 预算只管生成侧；对端零窗口时 send 无限挂且
+  持 _send_lock（pong 全堵）。现三通道统一 5s 发送闸，超时按断连处理。
+- **F3 试听不冻栈**：试听 30s 超时（未就绪回 503「模型下载中」）；
+  ensure_loaded 的 348MB 冷下载挪出引擎锁（store per-key 单飞兜底），
+  冷下载不再饿死 executor 池/STT。
+- **F4 指纹推送强引用**：fire-and-forget task 补 _fp_pending 袋（同 F7b
+  纪律）——丢推送=HA 盘缓存键不轮换、模板句永久旧嗓。
+- **F5/F6 缓存键补全**：云指纹并入 sample_rate（产出改变项）；本地指纹
+  并入自定义音色**内容摘要**（同名重传改良版 bin 必须轮换，旧版只数
+  数量）。
+- **F7-F10/F12-F14**：大小写异体同名合并计数一致（防误判"sherpa 不支持"
+  禁全区）+ 上传口 409；保留名 voices_custom_merged 拒上传（假成功回执）；
+  合并/上传失败清 tmp；云 sample_rate 脏值消毒（不再误钉扎 300s）+
+  speed 服务端钳位上界 2.0；错误体截断读；HTTP 200+文本体拒当裸 PCM
+  （噪声帧曾计"云成功"解钉重放）；F16 wav 声明长度未付满不再记完整成功
+  （撒谎截断曾进 HA 盘缓存）；cache_enabled=False 读写一致短路；
+  provider 双拼法 UI 前缀判等（cloud_openai_compat 不再被静默翻转为本地）。
+- **T3-T7**：writer finally 裸 close 补 H8 同款 wait_for+abort（半开 TCP
+  僵尸链）+ heartbeat ping 上闸；卫星推流 barge-in 后 chunk 生成器 finally
+  确定性 aclose（不赌 GC，core ResultStream ~10MB 缓冲即时释放）；四通道
+  共享基类的坏帧日志截断+全文降 DEBUG（STT 转写文本外泄面）；实体
+  available 跟随连接态 + 连续退避预闸快速失败（不再每次白等 15s）。
+
+**测试**：test_ota_firmware.py 扩钉（20 项含 HEAD 烧令牌真测/写侧路径闸/
+台账链形态钉）；新增 tests/test_v1065_tts_review.py（23 项，含真 anyio
+T1 双支路行为钉、ensure 锁外下载行为钉、ffmpeg kill 真身执行）；
+全仓 1275 绿。
+
+**记入台账不当批修**：固件侧 OTA 三闸旁路与 rollback（用户调整固件中）、
+小程序 CMD21 builder（另仓）、announce 能力位错配疑点（T8，需台架核对
+固件 flags）、reaper 墙钟（F15）——见内部审查台账。
+
 ## [1.0.65] - 2026-09-25 音乐批 P1：区域定向点歌 + 正在播放查询 + 端点能力边界话术
 
 语音点歌从「只有一个端点」升级为按房间投放，并把「能不能正常播」的预期

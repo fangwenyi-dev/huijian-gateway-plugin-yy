@@ -14,8 +14,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#1d1750">
 <title>慧尖HA语音插件</title>
-<link rel="stylesheet" href="css/huijian.css?v=1.0.65">
-<link rel="stylesheet" href="css/voice.css?v=1.0.65">
+<link rel="stylesheet" href="css/huijian.css?v=1.0.66">
+<link rel="stylesheet" href="css/voice.css?v=1.0.66">
 </head>
 <body>
 <!-- 「星辰大海」背景层（与网关加载项同一设计标准/同一固定种子＝同一片天）：
@@ -295,7 +295,7 @@
 
 <script>
 "use strict";
-const CURRENT_VERSION = "1.0.65";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
+const CURRENT_VERSION = "1.0.66";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
 // 音色表 = kokoro-multi-lang-v1_1 官方 103 sid 全表（k2-fsa docs sid 表实证；
 // 标注=对用户上传试听样本的 CAM++ 声纹溯源榜：v1_1 不含晓晓/云扬，
 // sid18=zf_026 女声最似晓晓(0.454 全场最近)，sid81=zm_055 最似云扬）
@@ -473,7 +473,14 @@ async function loadSettings(){
   if (sid.selectedIndex < 0) sid.value = "18";   // 自定义项已撤/未注入 → 防把空值存回
   $("#tts_speed").value = S.tts.speed ?? 1.0;
   $("#stt_provider").value = S.stt.provider==="cloud" ? "cloud" : "local_paraformer";
-  $("#tts_provider").value = S.tts.provider==="cloud" ? "cloud" : "local_kokoro";
+  // v1.0.65（TTS 深审 F11）：云档存在两个"正统"拼法（引擎读侧 startswith
+  // ("cloud") 双吃：UI 的 "cloud" 与 settings 注释/测试沿用的
+  // "cloud_openai_compat"）。旧版严格判等：手改的 cloud_openai_compat 下拉框
+  // 显示"本地"而实际跑云，且下一次任意保存把它静默改写成 local_kokoro（云配
+  // 置丢失、行为翻转、无警告）。放宽为前缀判等，未知值如实提示不静默。
+  $("#tts_provider").value = String(S.tts.provider||"").startsWith("cloud") ? "cloud" : "local_kokoro";
+  if (S.tts.provider && !["local_kokoro","cloud","cloud_openai_compat"].includes(S.tts.provider))
+    toast("tts.provider 值 "+S.tts.provider+" 未知，已按云档显示；保存将写入下拉框选项");
   $("#stt_cloud_base").value = S.stt.cloud?.base_url||""; $("#stt_cloud_model").value = S.stt.cloud?.model||"";
   $("#tts_cloud_base").value = S.tts.cloud?.base_url||""; $("#tts_cloud_voice").value = S.tts.cloud?.voice||"";
   $("#tts_cloud_model").value = S.tts.cloud?.model||""; ttsFmt = S.tts.cloud?.response_format||""; ttsRate = S.tts.cloud?.sample_rate||0;
@@ -632,17 +639,18 @@ async function loadOta(){
   const tb = $("#otaDevTable tbody"); tb.innerHTML="";
   const devs = dv.devices||[];
   if(!devs.length){
-    tb.innerHTML = `<tr><td colspan="6" class="mut">暂无已入驻卫星——小程序配网入驻后自动出现</td></tr>`;
+    tb.innerHTML = `<tr><td colspan="6" class="mut">${dv.error ? esc0(dv.error) : "暂无已入驻卫星——小程序配网入驻后自动出现"}</td></tr>`;
   }
   for(const d of devs){
     const tr=document.createElement("tr");
     const remote=(d.ota_services||[]).length>0;
     const badge = d.updatable ? pill("可升级→"+_otaLatest,"warn")
                 : (d.fw_version ? pill(remote?"已最新·可远程":"已最新","ok") : pill("未上报","mut"));
+    const fv=d.fw_version?`${esc0(d.fw_version)}${d.fw_source==="入驻时"?' <span class="mut">（入驻时）</span>':""}`:"未上报";
     tr.innerHTML = `<td>${esc0(d.name||d.mac||d.speak_id)}<br><span class="mut code">${esc0(d.mac||"")}</span></td>
       <td>${esc0(d.area||"-")}</td>
       <td>${pill(d.online?"在线":"离线", d.online?"ok":"bad")}</td>
-      <td>${esc0(d.fw_version||"未上报")}</td>
+      <td>${fv}</td>
       <td>${badge}</td>
       <td>${_otaLatest?`<button class="act" data-issue="${esc0(d.mac||d.name)}">${remote?"下发":"发放链接"}</button>`:""}</td>`;
     tb.appendChild(tr);
@@ -655,12 +663,16 @@ async function loadOta(){
   }
   for(const it of items){
     const tr=document.createElement("tr");
-    const pull = (!it.on_disk && it.source==="lock" && (it.urls||[]).length)
+    const pull = (!it.on_disk && it.source==="lock" && (it.urls_count||0))
       ? `<button class="act" data-dl="${esc0(it.version)}">拉取</button>` : "";
+    const disk = !it.on_disk ? pill("未拉取","warn")
+      : it.sha_mismatch ? pill("哈希不符!","bad")
+      : (!it.size) ? pill("空包!","bad") : pill("在盘","ok");
     tr.innerHTML = `<td>v${esc0(it.version)} ${it.version===_otaLatest?pill("最新","ok"):""}</td>
       <td>${it.source==="lock"?"lock 登记":"投递收编"}</td>
-      <td>${it.on_disk?(it.sha_mismatch?pill("哈希不符!","bad"):pill("在盘","ok")):pill("未拉取","warn")}</td>
-      <td><span class="mut">${fmtBytes(it.size)}</span><br><span class="mut code">${esc0(String(it.sha256||"").slice(0,16))}…</span></td>
+      <td>${disk}</td>
+      <td><span class="mut">${fmtBytes(it.size)}</span><br><span class="mut code">${esc0(String(it.sha256||"").slice(0,16))}…</span>
+        ${it.urls_count?`<br><span class="mut">${it.urls_count} 源：${esc0((it.urls_hosts||[]).join(" · "))}</span>`:""}</td>
       <td>${pull}</td>`;
     ft.appendChild(tr);
   }
@@ -684,7 +696,7 @@ async function issueOta(mac){
         <span class="code">${esc0(String(r.sha256).slice(0,16))}…</span> · ${esc0(r.expires_in)}s 一次性</div>
       <p><input id="otaUrl" class="code" readonly style="width:100%" value="${esc0(r.url)}"></p>
       <button class="act" id="otaCopy">复制链接</button>
-      <span class="mut">小程序近场代发（BLE CMD21）；固件支持远程接收口后本链接同源自动升级体验。</span>
+      <span class="mut">当前小程序尚无 CMD21 代发入口（代发能力未上线）；固件支持远程接收口后本链接同源切真下发。</span>
       <div class="hint">${esc0(r.warn_zh)}</div>`;
     $("#otaCopy").onclick=()=>{ const i=$("#otaUrl"); i.select();
       try{ document.execCommand("copy"); toast("已复制"); }catch(e){ toast("请手动长按复制"); } };
@@ -862,6 +874,6 @@ $("#regenBtn").onclick = async ()=>{
   try { await post("/api/token/regenerate",{}); toast("已重置"); loadEndpoints(); } catch(e){ toast(e.message); }
 };
 </script>
-<script src="js/starsky.js?v=1.0.65"></script>
+<script src="js/starsky.js?v=1.0.66"></script>
 </body>
 </html>

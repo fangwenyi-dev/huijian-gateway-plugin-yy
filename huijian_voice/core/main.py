@@ -54,7 +54,14 @@ class Service:
     def __init__(self):
         self.settings = Settings()
         self.store = ModelStore(self.settings)
-        self.firmware = FirmwareStore()   # OTA 方案 Phase 2：固件仓（纯本地盘，无自动公网拉取）
+        # OTA 方案 Phase 2：固件仓（纯本地盘，无自动公网拉取）。
+        # v1.0.65 F-OTA-11：可选件初始化失败绝不否决语音主链——/data 只读/
+        # 路径配错时降级为无固件仓（下游 ws/ota_api 本有 store=None fail-soft）。
+        try:
+            self.firmware = FirmwareStore()
+        except OSError as e:
+            log.error("[OTA] 固件仓初始化失败（OTA 面板不可用，语音主链不受影响）: %s", e)
+            self.firmware = None
         self.ha = HAClient()
         self.nlu_data = Path(os.environ.get("HUIJIAN_NLU_DATA", const.NLU_DATA_DIR))
         self.textcnn = TextCNN(self.nlu_data,
@@ -65,6 +72,8 @@ class Service:
         self.agent = Agent(self.settings, self.ha, self.executor)
         self.asr = AsrEngine(self.settings, self.store)
         self.tts = TtsEngine(self.settings, self.store)
+        # v1.0.65（TTS 深审 F4）：音色指纹热推送 task 强引用袋（同 session F7b 纪律）
+        self._fp_pending: set = set()
         self.klar = KlarClient(self.settings)
         self.pipeline = Pipeline(self.settings, self.ha, self.scenes, self.textcnn,
                                  self.executor, agent=self.agent, klar=self.klar)
@@ -240,7 +249,14 @@ class Service:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        loop.create_task(self._push_voice_fp(fp))
+        # v1.0.65（TTS 深审 F4）：fire-and-forget 必须持强引用——asyncio 对 task
+        # 仅弱引用，GC 时机不巧整推即丢（=集成侧不轮换 HA 消息哈希盘缓存键，
+        # 模板句永久旧嗓，P5 病灶复发形态）。同族纪律 F7b 在 session._spawn 已
+        # 立并有测试钉，此处漏网。次生"单停滞会话堵全列"已由 session F2 发送
+        # 5s 闸收口（每会话至多 5s 后继续）。
+        t = loop.create_task(self._push_voice_fp(fp))
+        self._fp_pending.add(t)
+        t.add_done_callback(self._fp_pending.discard)
 
     async def _push_voice_fp(self, fp: str) -> None:
         n = 0

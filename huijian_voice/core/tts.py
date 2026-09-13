@@ -52,6 +52,8 @@ sherpa-onnx 前端共享状态互踩/崩溃，F1 只防跨代析构不防同代�
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
 import logging
 import math
 import os
@@ -94,11 +96,23 @@ def split_sentences(text: str) -> list[str]:
                 out.append(seg)
         else:
             out.append(p)
-    return out
+    # v1.0.65（TTS 深审 F1 第二道闸）：无标点超长句强制按长度切块。generate
+    # 非流式——单句长度=引擎持锁时长，session 入口截到 4000 字后仍可能是一整
+    # 句 4000 字（分钟级持锁照样冻死播报通道）。300 字/块：每块合成有界可
+    # 中断，块间由整流预算逐块裁决，前块已出声——把"整段黑洞"换成"截尾可播"。
+    hard = []
+    for p in out:
+        while len(p) > 300:
+            hard.append(p[:300])
+            p = p[300:]
+        if p:
+            hard.append(p)
+    return hard
 
 
 _CACHE_MAX_ITEMS = 256          # 播报句集收敛得快，256 句封顶
 _CACHE_MAX_BYTES = 4 << 20      # 4MB 硬闸（opus 32kbps×10s≈40KB/句，量级宽裕）
+_SPEED_MAX = 2.0                # v1.0.65 F10：与 Web 滑条上限对齐的服务端钳位
 
 
 _DEFAULT_SID = 18   # 本地定案默认音色 zf_026（云失败回落唯一用嗓，音色归属条款③）
@@ -135,8 +149,13 @@ _RIFF_MAX_HDR_BYTES = 8 << 20       # RIFF 头部缓冲硬闸（防 csz 撒谎�
 # num_speakers 只由 voices 文件推得——故加载后校验 num_speakers==官方+自定义，
 # 不符即回退官方并大声报错（fail-soft：宁缺不崩）。
 def merge_custom_voices(official, custom_dir, out, voices_count: int):
-    """返回 (生效 voices 路径, {音色主名(小写): sid}, 跳过说明列表)。
+    """返回 (生效 voices 路径, {音色主名(小写): sid}, 跳过说明列表, 内容指纹串)。
 
+    内容指纹 fp=（官方包 size/mtime + 各自音色 name/size/mtime）的 repr——
+    v1.0.65（深审 F6）起随返回值带出，供 voice_fingerprint 并入：同名重传
+    改良版 bin（数量不变、sid 不变、模型 lock sha 不变）也必须轮换 HA 消息
+    哈希盘缓存键（无 TTL），否则模板句永久旧嗓——与已修的 speed/model 漏入
+    同族同病灶。目录缺失/无 .bin/未配置 → 指纹为空串。
     目录缺失/无 .bin/voices_count 未配置 → 原样返回官方文件，零副作用。"""
     from pathlib import Path
     official = Path(official)
@@ -147,25 +166,35 @@ def merge_custom_voices(official, custom_dir, out, voices_count: int):
     if voices_count and voices_count > 0:
         per_voice = official.stat().st_size // voices_count
     if not custom_dir or not custom_dir.is_dir() or per_voice <= 0:
-        return official, {}, skipped
+        return official, {}, skipped, ""
     bins = sorted(p for p in custom_dir.glob("*.bin")
                   if p.is_file() and not p.name.startswith(".")
                   and not p.name.startswith("voices_custom_merged"))   # 合并产物误落投递口时不得自吞
     usable: list[Path] = []
+    seen_stems: dict[str, str] = {}
     for p in bins:
         size = p.stat().st_size
         if size != per_voice:
             skipped.append(f"{p.name}: {size}B ≠ 单音尺寸 {per_voice}B")
             continue
+        # v1.0.65（TTS 深审 F7）：大小写异体同名（Amy.bin/amy.bin）旧版进
+        # names 按 stem.lower() 去重只剩 1 项，merged 却拼 2 路 → num_speakers
+        # 对不上 → 误诊"sherpa 不支持追加"、整个自定义区被禁。上传侧已补 409，
+        # 这里防旁路投递（手工拷目录）：碰撞保留先者、跳后者并留痕。
+        stem = p.stem.lower()
+        if stem in seen_stems:
+            skipped.append(f"{p.name}: 与 {seen_stems[stem]} 同名（大小写折叠），跳过")
+            continue
+        seen_stems[stem] = p.name
         usable.append(p)
     if not usable:
-        return official, {}, skipped
+        return official, {}, skipped, ""
     names = {p.stem.lower(): voices_count + i for i, p in enumerate(usable)}
     meta = out.with_suffix(".meta")
     fp = repr((official.stat().st_size, int(official.stat().st_mtime),
                [(p.name, p.stat().st_size, int(p.stat().st_mtime)) for p in usable]))
     if out.exists() and meta.exists() and meta.read_text(encoding="utf-8") == fp:
-        return out, names, skipped   # 指纹未变：不重写盘
+        return out, names, skipped, fp   # 指纹未变：不重写盘
     try:
         tmp = out.with_suffix(".tmp")
         with tmp.open("wb") as w:
@@ -176,9 +205,13 @@ def merge_custom_voices(official, custom_dir, out, voices_count: int):
         os.replace(tmp, out)
         meta.write_text(fp, encoding="utf-8")
     except OSError as e:
+        # v1.0.65（F9）：落盘失败清 tmp（典型 ENOSPC，54MB 残体恰加剧空间紧张）
+        # ——对齐 main._atomic_write 的 F6 纪律。
+        with contextlib.suppress(OSError):
+            tmp.unlink()
         skipped.append(f"合并落盘失败：{e}")
-        return official, {}, skipped
-    return out, names, skipped
+        return official, {}, skipped, ""
+    return out, names, skipped, fp
 
 
 # ── 云档流式解码原语（v1.0.52）────────────────────────────────────
@@ -399,6 +432,16 @@ class _CloudOpusStream:
             # 头都没解析到 data 块就收流了（截断/撒谎 csz）→ 与整包路径同文案
             raise RuntimeError("云 TTS wav 头损坏（缺 fmt/data 块）")
         if self._state == "payload":
+            # v1.0.65（深审 F16）：干净收尾（chunked 正常结束、无传输错误）但
+            # data 块声明长度未付满=服务端撒谎截断——旧版零填充尾帧后计**完整
+            # 成功**并解除钉扎，缺尾音频进 HA 盘缓存（truncated 协议要防的正是
+            # 这一形态，此前只防了断流没防"声明 vs 实付"不一致）。raise 走既有
+            # 失败路径（云→本地回落+钉扎），不静默。未知长声明（0/0xFFFFFFFF）
+            # _data_left=None，不进本闸（见类注释 v1.0.56 定案）。
+            if self._data_left is not None and self._data_left > 0:
+                raise RuntimeError(
+                    f"云 TTS wav 声明长度未付满（data 块尚欠 {self._data_left}B，"
+                    "疑似服务端撒谎截断，按云故障处理）")
             # ⚠ 这里只能喂**已重采样**的尾段给攒帧器；若误走 _payload（会再
             # 过一次 _res.feed）尾段会被二次重采样后整段吞掉（尾帧短 32B 的前科）。
             out += self._frame_pcm(self._res.flush())
@@ -425,6 +468,18 @@ class _CloudOpusStream:
         why = _unsupported_format(data)
         if why:
             raise RuntimeError(why)
+        # v1.0.65（深审 F13）：HTTP 200 + ≥12B 的**非音频体**防线——部分
+        # OpenAI 兼容网关/透明代理会把错误做成 200+JSON（或撞 portal 的 200+
+        # HTML），旧版判不成容器就掉进"裸 PCM 缺省"分支：垃圾字节被重采样编码
+        # 成噪声帧发往卫星，且 cloud_frames>0 → 记**云成功解除钉扎**，每轮重放
+        # 噪声。判据保守：只拦容器特征（ASCII 结构前缀），二进制 PCM 第一帧
+        # 是均匀分布的样本对，出现"前 12B 全可打印且以 { [ < 起手"的概率可忽略
+        # （false-reject 走既有云故障→本地回落，永远比播噪声安全）。
+        printable = sum(1 for b in data if 32 <= b < 127 or b in (9, 10, 13))
+        if data[:1] in (b"{", b"[", b"<") and printable >= len(data) * 0.85:
+            raise RuntimeError(
+                "云 TTS 返回 200 但正文是文本而非音频（疑似网关/代理错误页）："
+                f"{data[:60].decode(errors='replace')!r}")
         self._start_payload(self._default_rate)
 
     def _start_payload(self, rate: int) -> None:
@@ -578,7 +633,10 @@ class TtsEngine:
     def _speed(self) -> float:
         """语速安全读（审查修复 2026-09-21）：合成三处与指纹必须读**同一个**
         校验值——坏配置（非数/非正）回 1.0 并留一行 WARN，不再"每轮 float()
-        炸穿 → 截断声明"。播报可用性优先。"""
+        炸穿 → 截断声明"。播报可用性优先。
+        v1.0.65（深审 F10）：补上界钳位——API 直写 speed=50 旧版原样进引擎与
+        云请求体（本地档产出狂嗓、云侧多半 400→钉扎风暴）；Web 滑条 0.6–2.0
+        的服务端对应物就是这里（所有消费点含指纹都走本函数，钳位即全链一致）。"""
         raw = self.settings.get("tts.speed", 1.0)
         try:
             v = float(raw)
@@ -588,7 +646,30 @@ class TtsEngine:
         if v <= 0:
             logger.warning("[TTS] tts.speed=%r 非正，按 1.0 合成", raw)
             return 1.0
+        if v > _SPEED_MAX:
+            logger.warning("[TTS] tts.speed=%r 超上限，按 %g 钳位合成", raw, _SPEED_MAX)
+            return _SPEED_MAX
         return v
+
+    _CLOUD_RATE_DEFAULT = 24000
+
+    def _cloud_rate(self, cloud: dict) -> int:
+        """tts.cloud.sample_rate 安全读（v1.0.65 深审 F10）：与 _cloud_timeout
+        同纪律——云档不能因一处配置写坏而失去保护。脏值（如 "44.1k"）旧版
+        `int()` ValueError 穿出 _cloud_stream，被误当云故障钉扎 300s、每 5 分钟
+        重炸且日志不点名配置项；现在消毒回 0（=未配置，不发 sample_rate、
+        解码按默认率）并 WARN 点名。"""
+        raw = (cloud or {}).get("sample_rate")
+        if raw is None or raw == "" or raw == 0:
+            return 0
+        try:
+            v = int(raw)
+        except (TypeError, ValueError):
+            logger.warning("[TTS] tts.cloud.sample_rate=%r 非整数，按未配置处理"
+                           "（解码回默认 %d Hz；请改配置或走「重载配置」）",
+                           raw, self._CLOUD_RATE_DEFAULT)
+            return 0
+        return v if v > 0 else 0
 
     def voice_fingerprint(self) -> str:
         """v1.0.48（P5，"多嗓音"第六路径收口）：HA core 的 TTS 缓存键=
@@ -616,18 +697,29 @@ class TtsEngine:
                 cloud = {}
             base = str(cloud.get("base_url") or "")
             host = urlparse(base).netloc or base
+            # v1.0.65（深审 F5）：sample_rate 是文档明示的产出改变项（硅基流动
+            # pcm 默认 44.1k，须显式指定才与预期一致）——既进请求体又是裸 PCM
+            # 解码率，改配置后产出变了而键不换 = 模板句永久旧速音频。同族补键。
+            sr = self._cloud_rate(cloud)
             return (f"cloud:{str(cloud.get('voice') or 'alloy')}"
                     f":{str(cloud.get('model') or 'tts-1')}"
                     f":{str(cloud.get('response_format') or 'pcm')}"
                     f":{host}"
-                    f":{speed_s}")
+                    f":{speed_s}"
+                    f":sr{sr or 0}")
         tag = "u"
         try:
             entry = self.store.lock_entry("tts_kokoro_multilang") if self.store else {}
             tag = str(entry.get("sha256") or "")[:8] or "u"
         except Exception:  # noqa: BLE001 假件 store/异常形制：指纹照出，回落 u
             pass
-        return (f"local:sid{self.resolve_sid()}+c{len(self._custom_sids)}"
+        # v1.0.65（深审 F6）：自定义区并入**内容摘要**（merge 已算好的官方包+
+        # 各音色 (name,size,mtime) 指纹串的短哈希）——旧版只取数量 c{len}，
+        # 同名重传改良版 bin（数量/sid/模型 lock sha 全不变）指纹不动 →
+        # HA 盘缓存（无 TTL）模板句永久 v1 嗓。c{len}+h{hash8}：数量与内容双钉。
+        cfp = getattr(self, "_custom_fp", "")
+        ch = hashlib.sha1(cfp.encode("utf-8")).hexdigest()[:8] if cfp else "0"
+        return (f"local:sid{self.resolve_sid()}+c{len(self._custom_sids)}h{ch}"
                 f"+{speed_s}+m{tag}")
 
     def reset_cloud_pin(self, reason: str = "") -> None:
@@ -647,15 +739,28 @@ class TtsEngine:
         return self._tts is not None
 
     def ensure_loaded(self) -> bool:
+        # v1.0.65（深审 F3）：store.ensure 的冷下载（kokoro 包 348MB、分钟级）
+        # 挪出引擎 `_lock`——旧版持锁跨下载，期间每个并发 _synth/试听/ensure 各
+        # 占 1 个 executor 线程堵在锁上（默认池 8 线程），云档不预载 = 首次试听
+        # 即"下载中全栈饿死 STT"。store 的 per-key single-flight（其 F2 纪律）
+        # 本就防重复下载，本锁只护对象换装。
+        if self._tts is not None:
+            return True
+        key = "tts_kokoro_multilang"
+        d = self.store.model_dir_for(key)
+        if not d:
+            try:
+                if self.store.ensure(key):
+                    d = self.store.model_dir_for(key)
+            except Exception as e:  # noqa: BLE001 下载异常按未就绪上报，不穿锁
+                logger.error("[TTS] kokoro 模型下载异常: %s", e)
+        if not d:
+            logger.error("[TTS] kokoro 模型未就绪")
+            return False
         with self._lock:
-            if self._tts is not None:
+            if self._tts is not None:      # double-check：下载期间他人已装载
                 return True
             t_load = time.perf_counter()          # v1.0.52：一次性加载耗时观测
-            key = "tts_kokoro_multilang"
-            d = self.store.model_dir_for(key) or (self.store.ensure(key) and self.store.model_dir_for(key))
-            if not d:
-                logger.error("[TTS] kokoro 模型未就绪")
-                return False
             try:
                 import sherpa_onnx as so
                 k = so.OfflineTtsKokoroModelConfig()
@@ -666,14 +771,16 @@ class TtsEngine:
                     main = d / "model.onnx"
                 k.model = str(main)
                 # 自定义音色注入（投递口 const.TTS_VOICES_DIR）
-                self._custom_sids, voices_path = {}, str(d / "voices.bin")
+                self._custom_sids, self._custom_fp, voices_path = \
+                    {}, "", str(d / "voices.bin")
                 try:
                     _off_n = self._voices_count(key)
-                    merged, names, skipped = merge_custom_voices(
+                    merged, names, skipped, cont_fp = merge_custom_voices(
                         d / "voices.bin", const.TTS_VOICES_DIR,
                         d / "voices_custom_merged.bin", _off_n)
                     if names:
                         voices_path, self._custom_sids = str(merged), names
+                        self._custom_fp = cont_fp
                         logger.info("[TTS] 自定义音色 %d 路已注入（sid≥%d）：%s",
                                     len(names), _off_n,
                                     "、".join(sorted(names)))
@@ -825,7 +932,7 @@ class TtsEngine:
                 # 定案②语义不丢。
                 continue
             key = (sent, sid, speed)
-            hit = self._cache.get(key)
+            hit = self._cache_get(key)
             if hit is not None:
                 self._cache.move_to_end(key)
                 self.cache_hits += 1
@@ -863,7 +970,7 @@ class TtsEngine:
                                 "(云钉扎)" if eng0 == "local:pinned"
                                 else ("(云回落)" if eng0 == "local:fallback" else ""))
                         key = (sent, sid, speed)      # 复核后本句键重算
-                        hit = self._cache.get(key)
+                        hit = self._cache_get(key)
                         if hit is not None:
                             self._cache.move_to_end(key)
                             self.cache_hits += 1
@@ -897,6 +1004,18 @@ class TtsEngine:
             shown = int((time.perf_counter() - t_turn) * 1000)
             logger.info("[TTS] 本地首帧 %dms", shown)
         return shown
+
+    def _cache_get(self, key: tuple):
+        """v1.0.65（深审 F14）：cache_enabled=False 语义=不吃缓存。旧版只停写
+        不停读，既有 ≤256 条内存缓存照常命中（且 unload 刻意保留、跨重启盘缓存
+        另算）——用户"关缓存求新鲜合成"只对新句生效，旧句仍旧嗓，语义不完整。
+        读路径与写路径 `_cache_put` 同闸（顺带 miss 时清掉存量，关一次即净）。"""
+        if not self.settings.get("tts.cache_enabled", True):
+            if self._cache:
+                self._cache.clear()
+                self._cache_bytes = 0
+            return None
+        return self._cache.get(key)
 
     def _cache_put(self, key: tuple, packets: list) -> None:
         if not self.settings.get("tts.cache_enabled", True):
@@ -1001,11 +1120,13 @@ class TtsEngine:
                 "response_format": str(cloud.get("response_format") or "pcm"),
                 "speed": self._speed()}
         # 平台预设透传：如硅基流动 pcm 默认 44.1kHz，须显式指定才与预期一致
-        if sr_req := cloud.get("sample_rate"):
-            body["sample_rate"] = int(sr_req)
+        # （v1.0.65 F10：经 _cloud_rate 消毒——脏值不再 int() 炸链误钉扎）
+        sr = self._cloud_rate(cloud)
+        if sr:
+            body["sample_rate"] = sr
         # v1.0.52：分段超时（原本 total=30 一把梭）。speed 仍走请求体，未动。
         timeout, first_byte_s = self._cloud_timeout(cloud)
-        default_rate = int(cloud.get("sample_rate") or 24000)
+        default_rate = sr or self._CLOUD_RATE_DEFAULT
         t0 = time.perf_counter()
         async with aiohttp.ClientSession(timeout=timeout) as sess:
             req = sess.post(f"{base}/audio/speech", json=body, headers=headers)
@@ -1018,7 +1139,13 @@ class TtsEngine:
                     "可调 tts.cloud.first_byte_timeout_s）") from e
             try:
                 if r.status != 200:
-                    raise RuntimeError(f"HTTP {r.status}: {(await r.text())[:160]}")
+                    # v1.0.65（F12）：错误体截断读（旧版 r.text() 整读后才 [:160]
+                    # ——base_url 误指大文件服务/慢速滴流端点时无上限进内存）。
+                    err_body = ""
+                    with contextlib.suppress(Exception):
+                        err_body = (await r.content.read(8192)).decode(
+                            errors="replace")
+                    raise RuntimeError(f"HTTP {r.status}: {err_body[:160]}")
                 content = getattr(r, "content", None)
                 if content is None or not hasattr(content, "iter_chunked"):
                     # 无流式 body 的响应对象（老式适配器/测试桩，非 aiohttp）：
@@ -1097,6 +1224,12 @@ class TtsEngine:
             return data, sr
         if why := _unsupported_format(raw):
             raise RuntimeError(why)
+        # v1.0.65（F13 同闸）：200+文本体不得当裸 PCM（判据与流式 _decide 一致）
+        printable = sum(1 for b in raw[:12] if 32 <= b < 127 or b in (9, 10, 13))
+        if raw[:1] in (b"{", b"[", b"<") and printable >= len(raw[:12]) * 0.85:
+            raise RuntimeError(
+                "云 TTS 返回 200 但正文是文本而非音频（疑似网关/代理错误页）："
+                f"{raw[:60].decode(errors='replace')!r}")
         return raw, default_rate
 
     @staticmethod

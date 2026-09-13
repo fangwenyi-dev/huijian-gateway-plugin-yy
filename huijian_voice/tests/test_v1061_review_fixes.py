@@ -280,7 +280,7 @@ def test_fingerprint_rotates_with_model_package():
     e2 = _eng(types.SimpleNamespace(lock_entry=lambda k: {"sha256": "b" * 64}))
     e3 = _eng(types.SimpleNamespace())               # 假件/无 lock_entry → u
     e4 = _eng(types.SimpleNamespace(lock_entry=lambda k: {}))
-    assert e1.voice_fingerprint() == "local:sid18+c0+s1+maaaaaaaa"
+    assert e1.voice_fingerprint() == "local:sid18+c0h0+s1+maaaaaaaa"
     assert e1.voice_fingerprint() != e2.voice_fingerprint()   # 换包必换键
     assert e3.voice_fingerprint().endswith("+mu")    # 取不到：行为确定回落
     assert e4.voice_fingerprint().endswith("+mu")
@@ -294,7 +294,7 @@ def test_fingerprint_ships_real_lock_identity():
                        status_file=Path("/tmp/hj_v1061_s.status"))
     sha = store.lock_entry("tts_kokoro_multilang").get("sha256")
     assert sha and len(sha) == 64
-    assert _eng(store).voice_fingerprint() == f"local:sid18+c0+s1+m{sha[:8]}"
+    assert _eng(store).voice_fingerprint() == f"local:sid18+c0h0+s1+m{sha[:8]}"
 
 
 # ── P3-b 查询族不再把 AQI 报成湿度 ─────────────────────────────

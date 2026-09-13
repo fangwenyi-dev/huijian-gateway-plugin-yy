@@ -211,6 +211,7 @@ async def async_convert_audio(
         write_input(), f"{DOMAIN}_stt_ffmpeg"
     )
     assert process.stdout
+    completed = False
     try:
         if to_extension == "opus":
             demuxer = AsyncOggOpusDemuxer(process.stdout)
@@ -222,14 +223,31 @@ async def async_convert_audio(
                 if not chunk:
                     break
                 yield chunk
+        completed = True
     finally:
-        await writer_task
-        retcode = await process.wait()
-        if retcode != 0:
+        # v1.0.65（TTS 深审 T2）：旧收口 `await writer_task; await process.wait()`
+        # 在消费端提前 aclose / 上游取消时两种坏法——writer_task 抛错直接跳过
+        # wait（ffmpeg 无人杀无人收：stdin 已关但 stdout 无人再读，残余输出灌满
+        # 64KB 管道后永久阻塞=孤儿进程+fd 泄漏到 HA 重启），或 writer 已跑完时
+        # process.wait() 本身在满管道上永挂（执行 aclose 的任务永久挂死）。
+        # 同仓 ffmpeg_proxy 已立「Terminate hangs, so kill is used」纪律，本函数
+        # 修一漏一。取消/提前退出路径静默清算；仅正常收束(completed)且 retcode
+        # 非 0 才归因报错——进程被 kill 的 -SIGKILL 不是转换失败。
+        if not writer_task.done():
+            writer_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await writer_task
+        if process.returncode is None:
+            process.kill()
+        with contextlib.suppress(Exception):
+            await process.wait()
+        retcode = process.returncode
+        if completed and retcode not in (0, None):
             assert process.stderr
             stderr_data = await process.stderr.read()
             _LOGGER.error(
-                "Convert audio failed (%s): %s", retcode, stderr_data.decode()
+                "Convert audio failed (%s): %s", retcode,
+                stderr_data.decode(errors="replace")
             )
             raise RuntimeError(
                 f"Unexpected error while running ffmpeg with arguments: {command}. See log for details."

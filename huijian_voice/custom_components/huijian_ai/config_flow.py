@@ -390,6 +390,11 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
                     "mac": self._device_mac,
                     "speak_id": self.setup_data.get("speak_id"),
                     "mcp_endpoint": mcp_endpoint,
+                    # OTA 台账（v1.0.65·契约 F-02）：CMD20 入驻 POST 带的
+                    # fw_version 建账时持久化——satellite_ledger 是运行期
+                    # 内存态，HA 重启后卫星台账靠此兜底显示「入驻时」版本。
+                    "fw_version": str(
+                        (self.setup_data or {}).get("fw_version") or "").strip(),
                 }
                 self.clean_setup()
                 return await self._async_authenticate_or_add()

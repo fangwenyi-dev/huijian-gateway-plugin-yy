@@ -157,6 +157,26 @@ class HuijianTtsEntity(BaseEntity):
                if fmt == "wav" else {}),
         )
 
+    @property
+    def available(self) -> bool:
+        """v1.0.65（TTS 深审 T7）：实体可用态跟随 transport——旧版恒可用，
+        旧加载项（无 tts 通道）/加载项停机时，面板看不出任何异常，每次播报
+        白等 ensure_connected 15s 再报错。退避未越限的连接窗口仍算可用
+        （冷启动首呼不误伤，ensure_connected 会唤醒退避）。"""
+        tr = self._transport_now()
+        if tr is None:
+            return False
+        if getattr(tr, "is_connected", False):
+            return True
+        return getattr(tr, "reconnect_times", 0) < 3
+
+    def _transport_now(self):
+        try:
+            return get_entry_data(self.hass, self.entry).get(
+                tts_transport.ATTR_TRANSPORT)
+        except Exception:  # noqa: BLE001 unload 窗口等
+            return None
+
     async def _async_pcm_stream(self, message: str):
         """连加载项 → 逐块产出 s16le@16k PCM（opus 解码后）。
 
@@ -172,6 +192,14 @@ class HuijianTtsEntity(BaseEntity):
         if not message or not message.strip():
             raise HomeAssistantError("huijian TTS 空播报文本，未发起合成")
         transport = tts_transport.get_entry_transport(self.hass, self.entry)
+        # T7 预闸：连续退避（≥3 次连接失败，典型=旧版加载项无 tts 通道、
+        # 加载项停机）时不再让每次播报白等 ensure_connected 15s——即时报错
+        # 并点名根因；后台退避重连照常，恢复后自动放行。
+        if (not getattr(transport, "is_connected", False)
+                and getattr(transport, "reconnect_times", 0) >= 3):
+            raise HomeAssistantError(
+                "huijian TTS 连接持续失败（加载中已退避重试）——检查语音加载项"
+                "是否运行及其版本是否 ≥ 集成版本；恢复前播报将快速失败而非等待")
         if not await transport.ensure_connected():
             _LOGGER.error("Failed to establish WebSocket connection for TTS")
             raise HomeAssistantError("huijian TTS WebSocket 未连接")
@@ -201,7 +229,13 @@ class HuijianTtsEntity(BaseEntity):
                 else:
                     if getattr(resp, "error", None):
                         raise RuntimeError(resp.error)
-                    _LOGGER.info("Received response: %s", resp)
+                    # v1.0.65（TTS 深审 T6）：当前 transport 契约下本行不可达
+                    # （只 yield bytes/Dict(error)）。留作契约漂移探针但不得带
+                    # 数据面：降 DEBUG 且只打键名——未来若放开透传，整帧 Dict
+                    # （可能含文本字段）不再全量进 INFO（v1.0.48 日志纪律）。
+                    _LOGGER.debug("Received non-bytes response: keys=%s",
+                                  list(resp.keys()) if hasattr(resp, "keys")
+                                  else type(resp).__name__)
         finally:
             with contextlib.suppress(BaseException):
                 await stream.aclose()

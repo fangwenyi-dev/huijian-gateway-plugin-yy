@@ -375,9 +375,23 @@ class WsTransport:
             self.logger.info("Websocket writer stopped")
             try:
                 if self._current_ws and not self._current_ws.closed:
-                    await self._current_ws.close()
-            except Exception as err:
-                self.logger.error("Error closing WebSocket: %s", err)
+                    # v1.0.65（TTS 深审 T3）：H8 同款带闸收口补第三处漏网——半开
+                    # TCP 上裸 close 无限挂会让任务组永拆不干净（_loop_task 恒
+                    # not done → 后续 ensure_connected 全走 15s 失败支 = v1.0.40
+                    # 僵尸签名）。close 超时即 abort，拆链路径不留无限 await。
+                    await asyncio.wait_for(self._current_ws.close(), 5)
+            except Exception as err:  # noqa: BLE001（含 TimeoutError）
+                if isinstance(err, asyncio.TimeoutError):
+                    self.logger.warning(
+                        "writer close timeout, abort: %s",
+                        self._redact_endpoint(self.endpoint))
+                    try:
+                        t = self._current_ws and self._current_ws.transport
+                        t and t.abort()
+                    except Exception:  # noqa: BLE001
+                        pass
+                else:
+                    self.logger.error("Error closing WebSocket: %s", err)
 
     # v1.0.45（reader 僵尸断根）：buffer-0 内存流的 send 在**没有消费者**时会
     # 无限阻塞。TTS 消费端中途被取消（管线打断/超时/页面切换）后，加载项仍在
@@ -429,7 +443,13 @@ class WsTransport:
                 json_data = Dict(msg.json())
             self.logger.debug("Process incoming msg: %s", json_data)
         except Exception as err:
-            self.logger.error("Invalid incoming msg: %s", msg)
+            # v1.0.65（TTS 深审 T5）：本基类为 tts/stt/llm/mcp 四通道共享——
+            # STT 通道的损坏/截断 JSON 帧可含用户转写文本，旧版全量原始帧进
+            # ERROR（必落盘）且无长度上限，违 v1.0.48 日志纪律（INFO 截断、
+            # 全文降 DEBUG）。留 120 字符定位形制，全文降 DEBUG 供排障。
+            self.logger.error("Invalid incoming msg: %r (%s)",
+                              str(msg.data)[:120], err)
+            self.logger.debug("Invalid incoming msg 全文: %s", msg)
             return True   # 解析失败与交付无关，链接保持
         if json_data.get("type") == "settings":
             self._on_server_settings(json_data)
@@ -456,7 +476,9 @@ class WsTransport:
                 await asyncio.sleep(55)
                 self.logger.debug("heartbeat ping for %s",
                                   self._redact_endpoint(self.endpoint))
-                await self._current_ws.ping()
+                # v1.0.65（T3 顺带）：ping 也在半开 TCP 上裸 await 的点位——
+                # 挂住=heartbeat 任务僵死、ws.closed 永不翻转，短路不了任何东西。
+                await asyncio.wait_for(self._current_ws.ping(), 10)
         except Exception as err:
             self.ws_log("heartbeat ping failed: %s", err)
 

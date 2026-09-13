@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -19,6 +20,9 @@ try:
     CTX_KEY: web.AppKey = web.AppKey("admin_ctx", object)
 except AttributeError:
     CTX_KEY = "admin_ctx"
+
+# v1.0.65（深审 F3）：试听端到端上限（模块常量便于测试与现场调参）
+_TTS_TEST_TIMEOUT_S = 30.0
 
 
 def make_admin_app(ctx) -> web.Application:
@@ -230,7 +234,18 @@ async def _tts_test(request):
     ctx = request.app[CTX_KEY]
     body = await _json_body(request)
     text = str(body.get("text", "好的，客厅的灯打开了")).strip()[:200]
-    pcm = await ctx.tts.synthesize_pcm(text)
+    # v1.0.65（TTS 深审 F3）：试听必须有超时。旧版无闸且云档不预载模型——
+    # 首次点试听=请求路径内 348MB 冷下载（ensure_loaded 持锁跨下载），浏览器
+    # ~60s 先 504 而 handler 仍挂；反复点击+卫星播报各占 1 个 executor 线程堵
+    # 在锁上，默认池 8 线程堆满 → 连带 asr 同池排队 = STT 停摆。30s 上限：
+    # 就绪态试听 <10s，超时回 503「模型下载/合成中」（本机操作，重试无成本）。
+    try:
+        pcm = await asyncio.wait_for(ctx.tts.synthesize_pcm(text),
+                                     timeout=_TTS_TEST_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        return web.json_response(
+            {"message": "试听超时（30s）：模型可能正在首次下载（云档不预载）或"
+                        "合成积压，请稍候重试；下载进度见加载项日志"}, status=503)
     if not pcm:
         return web.json_response({"message": "TTS 不可用（模型未就绪或合成失败）"}, status=503)
     from . import audio

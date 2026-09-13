@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
@@ -52,6 +53,13 @@ def setup(app, ctx):
             return web.json_response(
                 {"ok": False, "message": "音色主名非法（中文/字母/数字/_-.，1~40 字符，不以点开头）"},
                 status=400)
+        # v1.0.65（深审 F8）：合并产物保留名不得作音色主名——旧版通过校验回
+        # ok:true「点重新加载后生效」，但合并/预览两处都按前缀跳过该文件
+        # （防自吞），永远假成功误导用户。
+        if name.lower().startswith("voices_custom_merged"):
+            return web.json_response(
+                {"ok": False, "message": "voices_custom_merged 是合并产物保留前缀，"
+                                         "请换音色主名"}, status=400)
         st = _voices_status(ctx)
         per = int(st.get("per_voice_bytes") or 0)
         if not per:
@@ -65,12 +73,31 @@ def setup(app, ctx):
                  "message": f"文件 {len(body)}B ≠ 单音尺寸 {per}B"
                             f"（float32×{per // 4} 风格向量，须与当前 TTS 模型包同布局导出）"},
                 status=400)
+        # v1.0.65（深审 F7 上传侧）：大小写异体同名 = 合并期 stem.lower() 去重
+        # 碰撞（names 少一项、merged 多拼一路 → num_speakers 对不上、自定义区
+        # 整体被误判禁用的前科形态）。旁路投递已由 merge 端跳过+留痕兜底，
+        # 上传口直接 409 说清。
+        try:
+            for p in const.TTS_VOICES_DIR.glob("*.bin"):
+                if p.stem.lower() == name.lower() and p.stem != name:
+                    return web.json_response(
+                        {"ok": False, "message": f"已存在同名异体 {p.name}"
+                                                 "（大小写折叠冲突），请先删除或改名"},
+                        status=409)
+        except OSError:
+            pass
         try:
             const.TTS_VOICES_DIR.mkdir(parents=True, exist_ok=True)
             out = const.TTS_VOICES_DIR / f"{name}.bin"
             tmp = const.TTS_VOICES_DIR / f".{name}.bin.tmp"
-            tmp.write_bytes(body)
-            os.replace(tmp, out)
+            try:
+                tmp.write_bytes(body)
+                os.replace(tmp, out)
+            except OSError:
+                # v1.0.65（F9 同款）：失败清 .tmp（ENOSPC 时残体加剧紧张）
+                with contextlib.suppress(OSError):
+                    tmp.unlink()
+                raise
         except OSError as e:
             return web.json_response({"ok": False, "message": f"落盘失败：{e}"}, status=500)
         logger.info("[音色] 上传 %s.bin（%dB），点「重新加载模型」后生效", name, len(body))

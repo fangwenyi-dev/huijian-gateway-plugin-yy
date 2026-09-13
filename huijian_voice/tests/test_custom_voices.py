@@ -58,25 +58,25 @@ def test_merge_appends_valid_and_skips_bad(tmp_path):
     (cdir / "老婆A.bin").write_bytes(bytes(64))
     (cdir / "坏货.bin").write_bytes(bytes(10))
     (cdir / ".隐藏.bin").write_bytes(bytes(64))
-    out, names, skipped = merge_custom_voices(official, cdir, eng_dir / "merged.bin", 3)
+    out, names, skipped, fp0 = merge_custom_voices(official, cdir, eng_dir / "merged.bin", 3)
     assert out == eng_dir / "merged.bin"
     assert names == {"老婆a": 3}                      # 主名小写、sid 从官方数起
     assert any("坏货" in s for s in skipped)
     assert (eng_dir / "merged.bin").stat().st_size == 4 * 64
     # 指纹复用：再调不重写盘
     mt0 = (eng_dir / "merged.bin").stat().st_mtime_ns
-    out2, names2, _ = merge_custom_voices(official, cdir, eng_dir / "merged.bin", 3)
+    out2, names2, _, fp1 = merge_custom_voices(official, cdir, eng_dir / "merged.bin", 3)
     assert (eng_dir / "merged.bin").stat().st_mtime_ns == mt0
     # 投递变更 → 重建
     (cdir / "z老b.bin").write_bytes(bytes(64))
-    _, names3, _ = merge_custom_voices(official, cdir, eng_dir / "merged.bin", 3)
+    _, names3, _, _ = merge_custom_voices(official, cdir, eng_dir / "merged.bin", 3)
     assert names3 == {"z老b": 3, "老婆a": 4}      # 名字典序（ASCII 先于汉字）
 
 
 def test_merge_no_custom_passthrough(tmp_path):
     official = tmp_path / "voices.bin"
     official.write_bytes(bytes(192))
-    out, names, skipped = merge_custom_voices(official, tmp_path / "none",
+    out, names, skipped, _ = merge_custom_voices(official, tmp_path / "none",
                                               tmp_path / "merged.bin", 3)
     assert out == official and names == {} and skipped == []
 
@@ -87,7 +87,7 @@ def test_merge_unknown_count_disabled(tmp_path):
     cdir = tmp_path / "cv"
     cdir.mkdir()
     (cdir / "x.bin").write_bytes(bytes(64))
-    out, names, _ = merge_custom_voices(official, cdir, tmp_path / "merged.bin", 0)
+    out, names, _, _ = merge_custom_voices(official, cdir, tmp_path / "merged.bin", 0)
     assert out == official and names == {}             # voices_count 缺失=机制关闭
 
 
@@ -185,7 +185,7 @@ def test_merge_artifact_never_self_devours(tmp_path, monkeypatch):
     monkeypatch.setattr(const, "TTS_VOICES_DIR", cdir)
     official = tmp_path / "voices.bin"
     official.write_bytes(bytes(192))                  # 3×64
-    merged, names, skipped = merge_custom_voices(official, cdir, tmp_path / "out.bin", 3)
+    merged, names, skipped, _ = merge_custom_voices(official, cdir, tmp_path / "out.bin", 3)
     assert names == {"真": 3} and skipped == []       # 产物文件连 skip 噪音都不该有
     st = _engine(tmp_path).voices_status()
     assert [p["name"] for p in st["preview"]] == ["真"]

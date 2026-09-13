@@ -34,27 +34,27 @@ def _engine(data):
 
 def test_fingerprint_local_follows_sid():
     assert _engine({"tts.provider": "local_kokoro", "tts.sid": 18}).voice_fingerprint() \
-        == "local:sid18+c0+s1+mu"
+        == "local:sid18+c0h0+s1+mu"
     assert _engine({"tts.provider": "local_kokoro", "tts.sid": 45}).voice_fingerprint() \
-        == "local:sid45+c0+s1+mu"
+        == "local:sid45+c0h0+s1+mu"
 
 
 def test_fingerprint_cloud_follows_voice_with_alloy_default():
     # 云档 voice 留空 = 实际发 alloy（tts.py P1 路径）→ 指纹必须同名，
     # 保证"配置漂移但产出未变"不触发无谓键轮换，反之必触发。
     assert _engine({"tts.provider": "cloud_openai_compat", "tts.cloud": {}}).voice_fingerprint() \
-        == "cloud:alloy:tts-1:pcm::s1"
+        == "cloud:alloy:tts-1:pcm::s1:sr0"
     assert _engine({"tts.provider": "cloud_openai_compat",
                     "tts.cloud": {"voice": "china_female"}}).voice_fingerprint() \
-        == "cloud:china_female:tts-1:pcm::s1"
+        == "cloud:china_female:tts-1:pcm::s1:sr0"
 
 
 def test_fingerprint_custom_injection_count_and_fallback_sid():
     eng = _engine({"tts.provider": "local_kokoro", "tts.sid": "不存在的名"})
     base = eng.voice_fingerprint()          # 非法名回落 18
-    assert base == "local:sid18+c0+s1+mu"
+    assert base == "local:sid18+c0h0+s1+mu"
     eng._custom_sids = {"mei": 103}
-    assert eng.voice_fingerprint() == "local:sid18+c1+s1+mu"   # 注入表变化也换键
+    assert eng.voice_fingerprint() == "local:sid18+c1h0+s1+mu"   # 注入表变化也换键
 
 
 def test_fingerprint_speed_rotates_local_and_cloud():
@@ -65,7 +65,7 @@ def test_fingerprint_speed_rotates_local_and_cloud():
     a = _engine({"tts.provider": "local_kokoro", "tts.sid": 18, "tts.speed": 1.0})
     b = _engine({"tts.provider": "local_kokoro", "tts.sid": 18, "tts.speed": 1.25})
     assert a.voice_fingerprint() != b.voice_fingerprint()
-    assert b.voice_fingerprint() == "local:sid18+c0+s1.25+mu"
+    assert b.voice_fingerprint() == "local:sid18+c0h0+s1.25+mu"
     ca = _engine({"tts.provider": "cloud_openai_compat", "tts.cloud": {"voice": "v"},
                   "tts.speed": 1.0})
     cb = _engine({"tts.provider": "cloud_openai_compat", "tts.cloud": {"voice": "v"},
@@ -95,11 +95,11 @@ def test_speed_sane_read_never_crashes_chain():
     坏值=每轮炸穿并误报截断。"""
     eng = _engine({"tts.provider": "local_kokoro", "tts.sid": 18, "tts.speed": "abc"})
     assert eng._speed() == 1.0
-    assert eng.voice_fingerprint() == "local:sid18+c0+s1+mu"
+    assert eng.voice_fingerprint() == "local:sid18+c0h0+s1+mu"
     eng2 = _engine({"tts.provider": "cloud_openai_compat", "tts.cloud": {},
                     "tts.speed": 0})
     assert eng2._speed() == 1.0
-    assert eng2.voice_fingerprint() == "cloud:alloy:tts-1:pcm::s1"
+    assert eng2.voice_fingerprint() == "cloud:alloy:tts-1:pcm::s1:sr0"
     eng3 = _engine({"tts.provider": "local_kokoro", "tts.sid": 18, "tts.speed": "1.2"})
     assert eng3._speed() == 1.2
 

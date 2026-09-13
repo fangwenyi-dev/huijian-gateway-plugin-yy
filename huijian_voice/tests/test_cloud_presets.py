@@ -239,5 +239,5 @@ def test_tts_module_shape():
     src = (CORE / "tts.py").read_text(encoding="utf-8")
     assert "def _unwrap_audio" in src
     assert 'cloud.get("response_format")' in src
-    assert 'body["sample_rate"] = int(sr_req)' in src
+    assert 'body["sample_rate"] = sr' in src
 

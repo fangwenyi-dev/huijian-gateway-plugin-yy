@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -989,14 +990,22 @@ class EsphomeAssistSatellite(
                 return
 
             audio_duration_sent = 0.0
+            # v1.0.65（TTS 深审 T4）：async 生成器提出来命名 + finally 确定性
+            # aclose。旧版 barge-in 取消若落在背压 sleep（生成器帧外），
+            # `except CancelledError: return` 直接把挂起的 _iter_wav_pcm_chunks
+            # 丢给 GC——其持有的 core async_stream_result 与 ResultStream 已
+            # 缓冲音频（5min 句 ≈10MB）滞留不定才释放，违反 tts_transport 自家
+            # 纪律「消费端 finally aclose，不赌 GC 时机」。已耗尽时 aclose 为
+            # no-op，路径无害。
+            chunk_iter = _iter_wav_pcm_chunks(
+                tts_result.async_stream_result(),
+                sample_rate=sample_rate,
+                sample_width=sample_width,
+                sample_channels=sample_channels,
+                samples_per_chunk=samples_per_chunk,
+            )
             try:
-                async for chunk, is_last in _iter_wav_pcm_chunks(
-                    tts_result.async_stream_result(),
-                    sample_rate=sample_rate,
-                    sample_width=sample_width,
-                    sample_channels=sample_channels,
-                    samples_per_chunk=samples_per_chunk,
-                ):
+                async for chunk, is_last in chunk_iter:
                     if not self._is_running:
                         break
 
@@ -1045,6 +1054,9 @@ class EsphomeAssistSatellite(
                 # CancelledError 继承 BaseException，不受本分支影响。
                 _LOGGER.error("[TTS] 下行流异常：%s", err)
                 return
+            finally:
+                with contextlib.suppress(Exception):
+                    await chunk_iter.aclose()
 
             if frames_sent <= 0:
                 # v1.0.25 fail-loud 的流式等价物：0 帧会让设备「起流即收流」——

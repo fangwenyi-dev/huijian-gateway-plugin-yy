@@ -36,7 +36,10 @@ DEFAULTS: dict[str, Any] = {
         "cloud": {"provider": "", "base_url": "", "api_key": "", "model": ""},
     },
     "tts": {
-        "provider": "local_kokoro",           # local_kokoro | cloud_openai_compat
+        "provider": "local_kokoro",           # local_kokoro | cloud
+        # v1.0.65（深审 F11 定案）："cloud" 为正统拼法（Web UI 唯一写入值）；
+        # "cloud_openai_compat" 为历史别名（存量 settings.json 与测试仍用，
+        # 引擎读侧 startswith("cloud") 双吃，UI 显示已放宽——不再静默翻转）。
         "sid": 18,                             # v1.1 定案默认：zf_026（女，声纹最似晓晓；用户知情拍板 2026-09-13）。103 音色 web 全可选
         "speed": 1.0,                          # 0.8–1.2
         "cache_enabled": True,                 # 体验批 P0-4：句级 opus LRU 缓存（本地档）
