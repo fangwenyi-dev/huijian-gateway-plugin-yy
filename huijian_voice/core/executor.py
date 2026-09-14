@@ -154,6 +154,14 @@ class Executor:
         self.last_run = {"steps": len(steps), "applied": 0, "indeterminate": False}
         results = []
         for idx, (name, args) in enumerate(steps):
+            gate = self._turn_gate(name, args, plan.utterance or "")
+            if gate is not None:
+                # v1.0.69 根因②：宁可当场如实失败，绝不 area 扇出+谎报成功
+                self.last_run = {"steps": len(steps), "applied": len(results),
+                                 "indeterminate": False}
+                logger.info("[执行] %s %s → 开关族能力闸拦下（防area扇出/假成功）",
+                            name, args)
+                return False, "抱歉，" + gate
             direct = self._klar_direct(name, args) if plan.source == "klar" else None
             if direct is not None:
                 domain, service, data = direct
@@ -298,6 +306,50 @@ class Executor:
             return svc[0], svc[1], data
         except Exception:
             logger.exception("[执行] klar 直调映射异常 → 回落 intent 通道")
+            return None
+
+    # ── v1.0.69 根因②：开关族能力闸（2026-09-14 现场 11:27:12 十二条
+    # "Service call failed / does not support entity" 错误风暴 + 谎报
+    # 「展厅推拉开了」的根治）。窗户句漏进通用开关意图的两种灾难形态：
+    #   ① args 无 entity_id → /api/intent/handle HassTurnOn{area} 由 core
+    #     把全区域 exposed 实体展开逐个 turn_on——开窗器的 sensor(电压/状态)/
+    #     number(力度/速度)/button、media_player、remote 全被硬喂（错误风暴），
+    #     窗一律没动，播报却按 success 谎称「开了」；
+    #   ② grounded 给到设备内部混合实体（button/sensor/number）→ 直调
+    #     homeassistant.turn_on 同样逐实体 ServiceNotSupported。
+    # 窗户执行器真实驱动是集成 ControlWindow 的 button.press，喂 turn_on 恒
+    # 假动作。本闸只做保守拦截、不改道猜测（触发句形态不坐实的用户定案）：
+    # 命中即如实失败并给出正确句式引导——宁如实失败，绝不谎报。永不抛。
+    _TURN_FAMILY = frozenset({"HassTurnOn", "HassTurnOff", "HassToggle"})
+    # 非"可开关设备"域（HA core 语义：这些域的实体没有 turn_on 动作）
+    _UNTOGGLEABLE_DOMAINS = frozenset({
+        "sensor", "binary_sensor", "number", "select", "text", "button",
+        "image", "datetime", "date", "time", "update", "event",
+    })
+    # 窗族设备词：先剔除 窗帘/纱窗（合法 cover，开关路正常）再查
+    _WINDOW_HINT_WORDS = ("窗", "开合器", "内倒", "推拉", "平开")
+
+    def _turn_gate(self, name: str, args: dict, utterance: str):
+        """None=放行；str=必须如实失败的播报正文（不含「抱歉」字头）。"""
+        try:
+            if name not in self._TURN_FAMILY:
+                return None
+            raw = (args or {}).get("entity_id")
+            eids = ([raw] if isinstance(raw, str) else
+                    [e for e in (raw or []) if isinstance(e, str)])
+            eids = [e for e in eids if "." in e]
+            if eids:
+                if any(e.split(".", 1)[0] in self._UNTOGGLEABLE_DOMAINS
+                       for e in eids):
+                    return ("这个设备不支持直接开关；是窗户的话，"
+                            "请说打开或关闭完整的窗型名称")
+                return None
+            t = (utterance or "").replace("窗帘", "").replace("纱窗", "")
+            if any(w in t for w in self._WINDOW_HINT_WORDS):
+                return ("没有把握找到要开关的设备，不敢把整屋设备冒按；"
+                        "是窗户的话请带上完整窗型名称")
+            return None
+        except Exception:
             return None
 
     # ── 话术生成 ────────────────────────────────────────────────

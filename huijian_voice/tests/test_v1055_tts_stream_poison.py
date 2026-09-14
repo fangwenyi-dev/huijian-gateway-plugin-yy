@@ -31,6 +31,16 @@ import wave
 from collections.abc import AsyncGenerator, AsyncIterable
 from pathlib import Path
 
+import pytest
+
+# 采集期抓真 anyio：运行期 sys.modules["anyio"] 可能被同目录测试换桩
+# （test_integration_link_stability），懒 import 会拿到假 lambda 垫片。
+# CI 依赖面无 anyio（HA 运行期依赖）→ None，相关钉显式 skip。
+try:
+    import anyio as _ANYIO_REAL
+except ImportError:
+    _ANYIO_REAL = None
+
 ROOT = Path(__file__).resolve().parents[1]
 CC = ROOT / "custom_components" / "huijian_ai"
 
@@ -253,20 +263,34 @@ def test_entity_streaming_entry_uses_streaming_convert():
 
 # ── ② 集成 transport：截断 stop 转 error（真实 stream 方法执行）────────
 def _transport_stream():
-    import contextlib
+    # v1.0.69（根因①重构后）：stream() 已改用真实 anyio 原语
+    # （move_on_after/EndOfStream/ClosedResourceError）+ time.monotonic——旧
+    # SimpleNamespace(nullcontext) 垫片与 stream 真实依赖脱节，改挂真 anyio：
+    # 钉的是真任务仿射语义，不是垫片假象。_ANYIO_REAL 系采集期抓的真模块对象
+    # （test_integration_link_stability 运行期会把 sys.modules["anyio"] 换桩，
+    # 届时任何懒 import 拿到的都是假的——沿用 v1.0.64 batch456 同款防线）；
+    # CI 依赖面无 anyio（HA 运行期依赖）→ 跳过而非假绿。
+    import time
+    if _ANYIO_REAL is None:
+        pytest.skip("本钉需真 anyio（v1.0.69 起 transport.stream 挂真原语）")
     ns = {
         "asyncio": asyncio,
+        "time": time,
+        "anyio": _ANYIO_REAL,
         "Dict": _extract(CC / "huijian" / "__init__.py", "Dict", {"json": json}),
-        "anyio": types.SimpleNamespace(
-            fail_after=lambda s: contextlib.nullcontext(),
-            get_cancelled_exc_class=lambda: asyncio.CancelledError),
     }
     return _extract(CC / "huijian" / "tts_transport.py", "stream", ns), ns["Dict"]
 
 
 class _Reader:
     def __init__(self, items):
-        self._items = items
+        self._items = list(items)
+
+    async def receive(self):
+        # v1.0.69：stream 逐条 receive（独立短 scope），排空=EndOfStream
+        if not self._items:
+            raise _ANYIO_REAL.EndOfStream
+        return self._items.pop(0)
 
     def __aiter__(self):
         async def gen():

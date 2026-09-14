@@ -106,6 +106,20 @@ class TtsTransport(WsTransport):
           `restart_connection` 断连清算残留，下一轮在全新连接上开始。
         消费端务必用 finally 里的 `aclose()` 确定性关闭本生成器
         （tts.py 已接），不要赌 GC 时机。
+
+        v1.0.69（根因①，2026-09-14 现场「exit cancel scope in a different
+        task」三处炸点=播报整句静音的根治）：本生成器的任一 anyio cancel
+        scope **绝不横跨 yield**。旧实现 `with anyio.fail_after(timeout)` 把
+        `yield data` 包在 scope 内——scope 的任务仿射绑定在「驱动到首块」的
+        任务上（tts.py:287 peek 在 provider 调用任务 A 进入），而 HA 的
+        TTSCache 用 `async_create_background_task(_load_data_into_cache)`
+        （任务 B）续跑并在 B 收口 → `__exit__` 与 `__enter__` 异任务 →
+        anyio 抛 RuntimeError → 被下方 except 吞成「读取失败」→ 整句音频
+        作废（最小跨任务复现钉在 tests，本机 py313+anyio 实证报错原文与
+        现场一字不差）。现改为单调 deadline + 逐条 receive 独立短 scope：
+        enter/exit 恒在同一次 `__anext__` 步内（中间无 yield），yield 点
+        零存活 scope，任务切换安全；总超时语义不变（deadline 自 detect
+        起算一次）。
         """
         async with self._request_lock:
             if not await self.ensure_connected():
@@ -130,44 +144,56 @@ class TtsTransport(WsTransport):
                 except Exception as err:
                     yield Dict(error=f"Send detect failed: {err}")
                     return
-                with anyio.fail_after(timeout):
-                    async for data in self._recv_reader:
-                        if isinstance(data, bytes):
-                            yield data
-                        elif data.state == "stop":
-                            clean = True
-                            if getattr(data, "truncated", None):
-                                # v1.0.55（深审定案②）：加载项声明"半截音频"
-                                # （整流超预算/合成停滞/云端半途断流收束）。
-                                # 必须以 error 收口让实体 raise——HA core 只在
-                                # 异常时 pop 缓存；若按普通 stop 收口，截断音频
-                                # 会被当完整结果写进消息哈希缓存（内存+落盘、
-                                # 跨重启重扫），同一句永久缺尾字且不自愈
-                                # （2026-09-21 定案）。clean=False 顺带断连清算，
-                                # 下一轮在全新连接上开始。
-                                clean = False
-                                self.logger.warning(
-                                    "TTS 被服务端截断（半截音频按错误收口，防缓存毒化）: %r",
-                                    text[:40],
-                                )
-                                yield Dict(error="huijian TTS 音频被服务端截断")
-                            break
-                        else:
-                            self.logger.info("Received unknown message: %s", data)
-                    else:
-                        # v1.0.65（TTS 深审 T1）：for 无 break 自然耗尽 = reader
-                        # 收到 EndOfStream（连接被静默关闭）。触发口：条目
-                        # unload/reload 先 stop() 依序 aclose 四条 stream，正在
-                        # 消费的一轮拿到 EOF。此处若不 error 收口，实体链把截断
-                        # 音频按「正常收束」交给 HA core 缓存任务（属 core，不随
-                        # 条目卸载取消）→ 截断写进消息哈希盘缓存（无 TTL），同一
-                        # 句永久缺尾不自愈——与 v1.0.55 truncated-stop 同毒、不同
-                        # 入口；不变量「非 stop 收口必须异常收口」自此全支路成立。
+                deadline = time.monotonic() + timeout
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        # 总预算耗尽（语义等价旧 fail_after 整轮超时）
+                        yield Dict(error="Response timeout")
+                        return
+                    eof = False
+                    data = None
+                    # 短 scope 内只有 receive、没有 yield：enter/exit 恒同任务
+                    with anyio.move_on_after(remaining) as _scope:
+                        try:
+                            data = await self._recv_reader.receive()
+                        except (anyio.EndOfStream, anyio.ClosedResourceError):
+                            eof = True
+                    if _scope.cancelled_caught:
+                        yield Dict(error="Response timeout")
+                        return
+                    if eof:
+                        # v1.0.65（TTS 深审 T1）：EOF=连接被静默关闭（旧版
+                        # for-else 支）。不 error 收口，截断音频会被 core 缓存
+                        # 任务当「正常收束」写进无 TTL 盘缓存，同句永久缺尾
+                        # ——与 v1.0.55 truncated-stop 同毒、不同入口；不变量
+                        # 「非 stop 收口必须异常收口」自此全支路成立。
                         self.logger.warning(
                             "TTS 流未收到 stop 即断流（按错误收口，防缓存毒化）: %r",
                             text[:40],
                         )
                         yield Dict(error="huijian TTS 流提前断开（未收到 stop）")
+                        return
+                    if isinstance(data, bytes):
+                        yield data  # scope 外 yield：不携带任何存活 cancel scope
+                        continue
+                    if getattr(data, "state", None) == "stop":
+                        clean = True
+                        if getattr(data, "truncated", None):
+                            # v1.0.55（深审定案②）：加载项声明"半截音频"
+                            # （整流超预算/合成停滞/云端半途断流收束）。必须以
+                            # error 收口让实体 raise——HA core 只在异常时 pop
+                            # 缓存；按普通 stop 收口=截断音频进消息哈希缓存
+                            # （内存+落盘、跨重启），同句永久缺尾且不自愈。
+                            # clean=False 顺带断连清算，下一轮全新连接开始。
+                            clean = False
+                            self.logger.warning(
+                                "TTS 被服务端截断（半截音频按错误收口，防缓存毒化）: %r",
+                                text[:40],
+                            )
+                            yield Dict(error="huijian TTS 音频被服务端截断")
+                        return
+                    self.logger.info("Received unknown message: %s", data)
             except TimeoutError:
                 yield Dict(error="Response timeout")
             except anyio.get_cancelled_exc_class():

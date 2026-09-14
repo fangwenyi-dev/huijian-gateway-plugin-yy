@@ -1,5 +1,35 @@
 # 变更日志
 
+## [1.0.69] - 2026-09-28 TTS 跨任务收口静音根治 + 开关族能力闸（09-14 现场日志双病灶直改）
+
+现场（2026-09-14 日志）两处独立根因，一台架复现钉死：**①播报整句没声音**
+（三处「huijian TTS 读取失败: Attempted to exit cancel scope in a different
+task」）；**②窗户没动却谎报「展厅推拉开了」+ 12 条 turn_on 错误风暴**。
+
+**① 集成 TTS 链路（huijian/tts_transport.py）**
+
+- stream() 不再让任何 anyio cancel scope 横跨 yield：旧实现 fail_after 整轮
+  包住 `yield data`，而 HA 天然跨任务驱动本生成器（预取首块在 provider 调用
+  任务，续跑/收口在 core `tts_load_data_into_cache` 后台任务），scope 任务
+  仿射必违例 → 每轮收口抛 RuntimeError 被吞成「读取失败」→ 播报与卫星下行
+  双双作废。现改单调 deadline + 逐条 receive 独立短 move_on_after（进入/退出
+  恒在同一次 `__anext__` 内），yield 点零存活 scope；总超时预算、超时/EOF/
+  截断/「非 stop 收口必断连清算」全支路语义原样保留。
+- 新钉桩 6 项（含「旧形态跨任务必炸」前提守卫——anyio 行为若漂移该钉先红）；
+  v1.0.55 毒缓存两钉的夹具垫片同步升级为真 anyio（采集期抓真模块，防同目录
+  桩注入假绿）。
+
+**② 加载项执行器（core/executor.py 开关族能力闸）**
+
+- HassTurnOn/Off/Toggle 派发前过闸：grounded 实体含非可开关域（开窗器的
+  sensor/number/button 等）→ 当场如实失败；无实体且原话带窗族词（窗帘/纱窗
+  除外）→ 拒发裸区域意图——旧行为是 core 把全区域 exposed 实体展开逐个
+  turn_on（错误风暴）且照样播「开了」。宁如实失败、不谎报，窗族引导语给出
+  正确句式。两通道（services 直调/intent/handle）同拦；不改道、不猜句形态。
+- 实证分层：完整窗型句（「展厅推拉窗打开/打开展厅推拉窗/把字句」）fast_path
+  已正确改道 ControlWindow（v1.0.68），本闸接住残漏形态（如「拉开展厅推拉
+  窗」动词形）。新钉桩 10 项。全量回归 1323 全绿（基线 1307+16）。
+
 ## [1.0.68] - 2026-09-27 窗户指令谎报修复（现场日志直改）+ TTS 深审第二轮 11 项收口
 
 现场（2026-09-14 日志）：「打开办公室平盖窗」（平开窗被 ASR 听错）窗户没动、
