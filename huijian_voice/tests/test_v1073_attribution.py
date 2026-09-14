@@ -14,8 +14,6 @@ import sys
 import time
 from pathlib import Path
 
-import pytest
-
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -146,9 +144,21 @@ def _stt_send_timeout():
 
 
 def test_recognize_cancelled_attribution():
-    # CI 无 anyio（v1.0.69 scope 钉同规）：recognize 的 fail_after 需真 anyio，
-    # 函数级 importorskip——源级钉不陪跳（CI 上照跑）。
-    anyio = pytest.importorskip("anyio", reason="recognize 需真 anyio（取消语义）")
+    # 自带 fail_after 桩（null context）：本钉验的是"取消穿透+归因+断连清算"，
+    # 不碰 scope 语义——不借全局 anyio，避免两类环境耦合：①CI 镜像无 anyio
+    # （v1.0.69 同规跳过）；②套件内他文件运行期换桩 anyio（v1.0.55 钉的
+    # 「假 anyio 吞取消」曾致跨文件假绿/假红——反向同理，这里确定性免疫）。
+    class _NullScope:
+        def __init__(self, *_a):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            return False  # 绝不吃异常：取消必须原样穿透
+
+    class _AnyioStub:
+        fail_after = _NullScope
+    anyio = _AnyioStub()
     lg = _Log()
     ns = {"asyncio": asyncio, "anyio": anyio, "time": time,
           "_SEND_TIMEOUT_S": _stt_send_timeout(), "_LOGGER": lg}
