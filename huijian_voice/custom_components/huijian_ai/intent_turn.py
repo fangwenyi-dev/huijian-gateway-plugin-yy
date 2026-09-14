@@ -574,11 +574,10 @@ class TurnDeviceIntentBase(intent.IntentHandler):
             intent_obj.hass, window_name, area_name, original_name=device_name
         )
 
-        if action not in button_map and area_name:
-            button_map = find_window_buttons(
-                intent_obj.hass, window_name, None, original_name=device_name
-            )
-
+        # v1.0.71（开错房间事故）：曾有"本区没找到→摘掉区域重找"回捞——它把
+        # **别屋同名窗**当目标，静默跨区误执行。ControlWindow 主路径 2026-09-21
+        # 事故复盘已删同款；本转发路径同族同修：用户点名的区域是硬约束，
+        # 区内没有就如实失败，绝不拿别人家的窗凑数。
         if action in button_map:
             button_entity_id = button_map[action]
             try:

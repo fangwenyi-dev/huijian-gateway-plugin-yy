@@ -1,4 +1,5 @@
 import logging
+import re
 
 from homeassistant.components.button.const import DOMAIN as BUTTON_DOMAIN
 from homeassistant.components.input_button import DOMAIN as INPUT_BUTTON_DOMAIN
@@ -100,7 +101,6 @@ def normalize_chinese_numbers(text: str) -> str:
         return text
     global _CN_NUM_PATTERN
     if _CN_NUM_PATTERN is None:
-        import re
         _CN_NUM_PATTERN = re.compile(r"[零一二三四五六七八九十百千]+")
     return _CN_NUM_PATTERN.sub(lambda m: _parse_chinese_number(m.group(0)), text)
 
@@ -293,25 +293,121 @@ def _passes_exact_filter(
     return False
 
 
+# ── 区域硬约束（2026-09 现场实锤：「打开办公室平开窗」压中展厅窗）─────
+# 旧过滤只读实体注册表 entry.area_id——现代 HA 用户把区域挂在**设备**上，
+# 实体级 area_id 恒 None，「无区域放行」分支让全屋同名窗全部进候选，
+# async_all 迭代序（=注册序）先到先得 → 开错房间还播「成功」。
+# 现按三级证据裁决：实体区域 → 设备区域继承 → 友好名/设备名里的注册区域名
+# 信号；确定属于别的区域的候选一律剔除，区域未知的只作低优先兜底。
+# 区域是用户点名的硬约束（与 intent_window_control 摘区回捞删除同族纪律）。
+
+def _norm_area_token(s: str | None) -> str:
+    """区域名比对归一：小写、去空白与「的」（注册名常带尾空格、口述常带「的」）。"""
+    return re.sub(r"[\s的]+", "", (s or "")).lower()
+
+
+def _area_tok_hit(tok: str, norm: str) -> bool:
+    return bool(tok) and bool(norm) and (tok == norm or tok in norm or norm in tok)
+
+
+def _build_area_constraint(area_registry, area_name: str | None):
+    """口述区域名 → (target_area_id, norm, signals)。
+
+    target_area_id=None 且 norm 非空 = 注册表解析不出的区域名（此后只按
+    名字信号裁决，确凿挂别区的候选一律剔除）。
+    signals=[(归一化区域名, area_id)] 长名在前（防短词截胡）；替身注册表
+    没有 async_list_areas 时退化为空表（等价旧行为，由既有单测钉住形状）。
+    """
+    norm = _norm_area_token(area_name)
+    signals: list[tuple[str, str]] = []
+    lister = getattr(area_registry, "async_list_areas", None)
+    if callable(lister):
+        try:
+            for a in lister():
+                names = {str(getattr(a, "name", "") or "")} | {
+                    str(x) for x in (getattr(a, "aliases", None) or ())}
+                for n in names:
+                    t = _norm_area_token(n)
+                    if t:
+                        signals.append((t, a.id))
+        except Exception:  # noqa: BLE001 —— 裁决层永不因注册表形态意外炸窗控
+            signals = []
+        signals.sort(key=lambda x: -len(x[0]))
+    target_id = None
+    if norm:
+        area = area_registry.async_get_area_by_name(area_name)
+        if area is not None:
+            target_id = area.id
+        if target_id is None:
+            hits = {aid for t, aid in signals if t == norm}
+            if len(hits) != 1:
+                hits = {aid for t, aid in signals
+                        if norm in t or t in norm}
+            if len(hits) == 1:
+                target_id = next(iter(hits))
+    return target_id, norm, signals
+
+
+def _longest_area_signal(text_norm: str, signals) -> tuple[str, str] | None:
+    """文本（按钮友好名+设备显示名）里出现的最长注册区域名信号。"""
+    for t, aid in signals:          # 已按长度降序
+        if t in text_norm:
+            return aid, t
+    return None
+
+
+def _candidate_area_tier(cand_area: str | None, text_norm: str,
+                         target_id: str | None, norm: str, signals) -> int:
+    """-1=剔除（确凿跨区）；0=区域实锤命中；1=名字回声明；2=无区域证据兜底。"""
+    if not norm:
+        return 0                                  # 用户没点名区域：不设限
+    sig = _longest_area_signal(text_norm, signals)
+    if sig and not _area_tok_hit(sig[1], norm):
+        return -1                                 # 名字明写别屋（「展厅平开窗 开」）
+    if cand_area is not None:
+        if target_id is not None:
+            return 0 if cand_area == target_id else -1
+        return -1    # 口述区域解析不出，候选又挂在别的已注册区域——不猜
+    return 1 if sig else 2
+
+
+def _entity_effective_area(entity_registry, device_registry, entity_id):
+    """实体有效区域：实体级 area_id 覆盖，否则继承设备区域（真机区域几乎
+    都挂在设备上）。返回 (area_id|None, device_display_name)。永不抛。"""
+    try:
+        entry = entity_registry.async_get(entity_id)
+    except Exception:  # noqa: BLE001
+        return None, ""
+    if entry is None:
+        return None, ""
+    area_id = entry.area_id or None
+    display = ""
+    if entry.device_id:
+        device = device_registry.async_get(entry.device_id)
+        if device is not None:
+            if not area_id:
+                area_id = getattr(device, "area_id", None) or None
+            display = str(getattr(device, "name_by_user", None)
+                          or getattr(device, "name", None) or "")
+    return area_id, display
+
+
 def find_window_buttons(
     hass, window_name: str, area_name: str | None, original_name: str | None = None
 ) -> dict[str, str]:
+    from homeassistant.helpers import area_registry as ar
     from homeassistant.helpers import device_registry as dr
     from homeassistant.helpers import entity_registry as er
 
     entity_registry = er.async_get(hass)
     device_registry = dr.async_get(hass)
 
-    target_area_id = None
-    if area_name:
-        from homeassistant.helpers import area_registry as ar
+    target_area_id, area_norm, signals = _build_area_constraint(
+        ar.async_get(hass), area_name)
 
-        area_registry = ar.async_get(hass)
-        area = area_registry.async_get_area_by_name(area_name)
-        if area:
-            target_area_id = area.id
-
-    result = {}
+    # action → (tier, entity_id)：区域证据越强 tier 越小，同 action 只许被
+    # 更强证据顶掉（旧「先到先得」=async_all 注册序掷硬币，开错房间元凶）。
+    best: dict[str, tuple[int, str]] = {}
     _LOGGER.info(
         "Searching buttons: window_name='%s', area_name='%s', target_area_id='%s', original_name='%s'",
         window_name, area_name, target_area_id, original_name,
@@ -358,41 +454,56 @@ def find_window_buttons(
             continue
 
         entry = entity_registry.async_get(entity_id)
-        # M5（2026-09-23 深审）：注册表外实体（preview/discovery 态）
-        # async_get 返回 None，直接 .area_id 抛 AttributeError 炸整个
-        # ControlWindow 意图——同文件另两扫描口(:397/:454 形态)都有守卫。
-        # 无 entry = 区域未知，语义并入"无 area_id 放行"既有分支。
+        # M5（2026-09-23 深审）：注册表外实体 async_get 返回 None，禁止裸引用。
         entry_area = entry.area_id if entry else None
-
-        if target_area_id and entry_area and entry_area != target_area_id:
+        # v1.0.71 区域实锤（开错房间事故）：实体没挂区域时继承**设备**区域；
+        # 再拿友好名+设备名里的注册区域名做信号，确凿别区的一律剔除。
+        dev_area, dev_display = None, ""
+        if entry is not None and entry.device_id:
+            dev = device_registry.async_get(entry.device_id)
+            if dev is not None:
+                dev_area = getattr(dev, "area_id", None) or None
+                dev_display = str(getattr(dev, "name_by_user", None)
+                                  or getattr(dev, "name", None) or "")
+        cand_area = entry_area or dev_area
+        tier = _candidate_area_tier(
+            cand_area, _norm_area_token(f"{name} {dev_display}"),
+            target_area_id, area_norm, signals)
+        if tier < 0:
             skip_area_count += 1
             continue
-        if target_area_id and not entry_area:
-            _LOGGER.debug("Including button without area_id: %s (%s)", entity_id, name)
+        if tier == 2:
+            _LOGGER.debug(
+                "Area-unknown fallback candidate (tier2): %s (%s)", entity_id, name)
 
         for action, keywords in WINDOW_ACTION_MAPPING.items():
             for keyword in keywords:
                 keyword_lower = keyword.lower()
                 if _find_standalone_keyword(name_lower, keyword_lower) is not None:
-                    if action not in result:
-                        result[action] = entity_id
+                    cur = best.get(action)
+                    if cur is None or tier < cur[0]:
+                        best[action] = (tier, entity_id)
                         _LOGGER.info(
-                            "Found %s button: %s (name: %s)", action, entity_id, name
-                        )
+                            "Found %s button: %s (name: %s, area tier: %s)",
+                            action, entity_id, name, tier)
                     break
 
+    result = {action: eid for action, (_t, eid) in best.items()}
     _LOGGER.info(
-        "Search summary: total_buttons=%s, name_matches=%s, skipped_remove=%s, skipped_area=%s, result=%s",
-        button_count, match_count, skip_remove_count, skip_area_count, result,
+        "Search summary: total_buttons=%s, name_matches=%s, skipped_remove=%s, skipped_area=%s, tiers=%s, result=%s",
+        button_count, match_count, skip_remove_count, skip_area_count,
+        {a: t for a, (t, _e) in best.items()}, result,
     )
     return result
 
 
 def find_window_buttons_by_area_id(hass, area_id: str | None) -> dict[str, str]:
     """Find all window buttons in a given area by area_id, keyed by action type."""
+    from homeassistant.helpers import device_registry as dr
     from homeassistant.helpers import entity_registry as er
 
     entity_registry = er.async_get(hass)
+    device_registry = dr.async_get(hass)
 
     buttons = {}
     for state in hass.states.async_all():
@@ -401,9 +512,12 @@ def find_window_buttons_by_area_id(hass, area_id: str | None) -> dict[str, str]:
         entry = entity_registry.async_get(state.entity_id)
         if not entry:
             continue
-        if area_id and entry.area_id and entry.area_id != area_id:
+        # v1.0.71：实体没挂区域时继承设备区域；确凿别区剔除（开错房间事故同修）
+        eff_area, _dev = _entity_effective_area(
+            entity_registry, device_registry, state.entity_id)
+        if area_id and eff_area and eff_area != area_id:
             continue
-        if area_id and not entry.area_id:
+        if area_id and not eff_area:
             _LOGGER.debug(
                 "find_window_buttons_by_area_id: including button without area_id: %s", state.entity_id
             )
@@ -428,26 +542,29 @@ def find_all_window_buttons_by_action(
 
     Used when user says 'open all windows' without specifying a window type.
     Returns a list of entity_ids for all matching buttons.
+
+    v1.0.71：与 find_window_buttons 同一套区域裁决——实体区域→设备区域继承→
+    名字信号；确凿别区剔除，区域未知只在**无任何实锤命中候选**时兜底放行
+    （旧「无区域放行」会让全屋同名窗一起被按，泛称句同样开错房间）。
     """
+    from homeassistant.helpers import area_registry as ar
+    from homeassistant.helpers import device_registry as dr
     from homeassistant.helpers import entity_registry as er
 
     entity_registry = er.async_get(hass)
+    device_registry = dr.async_get(hass)
 
-    target_area_id = None
-    if area_name:
-        from homeassistant.helpers import area_registry as ar
-
-        area_registry = ar.async_get(hass)
-        area = area_registry.async_get_area_by_name(area_name)
-        if area:
-            target_area_id = area.id
+    target_area_id, area_norm, signals = _build_area_constraint(
+        ar.async_get(hass), area_name)
 
     action_keywords = WINDOW_ACTION_MAPPING.get(action, [])
     if not action_keywords:
         return []
 
-    result = []
-    seen_window_types = set()
+    seen_by_bucket = {False: set(), True: set()}   # hard / loose 各自去重
+    # （共享去重会让先入表的区域未知候选把同窗型的实锤候选挤掉——方向反了）
+    hard: list[str] = []      # tier0/1：区域实锤或名字回声明
+    loose: list[str] = []     # tier2：无任何区域证据（兜底）
 
     for state in hass.states.async_all():
         if state.domain not in (BUTTON_DOMAIN, INPUT_BUTTON_DOMAIN):
@@ -459,12 +576,14 @@ def find_all_window_buttons_by_action(
         entry = entity_registry.async_get(state.entity_id)
         if not entry:
             continue
-        if target_area_id and entry.area_id and entry.area_id != target_area_id:
+        # v1.0.71：实体没挂区域时继承设备区域（旧版只看实体级→别区窗同扫）
+        eff_area, dev_display = _entity_effective_area(
+            entity_registry, device_registry, state.entity_id)
+        tier = _candidate_area_tier(
+            eff_area, _norm_area_token(f"{name} {dev_display}"),
+            target_area_id, area_norm, signals)
+        if tier < 0:
             continue
-        if target_area_id and not entry.area_id:
-            _LOGGER.debug(
-                "Including button without area_id: %s (%s)", state.entity_id, name
-            )
 
         # Auto-derive window keywords from WINDOW_NAME_MAPPING
         # so they stay in sync when new window types are added
@@ -478,14 +597,21 @@ def find_all_window_buttons_by_action(
             match_idx = _find_standalone_keyword(name_lower, keyword_lower)
             if match_idx is not None:
                 window_type = name_lower[:match_idx].strip()
-                if window_type not in seen_window_types:
-                    seen_window_types.add(window_type)
-                    result.append(state.entity_id)
+                bucket = loose if tier >= 2 else hard
+                seen = seen_by_bucket[bucket is loose]
+                if window_type not in seen:
+                    seen.add(window_type)
+                    bucket.append(state.entity_id)
                     _LOGGER.info(
-                        "Found all-window button: %s (name: %s)", state.entity_id, name
-                    )
+                        "Found all-window button: %s (name: %s, tier %s)",
+                        state.entity_id, name, tier)
                 break
 
+    result = hard if hard else loose
+    if hard and loose:
+        _LOGGER.info(
+            "all-window: %s area-evidenced button(s) shadow %s unknown-area candidate(s)",
+            len(hard), len(loose))
     return result
 
 

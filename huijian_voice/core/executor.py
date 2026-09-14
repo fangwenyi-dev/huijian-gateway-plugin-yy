@@ -26,6 +26,9 @@ MODE_CN = {"heat": "制热", "cool": "制冷", "dry": "除湿", "fan_only": "送
 _EN_ERR_MAP = [
     ("could not extract window name", "没找到要控制的窗户，试试说「客厅的窗户内倒」"),
     ("window control failed", "窗户控制没成功，可能窗户没在 HA 里配好"),
+    # v1.0.71（开错房间事故）：集成如实失败句「Could not find open button for X
+    # in Y」旧表不认，播报被截成英文残句「（Could not find op」——现场实锤。
+    ("could not find", "没找到要操作的窗户——请确认房间名和窗型叫法（如「办公室平开窗」）"),
     ("no available", "没找到符合条件的设备，试试带上房间名或换个叫法"),
     ("ha 内部错误", "慧尖 AI 集成还没生效——若是首次使用，请先安装集成（设备与服务→添加集成）并完成一次设备配对；若是刚升级，请在 Supervisor 重启（或重载）HA Core 再试"),
     ("unknown intent", "还没安装或加载慧尖 AI 集成——设备执行能力由集成提供，请先安装集成并配对一台设备"),
