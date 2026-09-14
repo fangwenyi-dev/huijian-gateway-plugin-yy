@@ -60,7 +60,11 @@ class Service:
         try:
             self.firmware = FirmwareStore()
         except OSError as e:
-            log.error("[OTA] 固件仓初始化失败（OTA 面板不可用，语音主链不受影响）: %s", e)
+            # 深审 R2 #8（F-OTA-11 的自爆残留）：本分支旧写 `log.error`——`log`
+            # 只是 run() 的局部名（banner），__init__ 作用域不存在 → /data 只读
+            # 时降级路径自己 NameError 崩启动，"绝不否决语音主链"的承诺被实现
+            # 恰好否决。全局名是 logger。
+            logger.error("[OTA] 固件仓初始化失败（OTA 面板不可用，语音主链不受影响）: %s", e)
             self.firmware = None
         self.ha = HAClient()
         self.nlu_data = Path(os.environ.get("HUIJIAN_NLU_DATA", const.NLU_DATA_DIR))
@@ -74,6 +78,12 @@ class Service:
         self.tts = TtsEngine(self.settings, self.store)
         # v1.0.65（TTS 深审 F4）：音色指纹热推送 task 强引用袋（同 session F7b 纪律）
         self._fp_pending: set = set()
+        # 深审 R2 #7：运行时指纹变更（首载完成/钉扎置位与解除）→ 重算+推送。
+        # 旧推送点只有 save 监听与建连 welcome：模型迟到加载把自定义表/sid
+        # 复核洗成新局后，welcome 推过的冷值会一直骑到下一次保存——同键先后
+        # 两种嗓=HA 盘缓存在嗓上漂移（与 F4 修的"丢推送"同病灶另一入口）。
+        self.tts.on_fp_change = self._notify_fp_change
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self.klar = KlarClient(self.settings)
         self.pipeline = Pipeline(self.settings, self.ha, self.scenes, self.textcnn,
                                  self.executor, agent=self.agent, klar=self.klar)
@@ -100,6 +110,9 @@ class Service:
         log.warning(" WS 三通道 :%d  管理 :%d(内部)  主机 %s", const.WS_PORT, const.ADMIN_PORT, self.host)
         log.warning("═" * 46)
         await self.ha.start()
+        # 深审 R2 #7：留一份运行循环引用——executor 线程里的引擎回调
+        # （ensure_loaded 收尾）需要 call_soon_threadsafe 才能安全推送。
+        self._loop = asyncio.get_running_loop()
         self.scenes.refresh_soon()   # 体验批 P0-2：场景契约词表预热（首句零阻塞）
         # v1.0.48（P5）：音色指纹基线必须在挂监听器之前取好——否则首笔保存
         # 会被当"初值"吞掉，错过一次缓存键轮换。
@@ -232,6 +245,24 @@ class Service:
             self._rotate_voice_fp()
         except Exception:
             logger.exception("[配置] 热应用失败")
+
+    def _notify_fp_change(self) -> None:
+        """深审 R2 #7：引擎指纹变更的统一入口，**任何线程**可调——
+        事件循环线程直调；executor 线程（首载完成）经 call_soon_threadsafe
+        弹回。去重/无循环降级都在 _rotate_voice_fp 里。"""
+        loop = self._loop
+        if loop is None:
+            self._rotate_voice_fp()
+            return
+        try:
+            on_loop = asyncio.get_running_loop() is loop
+        except RuntimeError:
+            on_loop = False
+        if on_loop:
+            self._rotate_voice_fp()
+        else:
+            with contextlib.suppress(RuntimeError):   # 关停竞态：loop 已关
+                loop.call_soon_threadsafe(self._rotate_voice_fp)
 
     def _rotate_voice_fp(self) -> None:
         """v1.0.48（P5）：换嗓保存 → 推新指纹给全部在连 tts 通道会话（集成

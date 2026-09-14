@@ -113,6 +113,24 @@ def split_sentences(text: str) -> list[str]:
 _CACHE_MAX_ITEMS = 256          # 播报句集收敛得快，256 句封顶
 _CACHE_MAX_BYTES = 4 << 20      # 4MB 硬闸（opus 32kbps×10s≈40KB/句，量级宽裕）
 _SPEED_MAX = 2.0                # v1.0.65 F10：与 Web 滑条上限对齐的服务端钳位
+# 2026-09-27 深审 R2 #1（F10 镜像残留）：补对称下界。generate 时长 ∝ 1/speed
+# 且不可取消（executor 线程+持 _gen_lock）：speed=0.05 → 单句 20×，session 55s
+# 预算只能截协程侧，线程照跑——逐轮漏占池线程（4C 机=8），池满 STT/播报全停摆
+# 且配置已持久化，重启复现。Web 滑条 0.6 的服务端对应物（留半档容差取 0.5）。
+_SPEED_MIN = 0.5
+# 2026-09-27 深审 R2 #1b：排队等 _gen_lock 必须有界——前手是"坏 speed 的
+# 小时级 generate"或冷下载时，后来者无限排队=同一条漏线程路径。50s < session
+# 55s 预算：超时按本句合成失败收（truncated 语义由既有路径承接），不陪葬。
+_GEN_WAIT_S = 50.0
+# 2026-09-27 深审 R2 #4：采样率合理域单点闸。fmt rate 是外部字节（F13 同一
+# 威胁模型：坏端点/中间盒），rate=1 → ratio=16000 → 单块 8KB 触发 6.5×10⁷ 点
+# np.arange ≈1.5GB 峰值分配 = 一条响应打死容器。8k–192k 覆盖全部现实 TTS 输出。
+_RATE_MIN, _RATE_MAX = 8000, 192000
+# 2026-09-27 深审 R2 #5：data 块"多付"容忍。F16 只防声明>实付；声明<实付
+# （provider 把样本数当字节数写=2× 误差这类）时后半音频被当"尾块元数据"静默
+# 吞掉且记完整成功=缺尾毒化从反方向漏进。合法尾元数据（LIST/INFO/bext）量级
+# <10KB；超此丢弃量按撒谎处理（云故障→回落+钉扎，宁误杀坏嗓不误缓存缺尾）。
+_DROP_TOLERANCE = 65536
 
 
 _DEFAULT_SID = 18   # 本地定案默认音色 zf_026（云失败回落唯一用嗓，音色归属条款③）
@@ -391,6 +409,11 @@ class _CloudOpusStream:
         self._rbuf = bytearray()        # RIFF 未解析头部字节
         self._rate = 0
         self._bits = 0
+        # 2026-09-27 深审 R2 #3：fmt.nChannels 与位深同闸（此前只校验 bits，立体声
+        # 交错被当单声道解=半速变调噪声"成功"入缓存——协议不变量 16k/mono 漏一半）。
+        self._nch = 0
+        # 2026-09-27 深审 R2 #5：data 声明长度之外被钳掉的字节计数（多付侦账）。
+        self._dropped = 0
         self._res = None
         self._enc = None
         self._pcm = bytearray()         # 待满帧的 16k s16le
@@ -442,6 +465,11 @@ class _CloudOpusStream:
                 raise RuntimeError(
                     f"云 TTS wav 声明长度未付满（data 块尚欠 {self._data_left}B，"
                     "疑似服务端撒谎截断，按云故障处理）")
+            # 深审 R2 #5（反方向同闸）：声明<实付——真实音频被钳当元数据丢弃。
+            if self._data_left is not None and self._dropped > _DROP_TOLERANCE:
+                raise RuntimeError(
+                    f"云 TTS wav 声明长度后多付 {self._dropped}B（超出尾元数据"
+                    "量级容忍，疑似按样本数撒谎声明=后半音频被吞，按云故障处理）")
             # ⚠ 这里只能喂**已重采样**的尾段给攒帧器；若误走 _payload（会再
             # 过一次 _res.feed）尾段会被二次重采样后整段吞掉（尾帧短 32B 的前科）。
             out += self._frame_pcm(self._res.flush())
@@ -501,6 +529,15 @@ class _CloudOpusStream:
                     raise RuntimeError("云 TTS wav 头损坏（缺 fmt/data 块）")
                 if self._bits != 16:
                     raise RuntimeError(f"云 TTS wav 位深 {self._bits} 不支持（仅 16-bit）")
+                # 深审 R2 #3/#4：声道与采样率入域闸（按云故障走既有回落+钉扎）。
+                if self._nch > 1:
+                    raise RuntimeError(
+                        f"云 TTS wav 声道数 {self._nch} 不支持（仅单声道；"
+                        "立体声交错样本会被当单声道解成变速噪声）")
+                if not _RATE_MIN <= self._rate <= _RATE_MAX:
+                    raise RuntimeError(
+                        f"云 TTS wav 采样率 {self._rate} 超出合理域 "
+                        f"[{_RATE_MIN},{_RATE_MAX}]（坏 fmt 头，防重采样无界分配）")
                 payload = bytes(self._rbuf[8:])
                 if 0 < csz < 0xFFFFFFFF:
                     # 定案⑦：可信声明长度 → 按其截断（尾随 LIST/pad 不进音频）。
@@ -519,6 +556,7 @@ class _CloudOpusStream:
             if cid == b"fmt " and csz >= 16:
                 body = self._rbuf[8:24]
                 self._rate = struct.unpack("<I", bytes(body[4:8]))[0]
+                self._nch = struct.unpack("<H", bytes(body[2:4]))[0]
                 self._bits = struct.unpack("<H", bytes(body[14:16]))[0]
             del self._rbuf[:need]
 
@@ -526,8 +564,13 @@ class _CloudOpusStream:
         """喂响应体载荷块（**源域** s16le）：重采样 → 攒满 60ms 即出包。"""
         if self._data_left is not None:
             if self._data_left <= 0:
-                return []                   # 声明长度已尽：之后的字节是尾块元数据
+                # 声明长度已尽：之后的字节按尾块元数据处置——但**多付侦账**
+                # （深审 R2 #5）：真元数据量级小，超出容忍=声明撒谎、后半音频
+                # 被吞，flush 时按云故障收（防缺尾音频以"完整成功"进 HA 盘缓存）。
+                self._dropped += len(chunk)
+                return []
             if len(chunk) > self._data_left:
+                self._dropped += len(chunk) - self._data_left
                 chunk = chunk[:self._data_left]
             self._data_left -= len(chunk)
         return self._frame_pcm(self._res.feed(chunk))
@@ -571,6 +614,25 @@ class TtsEngine:
         # v1.0.55：上次云失败时刻（monotonic）；0=健康。见 _CLOUD_PIN_S 注释。
         self._cloud_fail_ts = 0.0
         self._custom_sids: dict[str, int] = {}   # 加载时注入的自定义音色名→sid
+        # 深审 R2 #6：模型加载/下载引擎级单飞门（后来者即返，不排队占线程）。
+        self._load_gate = threading.Lock()
+        self._loading = False
+        # 深审 R2 #2/#7：指纹变更通知钩子（Service 布线；任何线程可调，
+        # 实现方自带线程安全与幂等去重）。加载完成/钉扎置位与解除时触发。
+        self.on_fp_change = None
+
+    def _notify_fp_change(self) -> None:
+        cb = self.on_fp_change
+        if cb is None:
+            return
+        try:
+            cb()
+        except Exception:  # noqa: BLE001 通知失败≠播报失败；welcome 帧兜底补值
+            logger.debug("[TTS] 指纹变更通知失败（不阻断）", exc_info=True)
+
+    def _pin_active(self) -> bool:
+        return bool(self._cloud_fail_ts) and \
+            (time.monotonic() - self._cloud_fail_ts) < _CLOUD_PIN_S
 
     def _voices_count(self, key: str) -> int:
         """官方音色数的异常安全读法：store 缺方法/返回垃圾一律 0（=注入关闭）。
@@ -594,6 +656,10 @@ class TtsEngine:
             per = (d / "voices.bin").stat().st_size // official_n
         if const.TTS_VOICES_DIR.is_dir():
             i = 0
+            # 深审 R2 #9：预览必须复刻 merge 侧的 F7 大小写折叠跳数——旁路投递
+            # （手工拷目录绕过上传口 409）Amy.bin+amy.bin 时，merge 跳后者，
+            # 旧预览两个都排 sid → 碰撞对之后全部错位 +1，用户照面板填数字拿错嗓。
+            seen_stems: set[str] = set()
             for p in sorted(const.TTS_VOICES_DIR.glob("*.bin")):
                 if p.name.startswith(".") or p.name.startswith("voices_custom_merged"):
                     continue                       # 隐藏文件与合并产物（误落投递口）不进预览
@@ -602,8 +668,15 @@ class TtsEngine:
                 except OSError:
                     continue
                 ok = per > 0 and sz == per
+                collide = ok and p.stem.lower() in seen_stems
+                if collide:
+                    ok = False
+                if ok:
+                    seen_stems.add(p.stem.lower())
                 preview.append({"name": p.stem, "size": sz, "valid": ok,
-                                "sid": official_n + i if ok else None})
+                                "sid": official_n + i if ok else None,
+                                **({"note": "与同名异体大小写冲突（merge 跳后者）"}
+                                   if collide else {})})
                 if ok:
                     i += 1
         return {"official_count": official_n, "per_voice_bytes": per,
@@ -649,6 +722,11 @@ class TtsEngine:
         if v > _SPEED_MAX:
             logger.warning("[TTS] tts.speed=%r 超上限，按 %g 钳位合成", raw, _SPEED_MAX)
             return _SPEED_MAX
+        if v < _SPEED_MIN:
+            # 深审 R2 #1：下界与上界对称——小 speed=generate 时长爆炸（∝1/v）且
+            # 不可取消，0.05 一档就够把 executor 池拖穿（播报+STT 停摆）。
+            logger.warning("[TTS] tts.speed=%r 低于下限，按 %g 钳位合成", raw, _SPEED_MIN)
+            return _SPEED_MIN
         return v
 
     _CLOUD_RATE_DEFAULT = 24000
@@ -669,7 +747,16 @@ class TtsEngine:
                            "（解码回默认 %d Hz；请改配置或走「重载配置」）",
                            raw, self._CLOUD_RATE_DEFAULT)
             return 0
-        return v if v > 0 else 0
+        if v <= 0:
+            return 0
+        # 深审 R2 #4：配置侧同域闸——sample_rate=1 会直进裸 PCM 解码率与请求体，
+        # ratio=16000 的重采样=单块 GB 级分配。域外按未配置消毒（回默认率）。
+        if not _RATE_MIN <= v <= _RATE_MAX:
+            logger.warning("[TTS] tts.cloud.sample_rate=%d 超出合理域 [%d,%d]，"
+                           "按未配置处理（回默认 %d Hz）", v, _RATE_MIN, _RATE_MAX,
+                           self._CLOUD_RATE_DEFAULT)
+            return 0
+        return v
 
     def voice_fingerprint(self) -> str:
         """v1.0.48（P5，"多嗓音"第六路径收口）：HA core 的 TTS 缓存键=
@@ -701,12 +788,23 @@ class TtsEngine:
             # pcm 默认 44.1k，须显式指定才与预期一致）——既进请求体又是裸 PCM
             # 解码率，改配置后产出变了而键不换 = 模板句永久旧速音频。同族补键。
             sr = self._cloud_rate(cloud)
-            return (f"cloud:{str(cloud.get('voice') or 'alloy')}"
-                    f":{str(cloud.get('model') or 'tts-1')}"
-                    f":{str(cloud.get('response_format') or 'pcm')}"
-                    f":{host}"
-                    f":{speed_s}"
-                    f":sr{sr or 0}")
+            fp = (f"cloud:{str(cloud.get('voice') or 'alloy')}"
+                  f":{str(cloud.get('model') or 'tts-1')}"
+                  f":{str(cloud.get('response_format') or 'pcm')}"
+                  f":{host}"
+                  f":{speed_s}"
+                  f":sr{sr or 0}")
+            # 深审 R2 #2（P5 的运行时维度缺口）：钉扎窗口内各轮**实际产出是
+            # 本地 sid18 兜底嗓**，但指纹纯配置推导=还是云键——干净 stop 的
+            # 兜底音频被 HA 按云嗓键写进无 TTL 消息哈希盘缓存，解钉后模板句
+            # 永久播兜底嗓（现场"两个音色"以缓存形态复发，仅 clear_cache 可
+            # 解）。钉扎期键加 :fb 后缀隔离兜底音频；置位/解除经 on_fp_change
+            # 推送轮换（main._rotate_voice_fp 幂等去重）。残余窗口：设钉的
+            # 第一轮在键尚为裸云键时开跑，该轮兜底音频仍入云键缓存——HA 键在
+            # 请求开始即定，无法追溯；后续轮全部隔离，且解钉即轮换。
+            if self._pin_active():
+                fp += ":fb"
+            return fp
         tag = "u"
         try:
             entry = self.store.lock_entry("tts_kokoro_multilang") if self.store else {}
@@ -733,12 +831,42 @@ class TtsEngine:
             self._cloud_fail_ts = 0.0
             logger.info("[TTS] 云钉扎已解除（%s）→ 下一轮恢复试云",
                         reason or "配置变更")
+            # 深审 R2 #2：配置热更解钉同样要推键回收（:fb → 裸云键）
+            self._notify_fp_change()
 
     # ── 生命周期 ────────────────────────────────────────────────
     def ready(self) -> bool:
         return self._tts is not None
 
     def ensure_loaded(self) -> bool:
+        # 深审 R2 #6（F3 残留邻接）：把下载挪出 `_lock` 解决了"持锁跨下载"，
+        # 但没解决"等待者堆积占线程"——store.ensure 的 per-key 锁是**阻塞等待**
+        # 语义（实读 model_store.py:222-230），冷下载（348MB、分钟级）窗口内
+        # 播报 miss 轮/试听连点各漏占一条 executor 线程陪等：4C 机默认池 8
+        # 线程堆满 = asr/textcnn/to_thread 全排队，F3 想根治的"下载中饿死
+        # STT"以新形态存活。引擎级单飞：已在飞行，后来者**立即**回 False
+        # （本轮按"模型未就绪"截尾收束，日志点名），不陪等不占线程。
+        if self._tts is not None:
+            return True
+        with self._load_gate:
+            if self._loading:
+                logger.warning("[TTS] 模型加载/下载已在飞行（他人轮次），"
+                               "本轮按未就绪收束，不再排队占线程")
+                return False
+            self._loading = True
+        try:
+            ok = self._ensure_loaded_inner()
+        finally:
+            with self._load_gate:
+                self._loading = False
+        if ok:
+            # 深审 R2 #7：加载态是指纹的隐性输入（自定义表注入/复核改 sid），
+            # 首载完成若不重算推送，welcome 的冷值（c0h0/sid 回落 18）会一直
+            # 骑到下一次 save/重连——同键先后两种嗓=缓存在嗓上漂移。
+            self._notify_fp_change()
+        return ok
+
+    def _ensure_loaded_inner(self) -> bool:
         # v1.0.65（深审 F3）：store.ensure 的冷下载（kokoro 包 348MB、分钟级）
         # 挪出引擎 `_lock`——旧版持锁跨下载，期间每个并发 _synth/试听/ensure 各
         # 占 1 个 executor 线程堵在锁上（默认池 8 线程），云档不预载 = 首次试听
@@ -868,7 +996,7 @@ class TtsEngine:
         fell_back = False
         if prov.startswith("cloud"):
             # v1.0.55 云失败钉扎（现场「还是有两个 tts 音色」主修，见 _CLOUD_PIN_S）。
-            if self._cloud_fail_ts and (time.monotonic() - self._cloud_fail_ts < _CLOUD_PIN_S):
+            if self._pin_active():
                 fell_back = True
                 if engine_out is not None:
                     engine_out["engine"] = "local:pinned"
@@ -890,10 +1018,15 @@ class TtsEngine:
                         # 音色兜底 + 开钉扎窗口。
                         raise RuntimeError("云零帧返回")
                     self._cloud_fail_ts = 0.0      # 整流成功 = 解除钉扎
+                    # 深审 R2 #2：解除即推裸云键（:fb 隔离期结束，恢复云嗓）
+                    self._notify_fp_change()
                     return
                 except Exception as e:
                     # 断在首帧前或半途都记失败时刻、开启钉扎窗口。
                     self._cloud_fail_ts = time.monotonic()
+                    # 深审 R2 #2：置钉即推 :fb 键——兜底嗓音频从此与云键隔离
+                    # （半途断流轮同理：其已发帧走 truncated，不入缓存）。
+                    self._notify_fp_change()
                     if cloud_frames:
                         # 半途断流**不**再接本地嗓：一男一女的混播比"本轮少半句、
                         # 下轮起全本地"更伤（双音色观感的另一来源在此封死）。
@@ -1046,8 +1179,17 @@ class TtsEngine:
         try:
             # 并行 generate 互斥（见 __init__ _gen_lock 注释）：F1 快照/计数
             # 语义不变，仅把 C++ 调用排队（两锁不嵌套、无死锁序）。
-            with self._gen_lock:
+            # 深审 R2 #1b：排队必须有界——前手若是坏 speed 的小时级 generate
+            # 或冷下载，无限排队=每个后来者漏占一条池线程（正是 F3 要根治的
+            # 池尽形态）。超时按本句失败收（空产→truncated/礼貌失败）。
+            if not self._gen_lock.acquire(timeout=_GEN_WAIT_S):
+                logger.warning("[TTS] 合成排队超 %gs（引擎被长任务占用），"
+                               "本句按失败收束，不占用池线程陪等", _GEN_WAIT_S)
+                return b""
+            try:
                 audio_obj = tts.generate(sent, sid=sid, speed=speed)
+            finally:
+                self._gen_lock.release()
             samples = np.asarray(audio_obj.samples, dtype=np.float32)
             rate = int(audio_obj.sample_rate)
             if samples.size == 0:
@@ -1146,6 +1288,20 @@ class TtsEngine:
                         err_body = (await r.content.read(8192)).decode(
                             errors="replace")
                     raise RuntimeError(f"HTTP {r.status}: {err_body[:160]}")
+                # 深审 R2 #11（F13 增强）：起手符号白名单可绕（"Error: ..."、
+                # "rate limit exceeded" 类纯文本不以 { [ < 起手）——Content-Type
+                # 是更直接的判据，text/* 与 application/json 一律按"200 文本体"
+                # 拒（噪声帧计成功→解钉→入无 TTL 缓存的路径从源头掐断）。
+                # 音频 MIME（audio/* / application/octet-stream / 缺省）不受影响。
+                ct = str(getattr(r, "content_type", "") or "").lower()
+                if ct.startswith("text/") or ct.startswith("application/json"):
+                    err_body = ""
+                    with contextlib.suppress(Exception):
+                        err_body = (await r.content.read(8192)).decode(
+                            errors="replace")
+                    raise RuntimeError(
+                        f"云 TTS 返回 200 但 Content-Type={ct} 非音频"
+                        f"（疑似网关/代理错误页）：{err_body[:60]!r}")
                 content = getattr(r, "content", None)
                 if content is None or not hasattr(content, "iter_chunked"):
                     # 无流式 body 的响应对象（老式适配器/测试桩，非 aiohttp）：
@@ -1205,13 +1361,14 @@ class TtsEngine:
             raise RuntimeError(
                 f"云 TTS 响应过短（共 {len(raw)}B，无法判定容器形态）")
         if len(raw) >= 44 and raw[:4] == b"RIFF" and raw[8:12] == b"WAVE":
-            pos, sr, bits, data = 12, 0, 0, None
+            pos, sr, bits, nch, data = 12, 0, 0, 0, None
             while pos + 8 <= len(raw):
                 cid = raw[pos:pos + 4]
                 csz = struct.unpack("<I", raw[pos + 4:pos + 8])[0]
                 body = raw[pos + 8:pos + 8 + csz]
                 if cid == b"fmt " and len(body) >= 16:
                     sr = struct.unpack("<I", body[4:8])[0]
+                    nch = struct.unpack("<H", body[2:4])[0]
                     bits = struct.unpack("<H", body[14:16])[0]
                 elif cid == b"data":
                     data = body
@@ -1219,9 +1376,22 @@ class TtsEngine:
                 pos += 8 + csz + (csz & 1)      # 块按偶数字节对齐
             if data is None or not sr:
                 raise RuntimeError("云 TTS wav 头损坏（缺 fmt/data 块）")
+            # 深审 R2 #3/#4：与流式 _parse_riff 同闸（声道/合理域）。
+            if nch > 1:
+                raise RuntimeError(
+                    f"云 TTS wav 声道数 {nch} 不支持（仅单声道）")
+            if not _RATE_MIN <= sr <= _RATE_MAX:
+                raise RuntimeError(
+                    f"云 TTS wav 采样率 {sr} 超出合理域 [{_RATE_MIN},{_RATE_MAX}]")
             if bits != 16:
                 raise RuntimeError(f"云 TTS wav 位深 {bits} 不支持（仅 16-bit）")
             return data, sr
+        if raw[:4] == b"RIFF":
+            # 深审 R2（A1 收口）：12–43B 的 RIFF 残响应——旧版 >=44 门槛让它
+            # 掉进裸 PCM 缺省分支产垃圾帧还记"云成功"，与 _decide 短响应闸
+            # 同判据（流式路同形态在 sniff 即炸，两路必须同规）。
+            raise RuntimeError(
+                f"云 TTS wav 响应过短（共 {len(raw)}B，RIFF 容器不完整）")
         if why := _unsupported_format(raw):
             raise RuntimeError(why)
         # v1.0.65（F13 同闸）：200+文本体不得当裸 PCM（判据与流式 _decide 一致）

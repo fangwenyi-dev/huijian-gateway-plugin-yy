@@ -1122,6 +1122,37 @@ class FastPath:
                     intent = "ControlWindow"
                     extra = {**extra, "action": extra.get("action") or
                              ("open" if _was_on else "close")}
+                elif name in ("窗", "窗户"):
+                    # 2026-09-14 现场日志（2026-09-27 修复批）：「打开办公室平
+                    # 盖窗」谎报「窗户打开了」、窗没动——未知窗词「X窗」被
+                    # parse_target 尾剥折叠
+                    # 成泛称「窗」+ Turn* 车道 = 谎报温床——集成 TurnDeviceOn
+                    # 遇裸「窗」走全窗兜底并**伪造**「好的，X的窗户打开了」
+                    # （用户没这扇窗，办公室所有开合器按钮反倒被按）。双层修：
+                    # ① corrector 音似表（平盖窗→平开窗，主修，真机走通）；
+                    # ② 本闸（深度防御，对所有未知「X窗」族成立）：rest 里还
+                    #    剩更长的「X窗」残段=用户其实在点**具名**窗，保留整词
+                    #    转 ControlWindow——集成端对未识别窗名有「不敢按全窗
+                    #    执行」如实拒收终（intent_window_control），宁如实失
+                    #    败不谎报。rest 只剩泛称（「打开办公室窗」）也纠车道：
+                    #    开合器=按钮按压语义（与 窗户 既有待遇对齐），全窗执
+                    #    行走 ControlWindow 如实收口（空结果=失败，不再伪造）。
+                    full = T.clean_name(T.normalize_name(
+                        T.strip_modal(str(rest_text or ""))))
+                    if area and str(area) in full:
+                        full = full.replace(str(area), "", 1).strip(" 的地里得")
+                    # 首部量词/属格残渣（「开个窗」→「个窗」）先洗，防误入抗折叠
+                    full = re.sub(r"^[一各这个那扇家的里]+", "", full).strip()
+                    if (full and full not in ("窗", "窗户")
+                            and full.endswith(("窗", "窗户"))
+                            and len(full) <= 12
+                            and not any(w in full for w in ("帘", "纱窗", "百叶"))):
+                        name = full
+                        trace.append(f"窗名抗折叠:{name}")
+                    trace.append(f"泛窗纠正:{name}→ControlWindow")
+                    intent = "ControlWindow"
+                    extra = {**extra, "action": extra.get("action") or
+                             ("open" if _was_on else "close")}
         if name is None:
             # 全局类："开灯/关灯"（rest 为空但设备词在原文里）
             if intent in ("TurnDeviceOn", "TurnDeviceOff") and rest_text.strip():

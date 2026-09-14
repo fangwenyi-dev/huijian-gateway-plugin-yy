@@ -233,7 +233,10 @@ class TtsSession(BaseSession):
         typ = obj.get("type")
         if typ == "tts":
             state = obj.get("state")
-            text = str(obj.get("text", "")).strip()
+            # 深审 R2 #10：`get(k, "")` 只在**键缺失**时兜底——{"text": null}
+            # 返回 None，str(None)="None" 会被合成**念出字面 "None"**。`or ""`
+            # 把 null/False/0 全折叠为空（与"空文本 detect 零帧收束"契约对齐）。
+            text = str(obj.get("text") or "").strip()
             # v1.0.65（TTS 深审 F1）：detect 文本硬上限。max_msg_size=64KB 单帧
             # 可载 ~2 万字无标点文本：generate 非流式（整段合成完才返回）且
             # executor 线程不可取消——一段巨型合成持 _gen_lock 分钟级，期间全部
@@ -378,7 +381,7 @@ class LlmSession(BaseSession):
         if self._common(obj):
             return
         if obj.get("type") == "listen" and obj.get("state") == "detect":
-            text = str(obj.get("text", ""))
+            text = str(obj.get("text") or "")   # 深审 R2 #10 同闸（LLM detect 形）
             # C1（2026-09-22 审查批）：抢占代次守卫——与 TtsSession._gen、
             # SttSession「抢占方收束」纪律对称。此前被 cancel 的旧 _turn 在
             # except CancelledError 里**无条件**补发 end：客户端 await_message
