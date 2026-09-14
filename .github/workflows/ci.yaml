@@ -22,7 +22,7 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Check shell scripts syntax
         run: |
@@ -108,7 +108,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       changelog: ${{ steps.changelog.outputs.changelog }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         # v1.7.12（审计 I-3）：changelog 兜底路径要 `git log --oneline -10`，
         # 默认 fetch-depth=1 只能给出 1 条——给 20 条历史
         with:
@@ -167,7 +167,7 @@ jobs:
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Get build matrix
         id: matrix
         uses: home-assistant/builder/actions/prepare-multi-arch-matrix@2026.06.0
@@ -184,7 +184,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.init.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build image
         uses: home-assistant/builder/actions/build-image@2026.06.0
         with:
@@ -208,7 +208,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Run image E2E
         run: bash huijian_voice/tests/e2e/run_e2e.sh
 
@@ -295,7 +295,7 @@ jobs:
       VERSION: ${{ needs.prepare.outputs.version }}
       OWNER: ${{ github.repository_owner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Transcode ghcr zstd layers to gzip and push ACR
         env:
           ACR_USER: ${{ secrets.ACR_USER }}
@@ -414,7 +414,7 @@ jobs:
     needs: [prepare, manifest, push-acr]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # v1.0.44 实锤教训：prepare 的 changelog 输出被 Actions 密钥扫描
       # 「Skip output 'changelog' since it may contain secret」整段丢弃 →
@@ -461,7 +461,7 @@ jobs:
     needs: [prepare, release]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Create Gitee Release (idempotent)
         env:

@@ -14,7 +14,7 @@ import sys
 import time
 from pathlib import Path
 
-import anyio
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -146,6 +146,9 @@ def _stt_send_timeout():
 
 
 def test_recognize_cancelled_attribution():
+    # CI 无 anyio（v1.0.69 scope 钉同规）：recognize 的 fail_after 需真 anyio，
+    # 函数级 importorskip——源级钉不陪跳（CI 上照跑）。
+    anyio = pytest.importorskip("anyio", reason="recognize 需真 anyio（取消语义）")
     lg = _Log()
     ns = {"asyncio": asyncio, "anyio": anyio, "time": time,
           "_SEND_TIMEOUT_S": _stt_send_timeout(), "_LOGGER": lg}
