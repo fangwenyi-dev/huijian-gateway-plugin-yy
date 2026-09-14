@@ -24,8 +24,13 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-import anyio
 import pytest
+
+# 本文件全部钉在**真 anyio** 语义上（根因①修复的前提就是任务仿射），CI 依赖
+# 面无 anyio（HA 运行期依赖）→ 模块级跳过（沿用 v1.0.64 batch456 同款纪律）；
+# 本机 py313 venv 实装真库，实证以本机为准。
+pytest.importorskip("anyio", reason="需真 anyio（cancel scope 任务仿射语义前提）")
+import anyio  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "custom_components" / "huijian_ai" / "huijian" / "tts_transport.py"
