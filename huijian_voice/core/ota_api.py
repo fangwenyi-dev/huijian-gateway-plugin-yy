@@ -145,7 +145,64 @@ def setup(app, ctx):
                        "仅限设备所在局域网内打开；当前小程序尚无 CMD21 代发入口"
                        "（代发能力未上线，链接先用于备存）"})
 
+    async def _dispatch(request):
+        """v1.0.74 真下发：issue + 经集成中继调设备 :6053 用户服务 ota_upgrade。
+        设备接收口仅 ≥v2.1.36 有；URL 私网白名单闸在设备侧（单一事实源，此处
+        不复装）。令牌签出后若下发失败不回滚——10min TTL 自然作废（防竞态
+        简单化），日志点名。全路径折叠 JSON 永不抛（F-OTA-04 同纪律）。"""
+        store = getattr(ctx, "firmware", None)
+        if store is None:
+            return web.json_response({"success": False, "error": "固件仓未挂载"}, status=503)
+        body = await _json_body(request)
+        version = str(body.get("version", "")).strip()
+        mac = str(body.get("mac", "")).strip()[:40]
+        if not mac:
+            return web.json_response(
+                {"success": False, "error": "mac 必填——下发按设备寻址，防发错机"}, status=400)
+        res = None
+        try:
+            if not version:
+                lat = await asyncio.to_thread(store.latest)
+                if not lat:
+                    return web.json_response(
+                        {"success": False, "error": "固件仓无已登记版本——投递口放包或先「拉取」"},
+                        status=400)
+                version = lat["version"]
+            res = await asyncio.to_thread(store.issue, version, mac)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[OTA] dispatch 签发异常: %s", e)
+            res = None
+        if not res:
+            return web.json_response(
+                {"success": False, "error": "该版本不在盘（投递口放包或先「拉取」）"}, status=400)
+        host = local_ip()
+        if not host or host.startswith("127."):
+            return web.json_response({
+                "success": False,
+                "error": "加载项无可路由局域网地址——设备白名单闸只收私网字面 IPv4"}, status=503)
+        url = f"http://{host}:{const.WS_PORT}/firmware/{quote(res['file'])}?t={res['token']}"
+        bridge_ok = bool(ctx.ha and getattr(ctx.ha, "ok", False))
+        if not bridge_ok:
+            return web.json_response({
+                "success": False, "error": "HA 桥未连接，无法中继到设备", "version": version},
+                status=502)
+        ack = await ctx.ha.rest_write("POST", "/api/huijian-ai/satellites/ota",
+                                      {"mac": mac, "url": url})
+        if not ack.get("success"):
+            logger.warning("[OTA] dispatch 失败 v%s mac=%s: %s", version, mac,
+                           ack.get("error", "?"))
+            return web.json_response({
+                "success": False, "error": ack.get("error", "集成未受理"), "version": version})
+        logger.info("[OTA] 真下发 v%s → %s sha=%s… mac=%s",
+                    version, res["file"], str(res["sha256"])[:12], mac)
+        return web.json_response({
+            "success": True, "version": version, "size": res["size"],
+            "sha256": res["sha256"],
+            "note": "设备已受理并立即下载（局域网约 1-3 分钟），成功后自动重启；"
+                    "5-10 分钟后刷新台账核对版本号"})
+
     app.router.add_get("/api/devices", _devices)
     app.router.add_get("/api/firmware", _firmware)
     app.router.add_post("/api/firmware/download", _download)
     app.router.add_post("/api/firmware/issue", _issue)
+    app.router.add_post("/api/firmware/dispatch", _dispatch)

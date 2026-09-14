@@ -14,8 +14,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#1d1750">
 <title>慧尖HA语音插件</title>
-<link rel="stylesheet" href="css/huijian.css?v=1.0.73">
-<link rel="stylesheet" href="css/voice.css?v=1.0.73">
+<link rel="stylesheet" href="css/huijian.css?v=1.0.74">
+<link rel="stylesheet" href="css/voice.css?v=1.0.74">
 </head>
 <body>
 <!-- 「星辰大海」背景层（与网关加载项同一设计标准/同一固定种子＝同一片天）：
@@ -302,7 +302,7 @@
 
 <script>
 "use strict";
-const CURRENT_VERSION = "1.0.73";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
+const CURRENT_VERSION = "1.0.74";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
 // 音色表 = kokoro-multi-lang-v1_1 官方 103 sid 全表（k2-fsa docs sid 表实证；
 // 标注=对用户上传试听样本的 CAM++ 声纹溯源榜：v1_1 不含晓晓/云扬，
 // sid18=zf_026 女声最似晓晓(0.454 全场最近)，sid81=zm_055 最似云扬）
@@ -747,10 +747,13 @@ async function loadOta(){
       <td>${pill(d.online?"在线":"离线", d.online?"ok":"bad")}</td>
       <td>${fv}</td>
       <td>${badge}</td>
-      <td>${_otaLatest?`<button class="act" data-issue="${esc0(d.mac||d.name)}">${remote?"下发":"发放链接"}</button>`:""}</td>`;
+      <td>${_otaLatest?`<button class="act" data-issue="${esc0(d.mac||d.name)}" data-remote="${remote?1:0}">${remote?"下发":"发放链接"}</button>`:""}</td>`;
     tb.appendChild(tr);
   }
-  tb.querySelectorAll("button[data-issue]").forEach(b=>b.onclick=()=>issueOta(b.dataset.issue));
+  // v1.0.74：有 ota_upgrade 接收口（≥v2.1.36）→真下发（离线等失败由服务端视图
+  // 结构化折叠回显，面板不复装）；无接收口→保留签发链接备存形态
+  tb.querySelectorAll("button[data-issue]").forEach(b=>b.onclick=()=>
+    b.dataset.remote==="1"?dispatchOta(b.dataset.issue):issueOta(b.dataset.issue));
   const ft = $("#fwTable tbody"); ft.innerHTML="";
   const items = fw.items||[];
   if(!items.length){
@@ -791,10 +794,25 @@ async function issueOta(mac){
         <span class="code">${esc0(String(r.sha256).slice(0,16))}…</span> · ${esc0(r.expires_in)}s 一次性</div>
       <p><input id="otaUrl" class="code" readonly style="width:100%" value="${esc0(r.url)}"></p>
       <button class="act" id="otaCopy">复制链接</button>
-      <span class="mut">当前小程序尚无 CMD21 代发入口（代发能力未上线）；固件支持远程接收口后本链接同源切真下发。</span>
+      <span class="mut">v1.0.74 起：≥v2.1.36 设备已切「下发」按钮真下发（同源链接经 :6053 接收口）；本备存形态留给无接收口的老固件/小程序代发场景。</span>
       <div class="hint">${esc0(r.warn_zh)}</div>`;
     $("#otaCopy").onclick=()=>{ const i=$("#otaUrl"); i.select();
       try{ document.execCommand("copy"); toast("已复制"); }catch(e){ toast("请手动长按复制"); } };
+  }catch(e){ out.innerHTML = `<span class="pill bad">${esc0(e.message)}</span>`; }
+}
+async function dispatchOta(mac){
+  const out=$("#otaOut"); out.innerHTML="<span class='mut'>下发中…（签发→中继→设备受理）</span>";
+  try{
+    const r = await post("/api/firmware/dispatch",{mac, version:_otaLatest});
+    if(!r.success){
+      out.innerHTML = `<span class="pill bad">下发失败：${esc0(r.error||"?")}</span>`+
+        ` <span class="mut">目标 mac=${esc0(mac)}</span>`;
+      return;
+    }
+    out.innerHTML = `<div><span class="pill ok">已下发</span> 目标 <b>v${esc0(r.version)}</b>`+
+      ` · ${fmtBytes(r.size)} · sha256 <span class="code">${esc0(String(r.sha256).slice(0,16))}…</span></div>`+
+      `<div class="hint">${esc0(r.note||"设备已受理，稍后刷新台账核对版本")}</div>`;
+    setTimeout(loadOta, 1500);
   }catch(e){ out.innerHTML = `<span class="pill bad">${esc0(e.message)}</span>`; }
 }
 
@@ -969,6 +987,6 @@ $("#regenBtn").onclick = async ()=>{
   try { await post("/api/token/regenerate",{}); toast("已重置"); loadEndpoints(); } catch(e){ toast(e.message); }
 };
 </script>
-<script src="js/starsky.js?v=1.0.73"></script>
+<script src="js/starsky.js?v=1.0.74"></script>
 </body>
 </html>

@@ -458,3 +458,90 @@ def test_ledger_fw_version_chain(tmp_path):
     assert '"fw_source"' in view_block, "陈旧版本必须如实标源，面板不作假"
     cf = (HTTP_PY.parents[1] / "config_flow.py").read_text(encoding="utf-8")
     assert '"fw_version":' in cf, "config_flow 建账时持久化 fw_version"
+
+
+# ── v1.0.74 OTA 真下发：/api/firmware/dispatch + 集成中继视图 + 面板接线 ──
+
+def _dispatch_ctx(store, ha):
+    return AppContext(settings=SettingsFake(), ha=ha, firmware=store,
+                      started_at=time.time(), host="10.0.0.9")
+
+
+def test_dispatch_happy_path(store, monkeypatch):
+    """全链闭环：mac 必填→issue 签一次性链接→rest_write 中继集成→
+    返回体含 note；且签出的 URL 物理可领取（take 一次成、二次废）。"""
+    monkeypatch.setattr("core.ota_api.local_ip", lambda: "10.0.0.9")
+    ha = FakeHAClient(rest=_sat_ledger())
+    _drop(store, "huijian-s3-2.9.7.bin", b"d" * 9)
+    srv = _serve(make_admin_app(_dispatch_ctx(store, ha)))
+    port = next(srv)
+    st, j = _jpost(port, "/api/firmware/dispatch", {"mac": "aa"})
+    assert st == 200 and j["success"] and j["version"] == "2.9.7" and j["note"], j
+    assert len(ha.written) == 1
+    m, p, b = ha.written[0]
+    assert (m, p) == ("POST", "/api/huijian-ai/satellites/ota")
+    assert b["mac"] == "aa" and b["url"].startswith("http://10.0.0.9:8000/firmware/")
+    from urllib.parse import parse_qs, urlparse
+    fname = urlparse(b["url"]).path.rsplit("/", 1)[-1]
+    tok = parse_qs(urlparse(b["url"]).query)["t"][0]
+    assert store.take(tok, fname) is not None, "签出的链接必须真实可领取"
+    assert store.take(tok, fname) is None, "一次性：二次领取必废"
+
+
+def test_dispatch_requires_mac(store):
+    ctx = _dispatch_ctx(store, FakeHAClient(rest=_sat_ledger()))
+    srv = _serve(make_admin_app(ctx))
+    port = next(srv)
+    st, j = _jpost(port, "/api/firmware/dispatch", {})
+    assert st == 400 and not j["success"]
+    assert not ctx.ha.written, "无 mac 不得进中继（防发错机在签发前就掐）"
+
+
+def test_dispatch_bridge_down_no_issue(store):
+    """HA 桥断：不签发、不中继、502 结构化——防废令牌空烧与静默假成功。"""
+    ha = FakeHAClient(rest=_sat_ledger())
+    ha.ok = False
+    _drop(store, "huijian-s3-2.9.7.bin", b"d" * 9)
+    srv = _serve(make_admin_app(_dispatch_ctx(store, ha)))
+    port = next(srv)
+    st, j = _jpost(port, "/api/firmware/dispatch", {"mac": "aa"})
+    assert st == 502 and not j["success"] and not ha.written
+
+
+def test_dispatch_relay_reject_collapse(store, monkeypatch):
+    """中继端拒绝（无接收口/离线）→ 200 结构化如实回显，绝不 500/不吞。"""
+    monkeypatch.setattr("core.ota_api.local_ip", lambda: "10.0.0.9")
+    ha = FakeHAClient(rest=_sat_ledger(), writes={
+        ("POST", "/api/huijian-ai/satellites/ota"):
+            {"success": False, "error": "设备无 ota_upgrade 接收口"}})
+    _drop(store, "huijian-s3-2.9.7.bin", b"d" * 9)
+    srv = _serve(make_admin_app(_dispatch_ctx(store, ha)))
+    port = next(srv)
+    st, j = _jpost(port, "/api/firmware/dispatch", {"mac": "aa"})
+    assert st == 200 and j["success"] is False and "接收口" in j["error"]
+
+
+def test_ota_relay_view_form():
+    """集成视图形态钉（HA 不可 import，源码级）：注册在案、HA 令牌闸
+    （写命令通道，同台账面口径）、服务发现与台账 ota_services 同源过滤、
+    调用作废参 {"url": url} 逐字、全路径折叠无裸 raise。"""
+    src = HTTP_PY.read_text(encoding="utf-8")
+    assert "register_view(HuijianSatelliteOtaView)" in src
+    i = src.index("class HuijianSatelliteOtaView")
+    block = src[i:src.index("def parse_tts_stt_options")]
+    assert "requires_auth = True" in block
+    assert '/api/huijian-ai/satellites/ota"' in block
+    assert 'execute_service(svc, {"url": url})' in block
+    assert '"ota" in name.lower() or "upgrade" in name.lower()' in block, \
+        "接收口发现必须与 satellites 台账 ota_services 同判定源"
+    assert "raise" not in block.split('"""')[-1], "视图主体禁裸 raise——永不抛折叠 200 JSON"
+
+
+def test_panel_dispatch_wiring():
+    html = (Path(__file__).resolve().parents[1] / "www" / "index.html").read_text(
+        encoding="utf-8")
+    assert "async function dispatchOta" in html
+    assert '"/api/firmware/dispatch"' in html
+    assert "data-remote" in html and 'b.dataset.remote==="1"?dispatchOta' in html, \
+        "按钮按接收口存在性双分支：真下发 / 签发备存"
+    assert "代发能力未上线" not in html, "旧备存话术须随真下发同步"

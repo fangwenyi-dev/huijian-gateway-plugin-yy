@@ -26,6 +26,7 @@ async def async_setup_https(hass: HomeAssistant):
     hass.http.register_view(HuijianTtsSttView)
     hass.http.register_view(HuijianDeviceInfoView)
     hass.http.register_view(HuijianSatellitesView)
+    hass.http.register_view(HuijianSatelliteOtaView)
 
 
 class HuijianHttpView(HomeAssistantView):
@@ -277,6 +278,71 @@ class HuijianSatellitesView(HuijianHttpView):
                 "ota_services": ota_services,
             })
         return self.json({"devices": out})
+
+
+class HuijianSatelliteOtaView(HuijianHttpView):
+    """v1.0.74 OTA 真下发中继：加载项 /api/firmware/dispatch 签好一次性链接后来
+    此调用——body {mac|entry_id, url}，本视图经已建连的 :6053 Noise 通道调设备
+    用户服务 ota_upgrade(url)。URL 来源校验**不在此重复实现**：设备侧
+    Ota::IsUpgradeUrlAllowed 白名单闸只收私网字面 IPv4+http（单一事实源）；
+    领取令牌一次性/TTL 在加载项固件仓。永不抛全路径折叠 200 JSON——加载项
+    rest_write 契约要求结构化 error 可读，不许裸 500。"""
+
+    url = "/api/huijian-ai/satellites/ota"
+    name = "api:huijian-ai:satellites-ota"
+    # 写命令通道（向设备下发固件 URL）：同卫星台账面口径必须 HA 令牌——
+    # 匿名 POST 能把任意 URL 喷向在线卫星，设备白名单闸只限网段不限意图。
+    requires_auth = True
+
+    async def post(self, request: web.Request):
+        hass = request.app[KEY_HASS]
+        try:
+            body = await request.json() or {}
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        mac = str(body.get("mac", "") or "").strip().lower()
+        entry_id = str(body.get("entry_id", "") or "").strip()
+        url = str(body.get("url", "") or "").strip()
+        if not url.startswith("http://"):
+            return self.json({"success": False,
+                              "error": "url 缺失或非 http（设备白名单闸只收私网字面 IPv4）"})
+        if not mac and not entry_id:
+            return self.json({"success": False, "error": "mac/entry_id 必填其一"})
+        target = None
+        for ent in hass.config_entries.async_loaded_entries(DOMAIN):
+            if not ent.data.get("host"):
+                continue  # assist 引擎条目不是卫星（与 satellites 台账同判定）
+            if (mac and str(ent.data.get("mac", "") or "").lower() == mac) or \
+               (entry_id and ent.entry_id == entry_id):
+                target = ent
+                break
+        if target is None:
+            return self.json({"success": False,
+                              "error": f"卫星台账无此设备（mac={mac or entry_id}）——"
+                                       "配网入驻后且 HA 已连接才会出现在台账"})
+        rd = getattr(target, "runtime_data", None)
+        client = getattr(rd, "client", None) if rd is not None else None
+        if rd is None or client is None or not getattr(rd, "available", False):
+            return self.json({"success": False, "error": "设备离线或 API 通道未建立"})
+        svc = None
+        for s in (getattr(rd, "services", None) or {}).values():
+            name = getattr(s, "name", "") or ""
+            if "ota" in name.lower() or "upgrade" in name.lower():
+                svc = s
+                break
+        if svc is None:
+            return self.json({"success": False,
+                              "error": "设备固件无 ota_upgrade 接收口（<v2.1.36）——"
+                                       "请退回面板签发链接备存形态"})
+        try:
+            await client.execute_service(svc, {"url": url})
+        except Exception as e:
+            _LOGGER.warning("[OTA] 调设备 %s 失败: %s", svc.name, e)
+            return self.json({"success": False, "error": f"服务调用失败: {e}"[:160]})
+        _LOGGER.info("[OTA] ota_upgrade 已下发 %s (mac=%s)", target.title, mac or "-")
+        return self.json({"success": True, "service": svc.name})
 
 
 def parse_tts_stt_options(raw):

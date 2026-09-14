@@ -1,5 +1,31 @@
 # 变更日志
 
+## [1.0.74] - 2026-09-14 OTA 真下发批（卫星固件"下发"按钮成真）
+
+配合固件 v2.1.43（长播报封顶心跳化 + PS 地雷全挖）打通加载项→卫星的远程固件
+下发闭环。审查实锤：设备端 ≥v2.1.36 已在 :6053 Noise 通道注册 `ota_upgrade(url)`
+用户服务（与 BLE CMD21 同闸：URL 私网字面 IPv4 白名单/哈希/防降级），GitHub
+release 无 bin 资产（workflow 只贴正文）——投递口放包是唯一上架源；缺的只有
+"拿链接调设备服务"的中继跳。本批补上：
+
+- **集成 `huijian/http.py`**：新 `HuijianSatelliteOtaView`
+  （POST `/api/huijian-ai/satellites/ota`，requires_auth=True 同台账面口径）——
+  {mac|entry_id, url} → 定位卫星条目 → 服务发现与台账 ota_services 同判定源 →
+  `client.execute_service(svc, {"url": url})`；离线/无接收口/调用失败全部
+  结构化 200 折叠，永不裸 500。URL 校验不复装（设备闸=单一事实源）。
+- **加载项 `core/ota_api.py`**：新 POST `/api/firmware/dispatch` {mac, version?}
+  ——复用 store.issue 签一次性链接（10min）→ ha.rest_write 中继 → 聚合结果；
+  桥断 502 不签发（防废令牌空烧）、无 mac 400 前掐（防发错机）、中继拒绝如实
+  回显；成功回 note（下载 1-3 分钟、自动重启、5-10 分钟后刷新台账）。
+- **面板**：设备表按钮按 `data-remote` 双分支——有接收口走「下发」（dispatch），
+  无接收口保留「发放链接」备存形态；旧"代发能力未上线"话术同步退役。
+- **测试**：test_ota_firmware.py +6（dispatch 全链行为钉含**签出链接物理可领取
+  双 take 钉**、mac 必填/桥断/中继拒绝折叠、集成视图形态钉、面板接线钉）。
+- 运营口径：release 无资产为既有事实，「拉取」对无资产版本必失败属如实；
+  发版流程新增一步——编译产物 `huijian.bin` 改名 `huijian-s3-<ver>.bin` 投
+  `/data/firmware/import`（自动收编+现场算 sha256）。
+- 回归：全量 pytest 1345 项，基线 9 平台红存续零新增；六源齐 1.0.74。
+
 ## [1.0.73] - 2026-09-14 归因链四钉（下行黑洞免串口定凶手）
 
 09-14 16:15 三方日志案：HA 侧处理正常（每颗"清掉上一轮残留"都是开了轮又被拆的
