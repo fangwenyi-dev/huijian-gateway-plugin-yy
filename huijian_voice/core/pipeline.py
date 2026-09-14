@@ -697,6 +697,28 @@ class Pipeline:
         return Reply(say, "music", True, [f"music:now_playing:{st or 'none'}"])
 
 
+    async def _music_fail_say(self, entity: str, res: dict) -> str:
+        """失败话术分诊（现场 2026-09-14：配置后仍"没有响应"=端点拼错/离线，
+        却只有一句话，用户无从下手）。仅在服务调用失败后加一次 get_state 读数
+        （states 有 TTL 缓存，成本≈0）；判据拿不准一律回落通用话术。
+        保「抱歉」前缀纪律；测试桩 get_state 返回 {} 视同"读数不可得"走通用。"""
+        msg = str((res or {}).get("message") or "")
+        if "未就绪" in msg:
+            return "抱歉，HA 通道还没就绪，指令没有送出去"
+        try:
+            ent = await self.ha.get_state(entity)
+        except Exception:
+            ent = {}
+        if ent is None:
+            return (f"抱歉，HA 里找不到播放端点 {entity}，"
+                    "请到 设置-音乐 重新选择")
+        st = str((ent or {}).get("state") or "")
+        if st == "unavailable":
+            nm = str(((ent or {}).get("attributes") or {})
+                     .get("friendly_name") or entity)
+            return f"抱歉，{nm} 当前不在线"
+        return "抱歉，播放端点没有响应"
+
     async def _music(self, cmd: dict, text: str, origin: str) -> Reply:
         """音乐带执行（P1）：端点解析（区域定向→映射→默认+如实回退）、
         now_playing 查询（读端点态，缺曲目回退点歌记账）、play_media 虚拟
@@ -725,7 +747,7 @@ class Pipeline:
             if ok:
                 self._ledger_record(entity, q)
             speech = f"好的，正在播放《{q}》" if ok \
-                else "抱歉，播放端点没有响应"
+                else await self._music_fail_say(entity, res)
             if ok and self.settings.get("music.expect_wait_note", True):
                 # P2a 前卫星=整曲下载形态，首音有可感等待；话术按"点了会等
                 # 一会儿"设计（方案 §6-R2 口径），第三方秒开档可关
@@ -734,7 +756,8 @@ class Pipeline:
             res = await self.ha.call_service(
                 "media_player", self._MUSIC_SVC[act], {"entity_id": entity})
             ok = bool(res.get("success"))
-            speech = self._MUSIC_SAY[act] if ok else "抱歉，播放端点没有响应"
+            speech = self._MUSIC_SAY[act] if ok \
+                else await self._music_fail_say(entity, res)
         if note:
             speech = f"{speech}（{note}）"
         self._remember_turn(origin, text, speech)

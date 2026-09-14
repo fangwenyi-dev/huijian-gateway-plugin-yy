@@ -178,6 +178,60 @@ def test_music_failure_keeps_apology_prefix():
     assert not r.ok and r.text.startswith("抱歉")
 
 
+# ── 失败话术分诊（现场 2026-09-14：配置后仍"没有响应"，用户无从下手）────
+class TriageHa(RecHa):
+    """真实 HAClient.get_state 契约：实体不存在=None（区别 RecHa 桩的 {}）。"""
+
+    def __init__(self, ent=None, **kw):
+        super().__init__(**kw)
+        self._ent = ent
+
+    async def get_state(self, entity_id):
+        return self._ent
+
+
+def test_music_fail_triage_missing_entity():
+    p = _pipe(settings=ST({"music.player_entity": "media_player.客厅音箱"}),
+              ha=TriageHa(ok=False, ent=None))
+    r = arun(p.handle("下一首"))
+    assert not r.ok and r.text.startswith("抱歉")
+    assert "找不到播放端点" in r.text and "设置-音乐" in r.text
+
+
+def test_music_fail_triage_missing_entity_on_play():
+    p = _pipe(settings=ST({"music.player_entity": "media_player.ghost"}),
+              ha=TriageHa(ok=False, ent=None))
+    r = arun(p.handle("播放晴天"))
+    assert not r.ok and "找不到播放端点" in r.text
+    assert "media_player.ghost" in r.text      # 现场定位要见实体名
+
+
+def test_music_fail_triage_unavailable():
+    p = _pipe(settings=ST({"music.player_entity": "media_player.客厅"}),
+              ha=TriageHa(ok=False, ent={"state": "unavailable",
+                                         "attributes": {"friendly_name": "客厅音箱"}}))
+    r = arun(p.handle("暂停播放"))
+    assert not r.ok and "客厅音箱" in r.text and "不在线" in r.text
+
+
+def test_music_fail_triage_channel_down_first():
+    """通道未就绪优先于端点读数（否则空缓存会把锅错扣到端点头上）。"""
+    class MsgHa(RecHa):
+        async def call_service(self, domain, service, data, timeout=10.0):
+            return {"success": False, "message": "HA 通道未就绪"}
+    p = _pipe(settings=ST({"music.player_entity": "media_player.x"}), ha=MsgHa())
+    r = arun(p.handle("播放晴天"))
+    assert not r.ok and "通道还没就绪" in r.text
+
+
+def test_music_fail_triage_generic_when_entity_alive():
+    """实体在且状态正常仍失败（如 MA 未挂曲库）→ 保持通用话术不乱归因。"""
+    p = _pipe(settings=ST({"music.player_entity": "media_player.x"}),
+              ha=TriageHa(ok=False, ent={"state": "idle", "attributes": {}}))
+    r = arun(p.handle("播放晴天"))
+    assert not r.ok and r.text.startswith("抱歉，播放端点没有响应")
+
+
 def test_music_wins_over_llm_and_keeps_context_clean():
     p = _pipe(settings=ST({"music.player_entity": "media_player.x"}),
               agent=ChatAgent())

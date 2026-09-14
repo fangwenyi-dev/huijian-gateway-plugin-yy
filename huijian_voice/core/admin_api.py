@@ -52,6 +52,8 @@ def make_admin_app(ctx) -> web.Application:
     tts_voices_api.setup(app, ctx)
     from . import ota_api                 # 设备台账/固件仓（OTA 方案 Phase 2，同惯例）
     ota_api.setup(app, ctx)
+    from . import media_players_api       # 播放器候选列表（设置-音乐 下拉选端点，同惯例）
+    media_players_api.setup(app, ctx)
     return app
 
 
