@@ -295,6 +295,8 @@ class EsphomeAssistSatellite(
 
         self._is_running: bool = True
         self._pipeline_task: asyncio.Task | None = None
+        # v1.0.73 归因链：拆轮者要能报出被拆轮的年龄（单调时钟，仅日志用）
+        self._pipeline_task_t0: float = 0.0
         # v1.0.40：有界（≈5s 语音）——消费停顿时丢最旧，绝不无界涨内存
         self._audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue(
             maxsize=_MAX_AUDIO_QUEUE_CHUNKS
@@ -423,6 +425,11 @@ class EsphomeAssistSatellite(
                 )
             )
 
+        # v1.0.73 归因链·第②钉：订阅建立/解除各留一行 INFO——设备端
+        # send_request/bounded-wait 的形态要与 HA 端订阅窗口对齐
+        # （"设备以为订阅在、HA 其实刚重建"这类竞态全靠这两行卡时刻）。
+        _LOGGER.info("慧尖卫星: VA 订阅建立 %s", self.entity_id)
+
         if feature_flags & VoiceAssistantFeature.TIMERS:
             # Device supports timers
             assert (self.registry_entry is not None) and (
@@ -464,6 +471,8 @@ class EsphomeAssistSatellite(
 
     async def async_will_remove_from_hass(self) -> None:
         """Run when entity will be removed from hass."""
+        # v1.0.73 归因链·第②钉的孪生：订阅解除时刻（reload/摘除实体都会走这）
+        _LOGGER.info("慧尖卫星: VA 订阅解除 %s", getattr(self, "entity_id", "?"))
         await super().async_will_remove_from_hass()
 
         self._is_running = False
@@ -737,6 +746,16 @@ class EsphomeAssistSatellite(
         """
         if old_task is None or old_task.done():
             return True
+        # v1.0.73 归因链·第③钉：拆轮者自报——"STT 事务被外部取消"的凶手名册。
+        # 与 stt_transport 的取消行同刻成对出现=新轮接管；只有一边=另有其主。
+        # getattr 取龄：本方法"不碰实体字段"是 v1055 立过的提取纪律。
+        loop = asyncio.get_running_loop()
+        t0 = getattr(self, "_pipeline_task_t0", 0.0)
+        age = (loop.time() - t0) if t0 else -1.0
+        _LOGGER.info(
+            "慧尖卫星: 新一轮接管，取消旧 pipeline 轮（在途 %.1fs，收口预算 %.0fs）",
+            age, timeout,
+        )
         old_task.cancel()
         try:
             await asyncio.wait_for(asyncio.shield(old_task), timeout=timeout)
@@ -766,6 +785,17 @@ class EsphomeAssistSatellite(
         wake_word_phrase: str | None,
     ) -> int | None:
         """Handle pipeline run request."""
+        # v1.0.73 归因链·第①钉：impl 首行 INFO = "设备请求确已到 HA 且应答必将在
+        # 本 tick 发出"。与设备串口"No Response"对表一刀两断：此有彼无=下行半开
+        # （应答死在路上）；此无=请求未达/订阅缺失。放 impl 不放 wrapper——
+        # 保住 wrapper 零新增全局引用（v1043 提取执行纪律），且异常兜底仍回
+        # error=True，证词为"处理死在①之后"。
+        _LOGGER.info(
+            "慧尖卫星: 收到设备开轮请求 is_wake=%s wake_word=%r conv=%s → 应答随后发出",
+            bool(flags & VoiceAssistantCommandFlag.USE_WAKE_WORD),
+            wake_word_phrase,
+            conversation_id,
+        )
         # Clear audio queue
         self._stream_end_pending = False   # v1.0.41 审查 S4：新一轮流，清上轮兜底标记
         while not self._audio_queue.empty():
@@ -848,6 +878,7 @@ class EsphomeAssistSatellite(
             _run_pipeline_round(),
             "esphome_assist_satellite_pipeline",
         )
+        self._pipeline_task_t0 = asyncio.get_running_loop().time()  # ③钉的年龄基准
         self._pipeline_task.add_done_callback(self.handle_pipeline_finished)
 
         return port

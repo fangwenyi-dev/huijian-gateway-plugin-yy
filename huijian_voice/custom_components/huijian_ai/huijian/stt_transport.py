@@ -85,6 +85,11 @@ class SttTransport(WsTransport):
                 return None, "WebSocket connection unavailable"
             self._drain_stale()
             frames = 0
+            # v1.0.73 归因链·④钉年龄基准（与卫星端③钉成对）。用 loop.time 而非
+            # time.monotonic：recognize 会被测试以最小命名空间提取执行（v1043/v1045
+            # 纪律），asyncio 是本法已有硬依赖，不为此引入新全局符号。
+            loop = asyncio.get_running_loop()
+            t0 = loop.time()
             try:
                 await asyncio.wait_for(self.send_hello(), _SEND_TIMEOUT_S)
                 await asyncio.wait_for(
@@ -97,6 +102,14 @@ class SttTransport(WsTransport):
                 await asyncio.wait_for(
                     self.send_message({"type": "listen", "state": "stop"}),
                     _SEND_TIMEOUT_S)
+            except asyncio.CancelledError:
+                # v1.0.73 归因链·④钉（发送相）：外部取消=HA 管线把这轮拆了
+                # （新轮接管/barge-in/实体移除）——下一轮的"清掉残留"从此有据
+                # 可查；取消必须原样上抛（吞了=任务取消纪律被破）。
+                self.logger.warning(
+                    "STT 事务被外部取消（发送相 在途%.1fs 已发%d帧）——本轮被 HA 侧拆掉",
+                    asyncio.get_running_loop().time() - t0, frames)
+                raise
             except Exception as err:  # noqa: BLE001（含 TimeoutError）
                 self.logger.warning("STT 发送段失败（已发 %d 帧）: %s", frames, err)
                 await self.restart_connection(f"STT 发送段失败: {err}")
@@ -109,6 +122,13 @@ class SttTransport(WsTransport):
                         if data.type in ["stt", "tts"]:
                             text = data.text
                             break
+            except asyncio.CancelledError:
+                # v1.0.73 归因链·④钉（等转录相）：转录还没到、这轮先被拆——
+                # 稍后网关回话时消费端已消失，30s 交付判死随之出现，闭环成链。
+                self.logger.warning(
+                    "STT 事务被外部取消（等转录相 在途%.1fs 已发%d帧）——本轮被 HA 侧拆掉",
+                    asyncio.get_running_loop().time() - t0, frames)
+                raise
             except TimeoutError:
                 self.logger.warning("STT 等待转录超时（%ds，已发 %d 帧）",
                                     timeout, frames)

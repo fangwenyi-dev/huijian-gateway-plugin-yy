@@ -362,9 +362,15 @@ def _build_drain_harness():
     class FakeLog:
         def __init__(self):
             self.warnings = []
+            self.infos = []
 
         def warning(self, fmt, *args):
             self.warnings.append(fmt % args)
+
+        # v1.0.73 归因链·③钉在 drain 取消点新增 INFO（拆轮者自报年龄）——
+        # 桩随生产日志面同步；本文件断言只看 warnings，不受影响。
+        def info(self, fmt, *args):
+            self.infos.append(fmt % args)
 
         def debug(self, *a):
             pass
