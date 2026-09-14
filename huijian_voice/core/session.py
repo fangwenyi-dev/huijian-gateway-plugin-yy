@@ -72,8 +72,10 @@ class BaseSession:
     # 挂起，且挂在 _send_lock 内：同会话 pong/hello 全部堵死并堆积；ws 又是
     # heartbeat=None，服务端零自保，恢复全靠对端重连。与生成侧同构收口：
     # 发送有界，超时=按断连处理（truncated 语义由各调用点承接）。正常帧发送
-    # 微秒级，5s 触发即确凿异常，WARN 不致刷屏。
-    _SEND_TIMEOUT_S = 5.0
+    # 微秒级，触发即确凿异常，WARN 不致刷屏。
+    # v1.0.70（深审⑧）：5.0→3.0。预算对账=整流 52 + 在飞帧 ≤3 + 收口 stop
+    # ≤3 = 58 ≤ 客户端 60-2s 网络余量；此值是求和项，改动须同看 const ⑧注释。
+    _SEND_TIMEOUT_S = 3.0
 
     async def _send(self, coro_fn) -> bool:
         async def _locked() -> bool:
@@ -244,11 +246,18 @@ class TtsSession(BaseSession):
             # 连带 asr 同池排队（STT 停摆），数百 MB 样本驻留（OOM）。默认
             # require_token=false，LAN 未认证单帧即可触发。截断优于拒绝：播报
             # 保序出声，WARN 留痕对账。
+            cap_truncated = False
             if len(text) > _TTS_TEXT_CAP:
                 logger.warning("[TTS] detect 文本 %d 字超上限 %d，截断合成"
                                "（防单帧全栈 DoS）: %r",
                                len(text), _TTS_TEXT_CAP, text[:30])
                 text = text[:_TTS_TEXT_CAP]
+                # v1.0.70（深审②根治）：cap 截断也是"缺尾巴"——此前只 WARN，
+                # 半截音频按"正常收束"交回 → HA 以**原文哈希**把缺尾音频写进
+                # 消息缓存（内存+落盘、跨重启），同句永久只念前段且不自愈。
+                # 带旗收口 → 集成以 error 收口 → core 异常路径 pop 缓存，
+                # 播报照常出声（前段），只是不再投毒。
+                cap_truncated = True
             # 宽容：detect 为主形态；sentence_start/无状态带 text 也接单条合成（stop 回显忽略）
             # 审查修复（2026-09-21）：不再以 `and text` 静默忽略空文本 detect——自家
             # 契约「每 detect 必有 stop」，旧形态空 detect（tts.speak message=""，
@@ -256,21 +265,22 @@ class TtsSession(BaseSession):
             # 一整分钟且全程持有播报通道 _request_lock。空文本统一走整流：
             # split 出 0 句 → 零帧 → 干净 stop，顶替语义也一并保住。
             if state in ("detect", "sentence_start", None):
-                self._start_stream(text)
+                self._start_stream(text, cap_truncated)
         # listen stop 等在 tts 通道无义务响应（客户端不收口）
 
     async def on_binary(self, data: bytes) -> None:
         pass    # tts 通道无上行音频（卫星形态）
 
-    def _start_stream(self, text: str) -> None:
+    def _start_stream(self, text: str, cap_truncated: bool = False) -> None:
         # 新 detect 到达 → 旧流作废（generation 守卫，不发孤儿帧）
         self._gen += 1
         gen = self._gen
         if self._task and not self._task.done():
             self._task.cancel()
-        self._task = asyncio.create_task(self._stream(text, gen))
+        self._task = asyncio.create_task(self._stream(text, gen, cap_truncated))
 
-    async def _stream(self, text: str, gen: int) -> None:
+    async def _stream(self, text: str, gen: int,
+                      cap_truncated: bool = False) -> None:
         deadline = time.monotonic() + const.TTS_STREAM_BUDGET_S
         sent_any = False
         n_frames = n_bytes = 0
@@ -281,7 +291,8 @@ class TtsSession(BaseSession):
         # stop 帧带 truncated 声明，集成侧据此以 error 收口，HA 才不会被
         # 截断音频毒化消息哈希缓存（内存+落盘、跨重启命中）。顶替/取消路
         # 径本来就不发 stop（gen 守卫），不在此列。
-        truncated = False
+        # v1.0.70（深审②）：cap 截断（on_text 判定点）从出生就带旗。
+        truncated = cap_truncated
         try:
             # F5：预算必须覆盖「生成器挂起」——逐包用剩余预算做 wait_for，
             # native 合成卡死也能按点收束（finally 的 stop 义务不变）。

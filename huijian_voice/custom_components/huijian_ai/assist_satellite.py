@@ -979,6 +979,15 @@ class EsphomeAssistSatellite(
         frames_sent = 0
         first_chunk_ms: int | None = None
 
+        def _converge_response() -> None:
+            # v1.0.70（深审⑭尾收口）：一切非取消早退都必须落这两行。旧形态
+            # `except …: return` 直接跳过函数尾的 tts_response_finished +
+            # pipeline_state，实体卡"仍在应答"，后续唤醒被卡死旧 run 无声吞
+            # ——现场 12:14 案：播报半路夭折后连续两轮 8s 无应答×2 直到熔断。
+            # CancelledError 支豁免（打断方自会收口，维持原语义不动）。
+            self.tts_response_finished()
+            self._entry_data.async_set_assist_pipeline_state(False)
+
         try:
             if not self._is_running:
                 return
@@ -987,6 +996,7 @@ class EsphomeAssistSatellite(
                 _LOGGER.error(
                     "Only WAV audio can be streamed, got %s", tts_result.extension
                 )
+                _converge_response()
                 return
 
             audio_duration_sent = 0.0
@@ -1046,13 +1056,18 @@ class EsphomeAssistSatellite(
             except ValueError as err:
                 # fail-loud：非 WAV / 形态不符 / 头不完整 → 当场点名（旧实现是 error 行）
                 _LOGGER.error("[TTS] WAV 流不可播：%s", err)
+                _converge_response()
                 return
             except Exception as err:  # noqa: BLE001 —— 上游流异常也要留痕并收尾
                 # 加载项断连 / opus 解码失败 / 转换器异常等：这里必须吞掉并留痕，
                 # 否则异常会穿出后台任务变成 "Task exception was never retrieved"，
                 # 现场既看不到归因、收尾事件也依赖 finally（本处仍会走到 finally）。
                 # CancelledError 继承 BaseException，不受本分支影响。
+                # v1.0.70（深审⑭）：本 return 曾跳过尾收口——卫星卡"仍在应答"
+                # 的第一现场（12:14 案：夭折后两轮 8s 不应答直到熔断）。收口
+                # 必须先于 return，TTS_STREAM_END 由外层 finally 保送。
                 _LOGGER.error("[TTS] 下行流异常：%s", err)
+                _converge_response()
                 return
             finally:
                 with contextlib.suppress(Exception):

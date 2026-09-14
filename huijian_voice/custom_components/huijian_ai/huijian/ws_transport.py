@@ -326,13 +326,43 @@ class WsTransport:
                 self.should_reconnect = False
             cancel_scope.cancel()
 
+    # v1.0.70（深审⑨）：交付队列闸。writer 消费者（_handle_outgoing_messages）
+    # 卡在半开 TCP 的 ws.send_* 上时，_send_reader 缓冲灌满 → 这里无限阻塞，
+    # conversation.py 的裸 await 就是"LLM 通道一卡、对话兜底永久失效（不是
+    # 超时，是无限）"的现场形态。15s：正常交付进程内微秒级，触发即连接坏死。
+    _SEND_HANDOFF_TIMEOUT_S = 15.0
+
     async def send_message(self, message):
         """Send a message to the WebSocket server."""
         self.update_activity_time()
         if not self._send_writer:
             self.logger.warning("Cannot send message, send writer is not available")
             return
-        await self._send_writer.send(message)
+        try:
+            await asyncio.wait_for(
+                self._send_writer.send(message), self._SEND_HANDOFF_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            # 不 raise（保持调用方契约）：判连接坏死，后台换连——"下一次请求
+            # 在全新连接上开始"是本传输层的既有承诺（restart_connection）。
+            # 本条消息按丢弃处理：上层各自的 await_message/整流预算会把它
+            # 收敛成一次可见的失败，而不是无限挂起。
+            self.logger.warning(
+                "send_message 交付超 %.0fs——writer 卡死（半开 TCP/消费者消失），"
+                "主动换连自愈", self._SEND_HANDOFF_TIMEOUT_S)
+            self._schedule_restart("send stalled")
+
+    def _schedule_restart(self, reason: str) -> None:
+        """restart_connection 的火后即忘包装（send_message 内不可自等待：
+        它会拆掉本 writer 队列，而调用栈还挂在这条 send 上）。"""
+        try:
+            if self.hass is not None:
+                self.hass.async_create_background_task(
+                    self.restart_connection(reason), "huijian_ai_ws_restart")
+            else:  # 测试/无 hass 环境
+                asyncio.get_running_loop().create_task(
+                    self.restart_connection(reason))
+        except Exception:  # noqa: BLE001 自愈动作本身绝不能再炸调用栈
+            self.logger.exception("schedule restart failed: %s", reason)
 
     async def send_hello(self):
         await self.send_message(
@@ -402,12 +432,16 @@ class WsTransport:
     # 交付超时 = 判据：正常消费在进程内微秒级完成，永不触发；一旦触发消费者
     # 必已消失 → 丢帧并主动 break 走收口重连，让"下一次对话在全新连接上开始"
     # 的承诺真正成立。
-    # ⚠ 默认关闭（None=无限等，与历史行为逐比特一致）：stt/llm/mcp 通道在
-    # "连接即收到 hello/echo、消费端尚未挂上"的窗口里必须允许 reader 任务
-    # 排队等待——5s 判死会引发永断永重的风暴。只在 TtsTransport 启用：其服务
-    # 端契约是无请求不推帧（detect 应答才有帧/stop），且 stream() 以锁保证
-    # 恰好一个消费者，交付超时唯一的可能就是消费端已消失。
-    _CONSUMER_HANDOFF_TIMEOUT_S: float | None = None
+    # ⚠ 窗口约束：stt/llm/mcp 通道在"连接即收到 hello/echo、消费端尚未挂上"
+    # 的窗口里必须允许 reader 任务排队等待——5s 判死会引发永断永重的风暴。
+    # v1.0.70（深审⑨）：None（无限等）→ 30.0。挂账形态本身仍被窗口合法解释
+    # （hello 窗亚秒级、消费端 await_message 秒级挂上），但"消费端已消失"
+    # 不再等于 reader 永挂、is_connected 恒真、任务组永拆不干净——30s 判死
+    # 换连自愈。5s 会误杀冷启动、30s 只杀真僵尸。
+    # TtsTransport 覆写 5.0：其服务端契约是无请求不推帧（detect 应答才有
+    # 帧/stop），且 stream() 以锁保证恰好一个消费者，交付超时唯一可能就是
+    # 消费端已消失，判得更快。
+    _CONSUMER_HANDOFF_TIMEOUT_S: float | None = 30.0
 
     async def _deliver(self, writer, item) -> bool:
         """把一条消息交给消费端；返回 False = 消费端已消失，调用方须收口。"""
@@ -479,6 +513,13 @@ class WsTransport:
                 # v1.0.65（T3 顺带）：ping 也在半开 TCP 上裸 await 的点位——
                 # 挂住=heartbeat 任务僵死、ws.closed 永不翻转，短路不了任何东西。
                 await asyncio.wait_for(self._current_ws.ping(), 10)
+                # v1.0.70（深审⑩）：ping 成功=链路层活动，计入活动时间。
+                # 旧形态 _last_activity_time 只认用户收发帧，aiohttp 又不把
+                # PING/PONG 递进 `async for`——健康的闲置链路照样被 180s 空闲
+                # 监控判死自杀，首唤付冷握手+15s 连接闸。计入后：TCP 活着
+                # 且心跳在走=连接保温；空闲监控退化为真僵尸兜底（心跳僵死
+                # 且无用户流量才落刀）。
+                self.update_activity_time()
         except Exception as err:
             self.ws_log("heartbeat ping failed: %s", err)
 

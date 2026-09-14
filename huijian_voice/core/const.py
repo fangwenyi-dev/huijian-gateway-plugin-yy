@@ -7,7 +7,7 @@ from pathlib import Path
 APP_NAME = "huijian_voice"
 # 裸 docker build 会把 ENV 烘成占位值 0.0.0：毒值不得穿透成对外版本
 _env_ver = os.environ.get("HUIJIAN_VERSION", "")
-APP_VERSION = _env_ver if _env_ver and _env_ver != "0.0.0" else "1.0.69"
+APP_VERSION = _env_ver if _env_ver and _env_ver != "0.0.0" else "1.0.70"
 
 
 def addon_version() -> str:
@@ -63,8 +63,13 @@ FRAME_SAMPLES = SAMPLE_RATE * FRAME_MS // 1000   # 960
 FRAME_BYTES = FRAME_SAMPLES * 2                  # s16le = 1920B PCM/帧
 
 # 超时预算（服务器侧收尾必须早于客户端预算，防滞留帧污染下一请求，契约 §6-5）
-STT_RESULT_BUDGET_S = 55.0    # 客户端等 stt 帧 60s（stt.py:109）
-TTS_STREAM_BUDGET_S = 55.0    # 客户端整流 fail_after 60（tts_transport.py:38）
+# v1.0.70（深审⑧算术钉死）：预算不是单数字，是「整流 + 在飞帧发送 + 收口
+# stop 发送」的总和对账。旧值 55+5+5=65s > 客户端 60s——超时竞跑现场表现=
+# 客户端先收 60s 断连、服务器迟到的 stop 帧成下一条残留（"清掉上一轮残留"
+# 每轮一条）。现：52 + 3 + 3 = 58 ≤ 60-2（2s 网络余量），发送闸见
+# session._SEND_TIMEOUT_S；三行数字改任何一个都必须重算这条和。
+STT_RESULT_BUDGET_S = 52.0    # 客户端等 stt 帧 60s（stt.py:109）
+TTS_STREAM_BUDGET_S = 52.0    # 客户端整流 fail_after 60（tts_transport.py:38）
 LLM_TURN_BUDGET_S = 50.0      # 客户端外层 fail_after 60（conversation.py:73-80）
 CONNECT_GATE_S = 14.0         # 客户端 ensure_connected 15s 上限——upgrade 前禁止慢操作
 

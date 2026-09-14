@@ -20,6 +20,10 @@ from .session import SESSION_BY_CHANNEL
 
 logger = logging.getLogger("huijian.ws")
 
+# v1.0.70（深审⑪）：三通道全客户并发上限（正常 LAN：卫星×个位数 + 小程序
+# 零星，32 倍裕量取 64）。见 _ws_handler 闸内注释。
+_MAX_SESSIONS = 64
+
 try:
     CTX_KEY: web.AppKey = web.AppKey("huijian_ctx", object)   # aiohttp>=3.9
 except AttributeError:                                        # 老版本回退
@@ -97,6 +101,17 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
         return _auth_fail(request, "invalid token")
     if require and not provided:
         return _auth_fail(request, "token required")
+
+    # v1.0.70（深审⑪）：会话总量闸。heartbeat=None 保留——:8000 的 WS 消费
+    # 端除 HA 集成（aiohttp 自动回 PONG）外还有嵌入式/小程序形态，服务端
+    # 主动 PING 对不回 PONG 的旧客户端=错杀；半开回收交给集成侧 55s 心跳+
+    # 180s 空闲监控（ws_transport ⑨⑩已闭环）。无上限的 sessions 集是事件
+    # 循环卡死场景的放大器（泄漏会话无读超时、永不走 finally）——设硬闸
+    # 并点名拒绝，泄漏堆不满也看得见。
+    if len(ctx.sessions) >= _MAX_SESSIONS:
+        logger.warning("[WS] 会话数 %d 已达上限 %d，拒绝 %s 通道新连接（疑似泄漏/风暴）",
+                       len(ctx.sessions), _MAX_SESSIONS, channel)
+        return web.json_response({"message": "too many sessions"}, status=503)
 
     ws = web.WebSocketResponse(heartbeat=None, max_msg_size=1 << 16, compress=False)
     await ws.prepare(request)

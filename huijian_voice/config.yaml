@@ -5,7 +5,7 @@
 # 产品边界五理由）。本文件键序与注释风格沿用慧尖网关加载项模板。
 # ═══════════════════════════════════════════════════════════════════
 name: 慧尖HA语音插件
-version: "1.0.69"
+version: "1.0.70"
 slug: huijian_voice
 description: 慧尖局域网语音助手服务器——本地 STT/TTS/NLU，零必填配置即用，执行走 HA 意图 REST
 url: 'https://github.com/fangwenyi-dev/huijian-gateway-plugin-yy'
@@ -18,8 +18,12 @@ init: false
 # 内部对 HA REST 做惰性重试，不阻塞 HA。
 startup: system
 
-# 存活判据：WS 端点端口（[HOST] 宏 = 宿主监听，host_network 前提）
-watchdog: tcp://[HOST]:8000
+# 存活判据（v1.0.70 深审⑪根修）：必须是 HTTP 应用层探活。旧值 tcp://…:8000
+# 由内核 backlog 完成 SYN 即算"活"——事件循环整冻（LLM 无限挂/池饿死等病）
+# 时 Supervisor 永远看不到，"一切正常"地表死。/healthz 走 aiohttp 路由、真
+# 过事件循环（core/ws_server.py 注册），卡死=GET 超时=按 watchdog 连击重启。
+# （[HOST] 宏 = 宿主监听，host_network 前提）
+watchdog: http://[HOST]:8000/healthz
 
 # ── Ingress 管理页（同款慧尖网关 nginx 模式）────────────────────────
 # nginx 监听宿主 8001，仅放行 127.0.0.1 与 Supervisor 网段；

@@ -8,6 +8,23 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
+
+# 「tests」命名空间抢占：个别发行包会把带 __init__.py 的顶层 tests/ 直接装进
+# site-packages（本机实证 D:\progrem\python\Lib\site-packages\tests）。常规包
+# 优先级高于无 __init__ 的命名空间目录——一旦存在就遮蔽仓内 tests/，
+# `from tests.test_fast_path import ...` 当场 ImportError。此处显式把仓内
+# tests 注册为该命名空间的唯一路径，环境无关地钉死解析（测试运行时无人依赖
+# site 侧 tests 包：那是发行方的自测试目录）。
+import types  # noqa: E402
+
+_TESTS_DIR = str(HERE / "tests")
+_existing = sys.modules.get("tests")
+if _existing is None or not any(_TESTS_DIR in str(p) for p in getattr(_existing, "__path__", [])):
+    _pkg = types.ModuleType("tests")
+    _pkg.__path__ = [_TESTS_DIR]
+    _pkg.__package__ = "tests"
+    sys.modules["tests"] = _pkg
+
 os.environ["HUIJIAN_DATA"] = tempfile.mkdtemp(prefix="huijian_test_")
 os.environ.setdefault("HUIJIAN_NLU_DATA", str(HERE / "nlu_data"))
 

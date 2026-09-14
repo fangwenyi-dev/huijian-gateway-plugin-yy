@@ -88,7 +88,12 @@ def test_slug_and_naming():
     # （见 DOCS FAQ 灾备串）。
     assert cfg["image"].endswith("/fangwenyi-dev/huijian-gateway-plugin-yy")
     assert cfg["arch"] == ["amd64", "aarch64"]
-    assert cfg["watchdog"].startswith("tcp://")
+    # v1.0.69（深审⑪契约变更）：watchdog 判据 tcp://→http:// GET。tcp 由内核
+    # backlog 完成 SYN 即算活——事件循环整冻（LLM 无限挂/池饿死族）时
+    # Supervisor 永远看不见，"一切正常"地表死。/healthz 走 aiohttp 路由、
+    # 真过事件循环。回退成 tcp:// 即旧病复发，本钉不许摘。
+    assert cfg["watchdog"].startswith("http://[HOST]:8000/")
+    assert "healthz" in cfg["watchdog"]
 
 
 # ── 基础设施契约钉桩（infra 审查环教训：builder 文法/基镜像/静态根/Ingress）──

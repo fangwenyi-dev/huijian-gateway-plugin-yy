@@ -59,6 +59,7 @@ import math
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from collections import OrderedDict
 from typing import AsyncIterator, Optional
 from urllib.parse import urlparse
@@ -114,13 +115,15 @@ _CACHE_MAX_ITEMS = 256          # 播报句集收敛得快，256 句封顶
 _CACHE_MAX_BYTES = 4 << 20      # 4MB 硬闸（opus 32kbps×10s≈40KB/句，量级宽裕）
 _SPEED_MAX = 2.0                # v1.0.65 F10：与 Web 滑条上限对齐的服务端钳位
 # 2026-09-27 深审 R2 #1（F10 镜像残留）：补对称下界。generate 时长 ∝ 1/speed
-# 且不可取消（executor 线程+持 _gen_lock）：speed=0.05 → 单句 20×，session 55s
-# 预算只能截协程侧，线程照跑——逐轮漏占池线程（4C 机=8），池满 STT/播报全停摆
-# 且配置已持久化，重启复现。Web 滑条 0.6 的服务端对应物（留半档容差取 0.5）。
+# 且不可取消（executor 线程+持 _gen_lock）：speed=0.05 → 单句 20×，session
+# 整流预算（现 52s，见 const ⑧算术）只能截协程侧，线程照跑——逐轮漏占池线程
+# 会饿死他人；v1.0.70 ⑤起 TTS 走自建 2 工位池，漏占不再外溢，但闸本身保留。
+# Web 滑条 0.6 的服务端对应物（留半档容差取 0.5）。
 _SPEED_MIN = 0.5
 # 2026-09-27 深审 R2 #1b：排队等 _gen_lock 必须有界——前手是"坏 speed 的
 # 小时级 generate"或冷下载时，后来者无限排队=同一条漏线程路径。50s < session
-# 55s 预算：超时按本句合成失败收（truncated 语义由既有路径承接），不陪葬。
+# 整流预算（现 52s，见 const ⑧算术）：超时按本句合成失败收（truncated 语义
+# 由既有路径承接），不陪葬。
 _GEN_WAIT_S = 50.0
 # 2026-09-27 深审 R2 #4：采样率合理域单点闸。fmt rate 是外部字节（F13 同一
 # 威胁模型：坏端点/中间盒），rate=1 → ratio=16000 → 单块 8KB 触发 6.5×10⁷ 点
@@ -617,6 +620,15 @@ class TtsEngine:
         # 深审 R2 #6：模型加载/下载引擎级单飞门（后来者即返，不排队占线程）。
         self._load_gate = threading.Lock()
         self._loading = False
+        # v1.0.70（深审⑤）：合成/编码专用线程池——懒建（纯测试/云档引擎零线程）。
+        # 旧形态全部 run_in_executor(None,…) 挤 asyncio 默认 8 线程池（4C 机），
+        # 播报风暴期与 ASR 转写/TextCNN 预估/模型加载同池排队：识别一起停摆
+        # （"看得见连接听不见回答"的服务器版）。2 worker=合成与编码各占一位
+        # 可重叠；generate 真身仍由 _gen_lock 峰值=1 串行，多出的工位只给
+        # 编码/解码。卸载不 shutdown：常驻 2 条停泊线程，换取重载即时可用，
+        # 也免掉 shutdown/重建竞态。ASR 侧继续用默认池=天然隔离。
+        self._exec: Optional[ThreadPoolExecutor] = None
+        self._exec_lock = threading.Lock()
         # 深审 R2 #2/#7：指纹变更通知钩子（Service 布线；任何线程可调，
         # 实现方自带线程安全与幂等去重）。加载完成/钉扎置位与解除时触发。
         self.on_fp_change = None
@@ -837,6 +849,15 @@ class TtsEngine:
     # ── 生命周期 ────────────────────────────────────────────────
     def ready(self) -> bool:
         return self._tts is not None
+
+    def _pool(self) -> ThreadPoolExecutor:
+        """专用合成/编码池（懒建，见 __init__ ⑤注释）。"""
+        if self._exec is None:
+            with self._exec_lock:
+                if self._exec is None:
+                    self._exec = ThreadPoolExecutor(
+                        max_workers=2, thread_name_prefix="huijian-tts")
+        return self._exec
 
     def ensure_loaded(self) -> bool:
         # 深审 R2 #6（F3 残留邻接）：把下载挪出 `_lock` 解决了"持锁跨下载"，
@@ -1078,7 +1099,7 @@ class TtsEngine:
             if not load_checked:
                 # v1.0.52：冷启动/预热门持锁时，本轮到底等了多久必须留痕
                 t_wait = time.perf_counter()
-                ok = await loop.run_in_executor(None, self.ensure_loaded)
+                ok = await loop.run_in_executor(self._pool(), self.ensure_loaded)
                 logger.info("[TTS] 模型未就绪，本轮等待 %dms",
                             int((time.perf_counter() - t_wait) * 1000))
                 if not ok:
@@ -1112,7 +1133,7 @@ class TtsEngine:
                                 local_first_ms = self._note_local_first(t_turn, local_first_ms)
                                 yield pkt
                             continue
-            pcm16 = await loop.run_in_executor(None, self._synth, sent, sid, speed)
+            pcm16 = await loop.run_in_executor(self._pool(), self._synth, sent, sid, speed)
             if not pcm16:
                 # v1.0.55（定案②）：_synth 吞错产空句=整段播报缺一句，此前静默
                 # continue、半截音频以普通 stop 收口——HA 把缺尾音频当完整结果
@@ -1122,7 +1143,7 @@ class TtsEngine:
                 logger.warning("[TTS] 句子合成空产出，本轮声明截断: %r", sent[:30])
                 continue
             # F5：整句 opus 编码是 CPU 活，出事件循环
-            packets = await loop.run_in_executor(None, self._encode, pcm16)
+            packets = await loop.run_in_executor(self._pool(), self._encode, pcm16)
             if packets:
                 self._cache_put(key, packets)
             for pkt in packets:
@@ -1209,13 +1230,13 @@ class TtsEngine:
     async def synthesize_pcm(self, text: str) -> bytes:
         """整段 16k s16（管理台试听 wav 用）。"""
         loop = asyncio.get_running_loop()
-        if not self.ready() and not await loop.run_in_executor(None, self.ensure_loaded):
+        if not self.ready() and not await loop.run_in_executor(self._pool(), self.ensure_loaded):
             return b""
         sid = self.resolve_sid()
         speed = self._speed()
         out = b""
         for sent in split_sentences(text):
-            out += await loop.run_in_executor(None, self._synth, sent, sid, speed)
+            out += await loop.run_in_executor(self._pool(), self._synth, sent, sid, speed)
         return out
 
     # ── 云档（OpenAI 兼容 /audio/speech）────────────────────────
@@ -1310,7 +1331,7 @@ class TtsEngine:
                     pcm, src_rate = self._unwrap_audio(raw, default_rate)
                     loop = asyncio.get_running_loop()
                     for pkt in await loop.run_in_executor(
-                            None, self._resample_encode, pcm, src_rate):
+                            self._pool(), self._resample_encode, pcm, src_rate):
                         yield pkt
                     return
                 # ── 增量读：每块一到就解码出帧，不等整包 ──────────────

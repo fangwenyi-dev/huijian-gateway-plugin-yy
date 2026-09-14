@@ -206,6 +206,15 @@ async def async_convert_audio(
         finally:
             if process.stdin:
                 process.stdin.close()
+            # v1.0.70（深审④）：确定性关停源生成器。被打断/报错时 `async for`
+            # 只把自己解栈，**不会** aclose 上游——transport.stream() 帧连同
+            # _request_lock 一起悬置，锁释放从此赌 GC 时机（引用环时=一个 gc
+            # 代，现场=下一句首帧迟滞）。aclose 沿代链级联，正常耗尽路径上是
+            # no-op，全程抑制异常（本 finally 可能正跑在取消栈上）。
+            aclose = getattr(audio_bytes_gen, "aclose", None)
+            if aclose is not None:
+                with contextlib.suppress(BaseException):
+                    await aclose()
 
     writer_task = hass.async_create_background_task(
         write_input(), f"{DOMAIN}_stt_ffmpeg"

@@ -55,8 +55,14 @@ def test_ws_transport_has_restart_connection():
     # （stt/llm/mcp 有"连接即回声、消费端未挂上"的合法排队窗口）
     assert "await self._recv_writer.send(msg.data)" not in src, \
         "reader 裸 send 复发 = 消费端消失后整条连接循环永卡"
-    assert "_CONSUMER_HANDOFF_TIMEOUT_S: float | None = None" in src, \
-        "基类默认必须保持无限等（改其它通道语义=重连风暴风险）"
+    # v1.0.70（深审⑨契约变更）：基类判死窗 None（无限）→ 30.0s。hello/echo
+    # 合法排队窗是亚秒~秒级，30s 不会误杀冷启动；None=消费端消失即 reader
+    # 永挂、is_connected 恒真、任务组永拆不干净（对话兜底无限挂第一现场）。
+    # 不许回 None，也不许压到秒级（重连风暴教训原文仍成立）。
+    assert "_CONSUMER_HANDOFF_TIMEOUT_S: float | None = 30.0" in src, \
+        "基类交付判死窗丢失（⑨回潮=LLM 僵尸 reader 永挂）"
+    assert "_SEND_HANDOFF_TIMEOUT_S" in src, \
+        "send_message 交付闸丢失（⑨：writer 卡死时裸 await=无限挂）"
     tts_src = TTS_TRANSPORT.read_text(encoding="utf-8")
     assert "_CONSUMER_HANDOFF_TIMEOUT_S = 5.0" in tts_src, \
         "TTS 通道未启用交付超时 = 僵尸 reader 复发入口"
