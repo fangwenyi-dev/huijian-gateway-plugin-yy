@@ -60,6 +60,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from collections import OrderedDict
 from typing import AsyncIterator, Optional
 from urllib.parse import urlparse
@@ -132,9 +133,13 @@ _GEN_WAIT_S = 50.0
 _RATE_MIN, _RATE_MAX = 8000, 192000
 # 2026-09-27 深审 R2 #5：data 块"多付"容忍。F16 只防声明>实付；声明<实付
 # （provider 把样本数当字节数写=2× 误差这类）时后半音频被当"尾块元数据"静默
-# 吞掉且记完整成功=缺尾毒化从反方向漏进。合法尾元数据（LIST/INFO/bext）量级
-# <10KB；超此丢弃量按撒谎处理（云故障→回落+钉扎，宁误杀坏嗓不误缓存缺尾）。
-_DROP_TOLERANCE = 65536
+# 吞掉且记完整成功=缺尾毒化从反方向漏进。
+# v1.0.85（P2）收紧：旧单一绝对 64KB 让"样本数谎"在短句（实付≤128KB）恰好
+# 溜过、又低于 O4 比值闸的 60 字豁免线=双闸失守。真尾元数据（LIST/INFO）
+# 量级 <10KB：绝对底线 16KB 放行一切诚实容器；相对项 20%×实付兜住任意规模
+# 的撒谎者（样本数谎恒为 50%，任何尺寸必 Catch）。
+_DROP_TOLERANCE = 16384         # 绝对底线（保持旧名兼容测试引用）
+_DROP_TOLERANCE_RATIO = 0.2     # 相对项：多付/实付 超此比按撒谎处理
 
 
 _DEFAULT_SID = 18   # 本地定案默认音色 zf_026（云失败回落唯一用嗓，音色归属条款③）
@@ -418,6 +423,7 @@ class _CloudOpusStream:
         self._nch = 0
         # 2026-09-27 深审 R2 #5：data 声明长度之外被钳掉的字节计数（多付侦账）。
         self._dropped = 0
+        self._payload_bytes = 0   # v1.0.85（P2）：data 声明内实付计数（相对闸分母）
         self._res = None
         self._enc = None
         self._pcm = bytearray()         # 待满帧的 16k s16le
@@ -469,8 +475,11 @@ class _CloudOpusStream:
                 raise RuntimeError(
                     f"云 TTS wav 声明长度未付满（data 块尚欠 {self._data_left}B，"
                     "疑似服务端撒谎截断，按云故障处理）")
-            # 深审 R2 #5（反方向同闸）：声明<实付——真实音频被钳当元数据丢弃。
-            if self._data_left is not None and self._dropped > _DROP_TOLERANCE:
+            # 深审 R2 #5（反方向同闸）+ v1.0.85（P2）相对化：多付超
+            # max(16KB, 20%×实付) 按撒谎收——绝对容忍单独用会让"样本数谎"
+            # 在短句恰好溜过（且短句被 O4 豁免=双闸失守、缺尾进无 TTL 盘缓存）。
+            _cap = max(_DROP_TOLERANCE, int(self._payload_bytes * _DROP_TOLERANCE_RATIO))
+            if self._data_left is not None and self._dropped > _cap:
                 raise RuntimeError(
                     f"云 TTS wav 声明长度后多付 {self._dropped}B（超出尾元数据"
                     "量级容忍，疑似按样本数撒谎声明=后半音频被吞，按云故障处理）")
@@ -577,6 +586,7 @@ class _CloudOpusStream:
                 self._dropped += len(chunk) - self._data_left
                 chunk = chunk[:self._data_left]
             self._data_left -= len(chunk)
+            self._payload_bytes += len(chunk)   # v1.0.85（P2）实付计数
         return self._frame_pcm(self._res.feed(chunk))
 
     def _frame_pcm(self, pcm16k: bytes) -> list:
@@ -854,6 +864,21 @@ class TtsEngine:
             self._notify_fp_change()
 
     # ── 生命周期 ────────────────────────────────────────────────
+    @staticmethod
+    def _model_gen_key(main_path: str, voices_path) -> tuple:
+        """v1.0.85（P6a）：模型代次指纹（主模型+voices 的 size/mtime_ns）。
+        同代=省电档卸载再载（输出逐比特一致是既有定案，缓存可留）；任何文件
+        替换（导入口/音色上传+重载）两个度量几乎必变→按换代清缓存。"""
+        def _st(p):
+            if not p:
+                return None
+            try:
+                s = Path(p).stat()
+                return (s.st_size, s.st_mtime_ns)
+            except OSError:
+                return "gone"
+        return (str(main_path or ""), _st(main_path), _st(voices_path))
+
     def ready(self) -> bool:
         return self._tts is not None
 
@@ -982,7 +1007,17 @@ class TtsEngine:
                     logger.error("[TTS] 模型目录缺 espeak-ng-data/：含英文字母的句子"
                                  "将合成失败，请重导 kokoro-multi-lang 完整包")
                 self._tts = tts
-                self._cache.clear(); self._cache_bytes = 0   # 换代模型：旧音频作废
+                # v1.0.85（P6a）：旧形态每次成功加载都无条件清缓存——与 unload
+                # 侧「同代重载输出逐比特一致、缓存刻意保留（省电档秒回旧帧）」
+                # 的承诺直接矛盾：省电档首个含 miss 的轮一过，整张 LRU 白丢。
+                # 代次指纹=主模型+voices 的 (size, mtime)；上传换嗓走「重载模型」
+                # =unload→load，内容变指纹必变→照清，语义与旧行为在换代面等价。
+                _gk = self._model_gen_key(str(main), voices_path)
+                if _gk == getattr(self, "_loaded_gen_key", None):
+                    logger.info("[TTS] 同代模型重载（省电档回来），保留句级缓存")
+                else:
+                    self._cache.clear(); self._cache_bytes = 0   # 换代模型：旧音频作废
+                self._loaded_gen_key = _gk
                 self.last_used = time.time()
                 logger.warning("[TTS] Kokoro multi-lang 已加载（%d 音色），sid=%s",
                                tts.num_speakers, self.settings.get("tts.sid", 18))
@@ -1264,6 +1299,15 @@ class TtsEngine:
 
     async def synthesize_pcm(self, text: str) -> bytes:
         """整段 16k s16（管理台试听 wav 用）。"""
+        # v1.0.85（P5）：与播报轮同闸——旧形态试听不在 _round_busy 内，
+        # 句间被省电档 reaper 卸模型 → 快照 None 空产、半截 wav 无告警发回。
+        self._round_busy += 1
+        try:
+            return await self._synthesize_pcm_round(text)
+        finally:
+            self._round_busy -= 1
+
+    async def _synthesize_pcm_round(self, text: str) -> bytes:
         loop = asyncio.get_running_loop()
         if not self.ready() and not await loop.run_in_executor(self._pool(), self.ensure_loaded):
             return b""

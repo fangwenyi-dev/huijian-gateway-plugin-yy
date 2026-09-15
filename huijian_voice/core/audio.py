@@ -89,9 +89,15 @@ class OpusPcmEncoder:
                 chunk = chunk + b"\x00" * (step - len(chunk))  # 尾帧零填充（集成侧 audio.py:152-154 同法）
             try:
                 yield self._e.encode(chunk, frame_size=const.FRAME_SAMPLES)
-            except Exception as e:  # 单帧失败=静音跳过，不中断整流
-                logger.debug("[音频] opus 编码失败: %s", e)
-                continue
+            except Exception as e:
+                # v1.0.85（P3）：旧形态 debug 跳帧"不中断整流"——跳掉的是
+                # 60ms 音频，句却以整句完整进句级 LRU 与 HA 盘缓存=永久可闻
+                # 爆点且永不自愈，违「一切缺尾必须显性收口」全链纪律（v1.0.55
+                # 定案②同源）。改 raise：本句失败穿出 stream_opus → session
+                # 异常口 truncated=True → stop(truncated) → 集成 error 收口，
+                # 缓存不毒；前段照常出声。
+                logger.error("[音频] opus 编码失败（本句按缺尾收口，不跳帧）: %s", e)
+                raise
 
 
 # ── PCM 工具 ─────────────────────────────────────────────────────
