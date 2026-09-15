@@ -716,9 +716,21 @@ class EsphomeAssistSatellite(
         异常整栈落 HA 日志直接可归因。
         """
         try:
-            return await self._handle_pipeline_start_impl(
+            # v1.0.82（归因钉 B）：start 回调自计时——设备对应答只有 8s 预算。
+            # 本回调 >1s 即 WARN：把"HA 忙 8 秒"从玄学变成一行日志（现场 18:14
+            # 案设备侧只见"无应答"，HA 侧此前完全测不到迟滞在哪一层）。
+            _t0 = asyncio.get_running_loop().time()
+            result = await self._handle_pipeline_start_impl(
                 conversation_id, flags, audio_settings, wake_word_phrase
             )
+            _dt = asyncio.get_running_loop().time() - _t0
+            if _dt > 1.0:
+                _LOGGER.warning(
+                    "慧尖卫星: start 回调耗时 %.1fs（逼近设备 8s 应答预算）"
+                    "——HA 事件循环拥塞/订阅派发迟滞，设备侧可能判无应答",
+                    _dt,
+                )
+            return result
         except asyncio.CancelledError:
             raise
         except Exception:

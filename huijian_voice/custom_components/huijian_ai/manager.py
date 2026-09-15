@@ -182,6 +182,9 @@ class ESPHomeManager:
         "_conn_fail_since",
         "_conn_warn_at",
         "_unreachable_issue_open",
+        # v1.0.82：VA 链路活性看门狗（见 _va_link_watchdog docstring）。
+        "_va_watch_task",
+        "_link_up",
         "cli",
         "device_id",
         "domain_data",
@@ -224,6 +227,9 @@ class ESPHomeManager:
         self._conn_fail_count = 0
         self._conn_warn_at = 0.0
         self._unreachable_issue_open = False
+        # v1.0.82：看门狗任务句柄 + 连接位（on_connect 成功置真、on_disconnect 置假）
+        self._va_watch_task = None
+        self._link_up = False
 
     @property
     def _unreachable_issue_id(self) -> str:
@@ -525,6 +531,10 @@ class ESPHomeManager:
             async_delete_issue(self.hass, DOMAIN, self._unreachable_issue_id)
         try:
             await self._on_connect()
+            # v1.0.82：连接确认健康（含订阅/实体重建全链走通）——置连接位并
+            # 武装 VA 链路活性看门狗（仅具语音助手能力的设备）。
+            self._link_up = True
+            self._arm_va_link_watchdog()
         except InvalidAuthAPIError as err:
             _LOGGER.warning("Authentication failed for %s: %s", self.host, err)
             await self._start_reauth_and_disconnect()
@@ -840,6 +850,7 @@ class ESPHomeManager:
 
     async def on_disconnect(self, expected_disconnect: bool) -> None:
         """Run disconnect callbacks on API disconnect."""
+        self._link_up = False   # v1.0.82：看门狗停探（重连路上交给 ReconnectLogic）
         entry_data = self.entry_data
         hass = self.hass
         host = self.host
@@ -937,6 +948,68 @@ class ESPHomeManager:
                 type(err).__name__,
                 self.host,
             )
+
+    @callback
+    def _arm_va_link_watchdog(self) -> None:
+        """v1.0.82：一次性武装（reload/重连幂等）。只对宣告 voice_assistant
+        能力的设备开探——纯蓝牙/传感器板不背这个负担。"""
+        if self._va_watch_task is not None:
+            return
+        device_info = self.entry_data.device_info
+        if device_info is None:
+            return
+        try:
+            if not device_info.voice_assistant_feature_flags_compat(
+                    self.entry_data.api_version):
+                return
+        except Exception:  # noqa: BLE001 —— api_version 未就绪等：留待下次 on_connect
+            return
+        self._va_watch_task = self.entry.async_create_background_task(
+            self.hass, self._va_link_watchdog(), "huijian-va-link-watchdog")
+
+    async def _va_link_watchdog(self) -> None:
+        """v1.0.82：治"连接活着、派发死了"的半僵死链路（现场 09-15 18:14 案残余面）。
+
+        案征：设备侧 apiClients=1/vaSubscribed=1、keepalive pong 正常，但
+        VoiceAssistantRequest 8s 无人应答且不重连——aioesphomeapi 重连状态机只认
+        TCP 断，不认"应用层不应答"。设备侧 v2.1.48 补播救回了那句话的手感，
+        但链路可以一直瘫下去，直到风暴自停或人工 reload。
+
+        本看门狗每 ~90s（按 entry_id 确定性错峰 0~20s）在活连接上做一次
+        `device_info()` 应用层往返——它与 VoiceAssistantRequest 走同一条
+        读→派发→回写路径；6s 不回 = 该路径已瘫，`cli.disconnect()` 强制整
+        client 重建（经 on_disconnect 走 v1.0.49 全链：unload→重连→重建实体
+        →重新订阅），设备侧等待窗/补播无缝衔接。探针自身抛 APIConnectionError
+        = 本来就在断线路上，静默交给 ReconnectLogic。
+
+        诚实边界：若 HA **整个**事件循环瘫死，本协程同样得不到调度——那种
+        形态由设备侧熔断+升级梯+受控重启兜底（设备是独立进程，看得见到不到
+        应答）。本狗覆盖的是"循环活着、这条连接/派发半死"的大多数真实形态。
+        """
+        entry_key = self.entry.entry_id or ""
+        await asyncio.sleep(90.0 + (sum(map(ord, entry_key[-4:])) % 20))
+        while True:
+            await asyncio.sleep(90.0)
+            if not self._link_up:
+                continue  # 断线中：ReconnectLogic 的地盘，狗不插手
+            try:
+                await asyncio.wait_for(self.cli.device_info(), timeout=6.0)
+            except TimeoutError:
+                _LOGGER.warning(
+                    "%s: VA 链路半僵死（device_info 探测 6s 无回）"
+                    "→ 主动断连重建（设备侧补播/等待窗将无缝续起）",
+                    self.entry.title,
+                )
+                try:
+                    await self.cli.disconnect()
+                except Exception:  # noqa: BLE001 —— 断开失败也已达目的
+                    pass
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:  # noqa: BLE001 —— 连接类异常=正在重连路上
+                _LOGGER.debug(
+                    "%s: VA 链路探测连接异常（交给 ReconnectLogic）: %s",
+                    self.entry.title, err)
 
     async def on_connect_error(self, err: Exception) -> None:
         """Start reauth flow if appropriate connect error type."""

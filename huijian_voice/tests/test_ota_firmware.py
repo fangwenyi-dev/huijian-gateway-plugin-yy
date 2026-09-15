@@ -483,11 +483,11 @@ def test_repo_lock_integrity():
         assert urls and all(str(u).startswith("https://") for u in urls), \
             "至少一源且全 https（GitHub→Gitee 容灾序）"
         assert r.get("notes_zh"), "对外话术必填（内部文档禁发约束下的最小必要说明）"
-    cur = next(r for r in rels if r["version"] == "2.1.47")
+    cur = next(r for r in rels if r["version"] == "2.1.48")
     assert cur["sha256"] == \
-        "3286b5ecefdb2758cd9bc7231ab8cf265bd713a87c95a441b4c141fe2bb2db0f", \
-        "2.1.47 sha 与固件仓构建实测对账不符（源：0513gujian commit 1d6e11d 消息）"
-    assert cur["size"] == 2858944
+        "9a4c2685884ee35631a831ade8476fb4238d06f317bdea772ceb0a7de3a0b9e7", \
+        "2.1.48 sha 与固件仓构建实测对账不符（源：0513gujian commit a6cdf91 消息）"
+    assert cur["size"] == 2859488
 
 
 # ── v1.0.74 OTA 真下发：/api/firmware/dispatch + 集成中继视图 + 面板接线 ──

@@ -1,5 +1,31 @@
 # 变更日志
 
+## [1.0.82] - 2026-09-15 VA 链路活性看门狗（"HA 忙 8 秒"从玄学变可测+自愈）
+
+承接固件 v2.1.48（补播救用户手感）。本批治**链路本身**：18:14 案定性——设备
+apiClients=1/vaSubscribed=1、keepalive pong 正常，但 VoiceAssistantRequest
+8s+ 无人应答，且 ReconnectLogic 不重建（它只认 TCP 断，不认应用层不应答），
+链路可瘫到风暴自停或人工 reload。
+
+- **manager.py：VA 链路活性看门狗**——对宣告 voice_assistant 能力的设备，
+  连接确认健康后 ~90s 一次（entry_id 确定性错峰）在活连接上做 `device_info()`
+  应用层往返探针（与 VoiceAssistantRequest 同读→派发→回写路径）：6s 无回
+  = 该路径已瘫 → WARN「半僵死」+ `cli.disconnect()` 强制整 client 重建
+  （走 v1.0.49 全链：unload→重连→实体重建→重新订阅），设备侧 v2.1.48 补播
+  无缝衔接。on_disconnect 停探、幂等单装、非 VA 设备不装。诚实边界已写入
+  docstring：HA **整个**事件循环瘫死时本狗同样失调度（该形态由设备侧熔断+
+  升级梯+受控重启兜底——设备是独立进程）；本狗覆盖"循环活着、这条连接半死"
+  的大多数真实形态。
+- **assist_satellite.py：start 回调自计时（归因钉 B）**——>1s WARN 点名
+  "逼近设备 8s 应答预算，HA 循环拥塞/派发迟滞"。下次 18:14 型案发，HA 日志
+  直接给出迟滞测量值，不再隔端猜。
+- 新钉 `test_v1082_va_link_watchdog.py` 7 项：arm 门禁三态行为真身（无 VA
+  不装/幂等单装/device_info 缺位不装）+ 循环体源级结构钉（探针往返/超时
+  断连/停探位/WARN 在位）+ __slots__ 静态复跑 + 计时钉。
+- **固件仓登记 v2.1.48**（熔断补播版上架）：资产挂本仓 v1.0.82 release，
+  test_repo_lock_integrity 现行对账同步迁移（sha/size 与固件仓 commit a6cdf91 互证）。
+- 六源齐 1.0.82；全量回归绿/基线 9 平台红存续。
+
 ## [1.0.81] - 2026-09-15 固件仓登记 v2.1.47（连续对话生效版上架）
 
 面板「固件仓」仍显 2.1.44 非故障：列表真源=firmware.lock.json **登记制**（运行
