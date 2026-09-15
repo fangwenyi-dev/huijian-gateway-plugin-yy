@@ -57,6 +57,10 @@ stream = _extract_stream()
 
 
 class FakeTransport:
+    # v1.0.83：真 TtsTransport 新增整轮总闸类常量——stream() 经 self 取值，
+    # 鸭子必须同备（与真类同值；改一边必改另一边）。
+    _ROUND_TOTAL_BUDGET_S = 720.0
+
     def __init__(self, timeout_ok=True):
         self._request_lock = asyncio.Lock()
         self.sent = []

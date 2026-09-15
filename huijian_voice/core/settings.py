@@ -46,7 +46,7 @@ DEFAULTS: dict[str, Any] = {
         "cloud": {"provider": "", "base_url": "", "api_key": "", "model": "", "voice": "",
                   "response_format": "", "sample_rate": 0,   # 预设透传项（空/0=pcm@24k）
                   # v1.0.52 云档分段读超时（秒）：停摆端几秒内失败→云→本地回落即时触发；
-                  # total 刻意放宽（> const.TTS_STREAM_BUDGET_S 55s），慢而持续产出
+                  # total 刻意放宽（> const.TTS 逐帧间隙窗 52s），慢而持续产出
                   # 的合成不得被误砍。first_byte 覆盖「响应头 + 首个音频数据块」，
                   # 整包回音频（非流式）的平台可适当调大。
                   "connect_timeout_s": 8.0, "first_byte_timeout_s": 6.0,

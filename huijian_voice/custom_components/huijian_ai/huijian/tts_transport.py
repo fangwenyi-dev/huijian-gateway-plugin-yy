@@ -16,7 +16,7 @@ ATTR_TRANSPORT = "tts_transport"
 
 # v1.0.45：detect 前排残料的兜底预算。主清理通道是 restart_connection
 # （取消即断连，残留随旧连接物理消失）；本兜底只处理"残料恰好已在 reader
-# 上排队"的窄窗口，不为一条仍在流的旧流干等（加载项预算 55s）。
+# 上排队"的窄窗口，不为一条仍在流的旧流干等（加载项最坏收口 58s，v1.0.83 口径）。
 _STALE_DRAIN_BUDGET_S = 1.0
 
 
@@ -44,6 +44,13 @@ class TtsTransport(WsTransport):
     # 本通道服务端契约：无 detect 不推帧、stream() 以锁保证恰好一个消费者，
     # 交付超时唯一可能就是消费端已消失（见基类注释，其它通道保持无限等）。
     _CONSUMER_HANDOFF_TIMEOUT_S = 5.0
+    # v1.0.83（修#1 三端算术，见加载项 const ⑧块）：整轮总闸。timeout 参数
+    # 自本版起是**逐帧间隙窗**（收到任何一条消息即重置）——只杀停滞、不杀
+    # "慢而持续"的长播报；永动僵尸流由本总闸有界收口。
+    # 对账链：加载项间隙 52+2×3 ≤ 60-2（本类逐帧窗）；加载项整轮 660+2×3
+    # ≤ 720-2（本闸）；720 < 1200（固件 T_LIVE_HARD_CAP）——HA 链永远先于
+    # 设备收口，协议截断先于看门狗。
+    _ROUND_TOTAL_BUDGET_S = 720.0
 
     def __init__(self, hass, entry, endpoint, attr_endpoint, logger=None):
         super().__init__(hass, entry, endpoint, attr_endpoint, logger)
@@ -55,7 +62,7 @@ class TtsTransport(WsTransport):
         # 静音），且被取消消费留下的残帧残 stop 会继续毒化后续每一轮，形成
         # 持久的"张冠李戴"错位（台架实证：请求1收 20 帧杂流+stop、请求2
         # TIMEOUT）。整段对话上锁串行是唯一解；等锁的下一句最迟在前一句
-        # 收口（加载项 55s 预算）后出声。
+        # 收口（加载项最坏收口 58s，v1.0.83 口径）后出声。
         self._request_lock = asyncio.Lock()
         # v1.0.48（P5）：服务端音色指纹——tts 通道建连欢迎帧 + web 保存推送
         # 双通道递送（base._on_server_settings tap）。restart_connection 不换
@@ -118,8 +125,12 @@ class TtsTransport(WsTransport):
         作废（最小跨任务复现钉在 tests，本机 py313+anyio 实证报错原文与
         现场一字不差）。现改为单调 deadline + 逐条 receive 独立短 scope：
         enter/exit 恒在同一次 `__anext__` 步内（中间无 yield），yield 点
-        零存活 scope，任务切换安全；总超时语义不变（deadline 自 detect
-        起算一次）。
+        零存活 scope，任务切换安全。
+        v1.0.83（修#1）：`timeout` 自本版起是**最大帧间隙窗**（每收到一条
+        消息即重置，只杀停滞）；整轮另有 `_ROUND_TOTAL_BUDGET_S` 总闸兜
+        永动僵尸流。旧"整轮 60s 墙钟"会把慢而持续的长播报腰斩（truncated/
+        timeout → error 收口 → 设备只播前半段），与加载项 52s 整流、固件
+        v2.1.42 帧间隙心跳语义三端对账见类常量注释。
         """
         async with self._request_lock:
             if not await self.ensure_connected():
@@ -145,10 +156,20 @@ class TtsTransport(WsTransport):
                     yield Dict(error=f"Send detect failed: {err}")
                     return
                 deadline = time.monotonic() + timeout
+                round_deadline = time.monotonic() + self._ROUND_TOTAL_BUDGET_S
                 while True:
-                    remaining = deadline - time.monotonic()
+                    now = time.monotonic()
+                    if now >= round_deadline:
+                        # v1.0.83：整轮总闸——逐帧窗心跳语义下必须有界收口的
+                        # 第二道（永动僵尸流），正常播报远够不到。
+                        self.logger.warning(
+                            "TTS 整轮总闸超时（%ss）: %r",
+                            self._ROUND_TOTAL_BUDGET_S, text[:40])
+                        yield Dict(error="Response timeout")
+                        return
+                    remaining = min(deadline, round_deadline) - now
                     if remaining <= 0:
-                        # 总预算耗尽（语义等价旧 fail_after 整轮超时）
+                        # 帧间隙窗耗尽（timeout 语义=v1.0.83 起为逐帧停滞判定）
                         yield Dict(error="Response timeout")
                         return
                     eof = False
@@ -162,6 +183,8 @@ class TtsTransport(WsTransport):
                     if _scope.cancelled_caught:
                         yield Dict(error="Response timeout")
                         return
+                    # 任何一条消息到达 = 服务端还活着：间隙窗重置（心跳语义）
+                    deadline = time.monotonic() + timeout
                     if eof:
                         # v1.0.65（TTS 深审 T1）：EOF=连接被静默关闭（旧版
                         # for-else 支）。不 error 收口，截断音频会被 core 缓存

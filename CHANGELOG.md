@@ -1,5 +1,47 @@
 # 变更日志
 
+## [1.0.83] - 2026-09-16 播报截尾根治批（长播报"不能完整播报"三端账对齐 + 串轮/句柄双修）
+
+现场（用户报）：与固件通讯时**有时**播报不完整。审计定案三 bug（按解释力排序）：
+
+- **#1 三端预算账不拢（主犯）**：加载项整流 `52s` 与集成 transport `60s` 都是
+  **每轮总墙钟**（session.py 单 deadline 逐帧只减不重置；tts_transport 同型），
+  而固件 v2.1.42/44 已改帧间隙心跳语义并按"4000 字≈950s 音频→1200s 硬顶"推导
+  设备窗——长文本（speed=1 约 700 字以上、慢语速再砍半）必在第 52 秒被
+  "整流超预算截断"，truncated 按设计以 error 收口 → STREAM_END 早发 → 设备
+  只播前半段。修法=语义拆两道：`TTS_STREAM_BUDGET_S(52)` 收窄为**最大帧间隙窗**
+  （每发一帧/每收一条消息即重置，只杀停滞不杀慢而持续，覆盖 v2.1.44 合法
+  最坏间隙 46s），新增整轮总闸（加载项 `TTS_STREAM_TOTAL_BUDGET_S=660` +
+  集成 `_ROUND_TOTAL_BUDGET_S=720`）；对账链 52+2×3≤60-2、660+2×3≤720-2、
+  720<1200 三端排序不变（服务端先收口，客户端只兜底）。const ⑧块重写。
+- **#2 旧轮迟到 TTS 事件灌入新轮**：`_drain_stale_pipeline` 2s 超时后旧 run
+  仍活着继续产事件，其 TTS_END 在 on_pipeline_event 无条件起推流——上一轮
+  音频带着 STREAM_START 进新轮（设备端 play_reset 掐掉新轮上行；v1.0.55 的
+  WARN"半句播报请查此条"点名的正是此型，只留痕未设防；固件 v2.1.32 免疫窗
+  只护 RUN_END/ERROR，STREAM 事件裸奔）。修法=`_is_stale_round_event`：事件
+  恒在当前轮任务内联派发，`current_task` 与内层 `_pipeline_task`/外层
+  `_round_outer_task` 双身份均不匹配即丢弃（WARN 留痕）。
+- **#3 推流句柄永不清零**：`_tts_streaming_task` 只在开轮/中止清 None，自然
+  完成后句柄残留 → 之后任何无播报轮的 RUN_END 判据失真，
+  `assist_pipeline_state` 卡 True。修法=建任务时挂 `_clear_tts_streaming_task`
+  done-callback（身份判据防陈旧回调误清）。
+- **顺带根修（#2 基座暴露）**：core `async_accept_pipeline_from_satellite` 会
+  把 `_pipeline_task` **重绑**为它的内层 run 任务（entity.py:505），v1.0.49 的
+  done-callback"完成的就是当前任务"判据从此每轮合法完成都误入 stale 分支
+  （复位逻辑不落）——`_round_outer_task` 记账 + `handle_pipeline_finished`
+  双身份判据修复。
+- 新钉 `test_v1083_playback_budget_round_guard.py` 11 项：trickle 不截断
+  （行为真身，旧形态必红）、停滞真死/整轮总闸收口存续、三端预算算术对账
+  （新⑧口径）、stale 甄别行为+接线、句柄清零、外层身份记账；test_v1055
+  `_FakeTransport` 夹具同步补 `_ROUND_TOTAL_BUDGET_S`。
+- 已知残留（在案不遮蔽）：云档 `_CLOUD_TOTAL_TIMEOUT_S=120s` 仍是云合成侧
+  总闸（超长云播报另议）；core `_internal_on_pipeline_event` 的实体态推进
+  发生在本甄别之前，属残留面（设备端免疫窗兜底）。
+- 六源齐 1.0.83（含 www/version.json 双键）；全量 1385 项：新增红 0，既存
+  6 平台红存续（SIGALRM/环境 ×4、write_status 环境、merge_case），镜像
+  [store] 同型 2 红随主副本同因（SIGALRM）；发布批处理时 yyjicheng 镜像
+  随 CI 同步本批 assist_satellite.py/tts_transport.py。
+
 ## [1.0.82] - 2026-09-15 VA 链路活性看门狗（"HA 忙 8 秒"从玄学变可测+自愈）
 
 承接固件 v2.1.48（补播救用户手感）。本批治**链路本身**：18:14 案定性——设备

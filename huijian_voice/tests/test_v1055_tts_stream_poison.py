@@ -300,6 +300,10 @@ class _Reader:
 
 
 class _FakeTransport:
+    # v1.0.83：真 TtsTransport 的整轮总闸常量——stream() 直接取 self 属性，
+    # 鸭子实例必须同备（与真类同值，改一边必改另一边）。
+    _ROUND_TOTAL_BUDGET_S = 720.0
+
     def __init__(self, items):
         self._request_lock = asyncio.Lock()
         self._recv_reader = _Reader(items)

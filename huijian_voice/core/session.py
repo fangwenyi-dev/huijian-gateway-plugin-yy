@@ -10,7 +10,8 @@
   llm  : 收 listen detect(mode=prompt,text) ⇒ {"type":"text","state":"start"} →
          逐句 {"type":"text","state":"sentence_end","data":…} →
          终帧 {"type":"text","state":"end"}（客户端 end 判定先于 type，且 end 必发）。
-通用：ping→pong；不主动 close；预算：stt 结果 55s / tts 流 55s / llm 回合 50s；
+通用：ping→pong；不主动 close；预算：stt 结果 52s / tts 逐帧间隙 52s+整轮总闸
+660s（v1.0.83，见 const ⑧块）/ llm 回合 50s；
 JSON 宽容解析（未知键忽略）；token 校验在 HTTP 握手层（401 不升级）。
 """
 from __future__ import annotations
@@ -281,7 +282,17 @@ class TtsSession(BaseSession):
 
     async def _stream(self, text: str, gen: int,
                       cap_truncated: bool = False) -> None:
-        deadline = time.monotonic() + const.TTS_STREAM_BUDGET_S
+        # v1.0.83（修#1）：旧形态是单一整轮墙钟（52s 到点即截）——长播报
+        # （句句正常产出、只是总合成超 52s）被必然腰斩，现场=播报缺尾。
+        # 现拆两道窗（对账见 const ⑧ v1.0.83 块）：
+        #   • gap_deadline：最大帧间隙窗（TTS_STREAM_BUDGET_S），每成功发出
+        #     一帧即重置——只杀"停滞"，不杀"慢而持续"（与云档 _CLOUD_READ/
+        #     TOTAL 的拆段哲学同构，v2.1.42 固件心跳语义的源头侧对齐）；
+        #   • total_deadline：整轮总闸（TTS_STREAM_TOTAL_BUDGET_S）——帧帧
+        #     合法但永不停产的僵尸流由它有界收口。
+        now0 = time.monotonic()
+        gap_deadline = now0 + const.TTS_STREAM_BUDGET_S
+        total_deadline = now0 + const.TTS_STREAM_TOTAL_BUDGET_S
         sent_any = False
         n_frames = n_bytes = 0
         engine: dict = {}
@@ -298,13 +309,19 @@ class TtsSession(BaseSession):
             # native 合成卡死也能按点收束（finally 的 stop 义务不变）。
             it = self.ctx.tts.stream_opus(text, engine_out=engine).__aiter__()
             while True:
-                remain = deadline - time.monotonic()
+                now = time.monotonic()
                 if gen != self._gen:
                     # v1.0.45：顶替截断必须留痕——现场"播报下发 N 帧"里 N 小于
                     # 整句应有帧数、又无别的告警行时，唯一解释就是这条。
                     logger.warning("[TTS] 旧流被新播报顶替截断：已发 %d 帧 / %r",
                                    n_frames, text[:30])
                     return
+                if now >= total_deadline:
+                    truncated = True
+                    logger.warning("[TTS] 整流超预算截断（整轮总闸 %ss）：已发 %d 帧 / %r",
+                                   const.TTS_STREAM_TOTAL_BUDGET_S, n_frames, text[:30])
+                    return
+                remain = min(gap_deadline, total_deadline) - now
                 if remain <= 0:
                     truncated = True
                     logger.warning("[TTS] 整流超预算截断：已发 %d 帧 / %r",
@@ -329,6 +346,8 @@ class TtsSession(BaseSession):
                 sent_any = True
                 n_frames += 1
                 n_bytes += len(pkt)
+                # 帧已产出并发出 = 合成活着：间隙窗重置（心跳语义）。
+                gap_deadline = time.monotonic() + const.TTS_STREAM_BUDGET_S
         except asyncio.CancelledError:
             # 顶替的常态路径：_start_stream 直接 cancel，旧 task 死在任意
             # await 点上、根本走不到循环顶的 gen 检查——不留痕就永远查无此人。

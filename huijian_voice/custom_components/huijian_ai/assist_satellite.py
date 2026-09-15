@@ -295,6 +295,13 @@ class EsphomeAssistSatellite(
 
         self._is_running: bool = True
         self._pipeline_task: asyncio.Task | None = None
+        # v1.0.83（#2/#3 基座）：外层轮任务（_run_pipeline_round）。core 的
+        # async_accept_pipeline_from_satellite 会把 _pipeline_task **重绑**为它
+        # 自己的内层 run 任务（entity.py:505），于是本文件写入的外层身份失绑——
+        # done-callback 的"完成的就是当前任务"判据（v1.0.49）在内层重绑下永远
+        # 失配（合法完成也走 stale 分支），且旧 run 尸事件甄别需要同时认两把
+        # 身份。外层句柄单独记账，事件甄别/_pipeline_finished 复位共用。
+        self._round_outer_task: asyncio.Task | None = None
         # v1.0.73 归因链：拆轮者要能报出被拆轮的年龄（单调时钟，仅日志用）
         self._pipeline_task_t0: float = 0.0
         # v1.0.40：有界（≈5s 语音）——消费停顿时丢最旧，绝不无界涨内存
@@ -478,8 +485,53 @@ class EsphomeAssistSatellite(
         self._is_running = False
         self._stop_pipeline()
 
+    @callback
+    def _is_stale_round_event(self) -> bool:
+        """v1.0.83（修#2）：当前调用栈是否属于**已失活的旧轮**。
+
+        core 在 run 协程内联派发事件（PipelineRun.process_event →
+        _internal_on_pipeline_event → 本实体 on_pipeline_event），故事件的
+        `current_task()` 恒等于该 run 的身份任务。正常形态下它是当前轮的内层
+        任务（core accept 重绑后的 `_pipeline_task`）或外层轮任务（intercept
+        路径直接 `_internal_on_pipeline_event(RUN_END)` 时跑在外层里）。
+        `_drain_stale_pipeline` 超时（2s 收不掉、WARN"若伴随杂流/半句播报请查
+        此条"点名的正是这型）后，旧 run 仍活着并继续产事件——旧轮的 TTS_END
+        若被放行，将带着上一轮音频在新轮里起推流（现场=半句播报/串音/新轮
+        上行被 play_reset 掐掉）。设备端 v2.1.32 的 stale 免疫窗只护
+        RUN_END/ERROR，STREAM 事件不设防，故 HA 侧必须自己收口。
+        判据全空（首轮/拆除窗口）放行——甄别只拦"有当前轮且不匹配"的事件。
+        """
+        run = asyncio.current_task()
+        if run is None or self._pipeline_task is None:
+            return False
+        return (run is not self._pipeline_task
+                and run is not self._round_outer_task)
+
+    @callback
+    def _clear_tts_streaming_task(self, task: asyncio.Task) -> None:
+        """v1.0.83（修#3）：推流任务自然收口后清句柄。
+
+        RUN_END 的"本轮无 TTS"判据是 `_tts_streaming_task is None`
+        （:600 区），而旧实现句柄只在开轮/中止两处清零——播过一次 TTS 之后
+        任何无播报轮的 RUN_END 永不再复位 `assist_pipeline_state`（卡 True）。
+        done-callback 在协程体（含尾收口 `_converge_response`）跑完后触发，
+        清零不抢在本轮 TTS 收尾之前；被替换的陈旧回调不动当前句柄。
+        """
+        if self._tts_streaming_task is task:
+            self._tts_streaming_task = None
+
     def on_pipeline_event(self, event: PipelineEvent) -> None:
         """Handle pipeline events."""
+        # v1.0.83（修#2）：旧轮尸体的迟到事件一律就地丢弃——不得建推流、
+        # 不得向设备转发、不得动本文件内的轮状态。core 的实体态推进发生
+        # 在 _internal_on_pipeline_event（本覆写之前），属残留面，见钉文件
+        # 头注；设备端仍有 v2.1.32 免疫窗兜底。
+        if self._is_stale_round_event():
+            _LOGGER.warning(
+                "慧尖卫星: 丢弃旧轮迟到事件 %s（drain 超时残留，不得灌入当前轮）",
+                event.type,
+            )
+            return
         try:
             event_type = _VOICE_ASSISTANT_EVENT_TYPES.from_hass(event.type)
         except KeyError:
@@ -539,13 +591,15 @@ class EsphomeAssistSatellite(
                 if feature_flags & (
                     VoiceAssistantFeature.SPEAKER | VoiceAssistantFeature.API_AUDIO
                 ) and (stream := tts.async_get_stream(self.hass, tts_output["token"])):
-                    self._tts_streaming_task = (
-                        self.config_entry.async_create_background_task(
-                            self.hass,
-                            self._stream_tts_audio(stream),
-                            "esphome_voice_assistant_tts",
-                        )
+                    tts_task = self.config_entry.async_create_background_task(
+                        self.hass,
+                        self._stream_tts_audio(stream),
+                        "esphome_voice_assistant_tts",
                     )
+                    # v1.0.83（修#3）：完成即清句柄，RUN_END 的"本轮无 TTS"
+                    # 判据不再被历史轮永久顶住。
+                    tts_task.add_done_callback(self._clear_tts_streaming_task)
+                    self._tts_streaming_task = tts_task
                     if feature_flags & VoiceAssistantFeature.API_AUDIO:
                         # 只吃 API 音频、无 media_player 自取能力的设备（慧尖板
                         # v2.1.11 起只宣告 API_AUDIO）：url 事件对它无意义，
@@ -890,6 +944,10 @@ class EsphomeAssistSatellite(
             _run_pipeline_round(),
             "esphome_assist_satellite_pipeline",
         )
+        # v1.0.83：记住外层身份——下面的 await（async_accept_pipeline_from_
+        # satellite）一旦开跑，core 会把 _pipeline_task 重绑成它的内层 run
+        # 任务；事件甄别与 done-callback 都需要外层这条身份。
+        self._round_outer_task = self._pipeline_task
         self._pipeline_task_t0 = asyncio.get_running_loop().time()  # ③钉的年龄基准
         self._pipeline_task.add_done_callback(self.handle_pipeline_finished)
 
@@ -930,7 +988,12 @@ class EsphomeAssistSatellite(
         （:653）——归零后新一轮会落到默认管道（唤醒词→管道映射静默失效）。
         现在用"完成的就是当前任务"作判据，陈旧回调只留一行 debug。
         """
-        if task is not None and task is not self._pipeline_task:
+        if (task is not None and task is not self._pipeline_task
+                and task is not self._round_outer_task):
+            # v1.0.83：done-callback 挂在**外层**轮任务上，而 core accept 已把
+            # _pipeline_task 重绑为内层 run 任务——只比 _pipeline_task 会让每轮
+            # 合法完成都误判 stale（v1.0.49 的复位逻辑从此不落），真·旧轮回调
+            # （barge-in）又与当前外层不同、照样拦住。两把身份都要认。
             _LOGGER.debug("Stale pipeline task finished; leaving state untouched")
             return
         self._stop_udp_server()
