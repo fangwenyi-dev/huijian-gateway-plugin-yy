@@ -375,7 +375,13 @@ class TtsSession(BaseSession):
                 stop_frame = {"type": "tts", "state": "stop"}
                 if truncated:
                     stop_frame["truncated"] = True
-                await self.send_json(stop_frame)
+                # v1.0.84（O3）：「每 detect 必有 stop」是尽力而为——漏发时
+                # 集成侧靠逐帧间隙窗超时判死自愈（v1.0.83 语义），但归因必须
+                # 在此点名，否则现场只见客户端 timeout 不见服务端缺 stop。
+                if not await self.send_json(stop_frame):
+                    logger.warning("[TTS] stop 帧发送失败（对端已断/积压）——"
+                                   "本 detect 缺 stop 收口，集成侧将按间隙窗"
+                                   "超时判死自愈: %r", text[:30])
                 # v1.0.25：成功也留一行——「灯开了不播报」必须能逐跳对账
                 # （加载项下发 → 集成收帧 → 卫星推流 → 设备出声），此前成功全静默。
                 if sent_any:

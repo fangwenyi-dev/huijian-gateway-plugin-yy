@@ -600,6 +600,12 @@ class TtsEngine:
         self._tts = None
         self._lock = threading.Lock()
         self._busy = 0          # 在飞合成数（卸载避让；审查 F1）
+        # v1.0.84（B1）：整轮在飞计数——v1.0.83 把整流墙钟 52s 放开到 660s
+        # 总闸后，长播报轮可跨 reaper 的 60s tick：_busy 只罩单句 generate
+        # 瞬间，句间空隙 + last_used 只在轮首尾刷新 = 省电档轮中卸载、余句
+        # 全空产缺尾。stream_opus 入口/出口各 ±1（只在事件循环线程读写，
+        # 不持 _lock——unload 侧只读比较，晚一拍下一次 tick 自会跳过）。
+        self._round_busy = 0
         # 审查修复（2026-09-21）：generate **并行**互斥。F1 只防跨代析构、
         # 不防同代并发——sherpa-onnx OfflineTts 前端（espeak-ng/jieba/pinyin
         # 通道）持共享可变状态，并发 generate 轻则两路音频互踩、重则 C++ 层
@@ -991,8 +997,9 @@ class TtsEngine:
 
     def unload(self) -> bool:
         with self._lock:
-            if self._busy:
-                logger.info("[TTS] 合成进行中，本轮跳过卸载")
+            if self._busy or self._round_busy:
+                # v1.0.84（B1）：_round_busy=有播报轮整体在飞（句间空隙也算）
+                logger.info("[TTS] 合成/整轮在飞，本轮跳过卸载")
                 return False
             self._tts = None
             # 缓存刻意不清：省电档卸载后，高频模板句仍可秒回旧帧（同代模型
@@ -1002,6 +1009,17 @@ class TtsEngine:
 
     # ── 合成 ────────────────────────────────────────────────────
     async def stream_opus(self, text: str, engine_out: dict | None = None) -> AsyncIterator[bytes]:
+        """v1.0.84（B1）：薄包装=整轮在飞闸。aclose/异常/正常耗尽三径均由
+        finally 释放；session 侧「每 detect 必有 aclose 收口」的既有纪律
+        （v1.0.48）保证本 finally 确定性落地，不赌 GC。"""
+        self._round_busy += 1
+        try:
+            async for pkt in self._stream_opus_round(text, engine_out):
+                yield pkt
+        finally:
+            self._round_busy -= 1
+
+    async def _stream_opus_round(self, text: str, engine_out: dict | None = None) -> AsyncIterator[bytes]:
         """逐句产裸 opus 帧（16k/mono/60ms）。云档失败回落本地（v4.1-②）。
 
         engine_out：可选出参 dict——本轮实际由哪个引擎发声写回
@@ -1042,6 +1060,22 @@ class TtsEngine:
                     self._cloud_fail_ts = 0.0      # 整流成功 = 解除钉扎
                     # 深审 R2 #2：解除即推裸云键（:fb 隔离期结束，恢复云嗓）
                     self._notify_fp_change()
+                    # v1.0.84（O4）：云"干净收尾但只合成前半"（服务端限长、
+                    # 字节自洽）旧形态记完整成功+入 HA 无 TTL 盘缓存=同句永久
+                    # 缺尾。比值闸：实际秒数 vs 文本/语速预期（4.5 字/s 账同
+                    # 固件 v2.1.44 语速自适应），<0.35× 按缺尾收口并开钉；
+                    # <60 字豁免（英文/符号/URL 文本预期虚高，防误杀正常轮）。
+                    audio_s = cloud_frames * const.FRAME_MS / 1000.0
+                    exp_s = len(text) / (4.5 * max(self._speed(), _SPEED_MIN))
+                    if len(text) >= 60 and audio_s < 0.35 * exp_s:
+                        logger.warning(
+                            "[TTS] 云产出时长/文本比异常（%.1fs vs 预期≈%.0fs，"
+                            "%d 字）→ 按云端限长缺尾收口（truncated+钉扎）: %r",
+                            audio_s, exp_s, len(text), text[:30])
+                        if engine_out is not None:
+                            engine_out["truncated"] = True
+                        self._cloud_fail_ts = time.monotonic()
+                        self._notify_fp_change()
                     return
                 except Exception as e:
                     # 断在首帧前或半途都记失败时刻、开启钉扎窗口。
