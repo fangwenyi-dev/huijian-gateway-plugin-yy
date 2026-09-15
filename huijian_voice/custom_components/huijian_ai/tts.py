@@ -2,6 +2,7 @@ import contextlib
 import logging
 import time
 from collections.abc import AsyncGenerator
+from datetime import timedelta
 
 import opuslib_next as opuslib
 from homeassistant.components.tts import TextToSpeechEntity as BaseEntity
@@ -11,6 +12,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.event import async_track_time_interval
 
 from .const import DOMAIN
 from .huijian import get_entry_data, tts_transport
@@ -100,6 +102,24 @@ class HuijianTtsEntity(BaseEntity):
     async def async_added_to_hass(self):
         _LOGGER.info("huijianTtsEntity.async_added_to_hass")
         await super().async_added_to_hass()
+
+        # v1.0.79（T7 恢复缺口根修）：TextToSpeechEntity 是 should_poll=False 的
+        # 推送实体——available 这个 property 一旦被求值为 False（停机/退避≥3 窗口），
+        # transport 随后连上也**没有任何事件**再求值它：现场实锤 tts.huijian_speech
+        # 卡"不可用"至下一轮条目 reload 才顺带救活（history.csv：每次恢复都伴随
+        # "" 重建，且 12:07 起播报全好状态永不回升）。周期复核只治状态卡面：
+        # 值不变不 write（不产生冗余事件）；async_on_remove 随实体摘除。
+        self._avail_last = self.available
+
+        def _avail_recheck(_now) -> None:
+            avail = self.available
+            if avail != self._avail_last:
+                self._avail_last = avail
+                self.async_write_ha_state()
+
+        self.async_on_remove(
+            async_track_time_interval(
+                self.hass, _avail_recheck, timedelta(seconds=30)))
 
     # ── v1.0.52：拆出的公共件（流式/整段两条路复用）─────────────────────
 

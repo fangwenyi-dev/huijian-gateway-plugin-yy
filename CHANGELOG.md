@@ -1,5 +1,22 @@
 # 变更日志
 
+## [1.0.79] - 2026-09-15 TTS 实体可用态自愈（"不可用"卡死根修）
+
+现场 history.csv 实锤：`tts.huijian_speech` 播报链路早已恢复、状态卡却永挂
+不可用——v1.0.65 T7 把 available 做成跟随 transport 的 property（停机退避≥3
+判不可用，方向正确），但宿主 `TextToSpeechEntity` 是 **should_poll=False** 的
+推送实体：被求成 False 之后再没有任何事件重新评估它。history 里历次"恢复"
+全部只发生在条目 reload 的实体重建瞬间（unavailable→""→available 三连形态），
+12:07 后更是播报连日正常而状态永不回升。
+
+- **`tts.async_added_to_hass` 挂 30s 周期复核**：值变才 `async_write_ha_state`
+  （不产冗余事件），`async_on_remove` 随实体摘除防定时器泄漏。T7 判据原样
+  不动（None→不可用 / 已连→可用 / 退避<3 仍可用）——只修"卡旧状态"，不放松
+  判据。stt/conversation 无 available property，不受此病波及（已核）。
+- 新钉 `tests/test_v1079_avail_selfheal.py` 2 项：接线三要素+值变才写；
+  T7 三形态禁动守卫。
+- 六源齐 1.0.79；全量回归绿/基线 9 平台红存续。
+
 ## [1.0.78] - 2026-09-15 固件仓表显示面瘦身（只列最新 2 版）
 
 - **面板 `www/index.html` loadOta**：固件仓表原为 `fw.items` 全量 foreach
