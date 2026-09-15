@@ -14,8 +14,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#1d1750">
 <title>慧尖HA语音插件</title>
-<link rel="stylesheet" href="css/huijian.css?v=1.0.79">
-<link rel="stylesheet" href="css/voice.css?v=1.0.79">
+<link rel="stylesheet" href="css/huijian.css?v=1.0.80">
+<link rel="stylesheet" href="css/voice.css?v=1.0.80">
 </head>
 <body>
 <!-- 「星辰大海」背景层（与网关加载项同一设计标准/同一固定种子＝同一片天）：
@@ -203,7 +203,7 @@
 <!-- ══ 设备/固件（OTA 方案 Phase 2：台账+固件仓+近场链接兜底，2026-09-23）══ -->
 <section id="tab-ota">
   <div class="card"><h3>卫星台账</h3>
-    <table id="otaDevTable"><thead><tr><th>设备</th><th>区域</th><th>在线</th><th>固件版本</th><th></th><th></th></tr></thead><tbody></tbody></table>
+    <table id="otaDevTable"><thead><tr><th>设备</th><th>区域</th><th>在线</th><th>固件版本</th><th></th><th>连续对话</th><th></th></tr></thead><tbody></tbody></table>
     <div id="otaDevNote" class="hint"></div>
     <div class="hint">版本由设备入驻（小程序配网/CMD20）时自动上报；HA 重启后等设备重报，「未上报」属正常态。
       「远程可用」徽标=该设备已暴露 OTA 接收口（固件 ≥v2.1.36 起支持）；现网固件为「近场链接」形态。</div>
@@ -302,7 +302,7 @@
 
 <script>
 "use strict";
-const CURRENT_VERSION = "1.0.79";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
+const CURRENT_VERSION = "1.0.80";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
 // 音色表 = kokoro-multi-lang-v1_1 官方 103 sid 全表（k2-fsa docs sid 表实证；
 // 标注=对用户上传试听样本的 CAM++ 声纹溯源榜：v1_1 不含晓晓/云扬，
 // sid18=zf_026 女声最似晓晓(0.454 全场最近)，sid81=zm_055 最似云扬）
@@ -734,7 +734,7 @@ async function loadOta(){
   const tb = $("#otaDevTable tbody"); tb.innerHTML="";
   const devs = dv.devices||[];
   if(!devs.length){
-    tb.innerHTML = `<tr><td colspan="6" class="mut">${dv.error ? esc0(dv.error) : "暂无已入驻卫星——小程序配网入驻后自动出现"}</td></tr>`;
+    tb.innerHTML = `<tr><td colspan="7" class="mut">${dv.error ? esc0(dv.error) : "暂无已入驻卫星——小程序配网入驻后自动出现"}</td></tr>`;
   }
   for(const d of devs){
     const tr=document.createElement("tr");
@@ -747,9 +747,19 @@ async function loadOta(){
       <td>${pill(d.online?"在线":"离线", d.online?"ok":"bad")}</td>
       <td>${fv}</td>
       <td>${badge}</td>
+      <td>${d.mac?`<button class="act" data-cont="${esc0(d.mac)}" data-on="${d.continuous_dialogue===true?1:0}">${d.continuous_dialogue===true?"开启中":d.continuous_dialogue===false?"已关闭":"需固件≥2.1.46"}</button>`:""}</td>
       <td>${_otaLatest?`<button class="act" data-issue="${esc0(d.mac||d.name)}" data-remote="${remote?1:0}">${remote?"下发":"发放链接"}</button>`:""}</td>`;
     tb.appendChild(tr);
   }
+  // v1.0.80：连续对话开关——中继到集成写设备 switch 实体（真源=设备 NVS，三边
+  // 同源回显）；None 态（固件旧）按钮仍可点，失败由服务端话术点名
+  tb.querySelectorAll("button[data-cont]").forEach(b=>b.onclick=async()=>{
+    try{
+      const r = await post("/api/device/continuous",{mac:b.dataset.cont, enabled:b.dataset.on!=="1"});
+      toast(r.success?(b.dataset.on!=="1"?"连续对话已开启":"连续对话已关闭"):("失败："+(r.error||"?")));
+    }catch(e){ toast("失败："+e.message); }
+    loadOta();
+  });
   // v1.0.74：有 ota_upgrade 接收口（≥v2.1.36）→真下发（离线等失败由服务端视图
   // 结构化折叠回显，面板不复装）；无接收口→保留签发链接备存形态
   tb.querySelectorAll("button[data-issue]").forEach(b=>b.onclick=()=>
@@ -988,6 +998,6 @@ $("#regenBtn").onclick = async ()=>{
   try { await post("/api/token/regenerate",{}); toast("已重置"); loadEndpoints(); } catch(e){ toast(e.message); }
 };
 </script>
-<script src="js/starsky.js?v=1.0.79"></script>
+<script src="js/starsky.js?v=1.0.80"></script>
 </body>
 </html>

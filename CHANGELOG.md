@@ -1,5 +1,29 @@
 # 变更日志
 
+## [1.0.80] - 2026-09-15 面板「连续对话」开关（三边同源：面板/HA/小程序）
+
+承接固件 v2.1.45/46（连续对话接入卫星主路径 + 设备实体）。本批把操作面
+并进加载项面板：设备表（升级 tab）新增「连续对话」列按钮，链路=
+面板 → core `POST /api/device/continuous` → 集成 `POST /api/huijian-ai/
+satellites/continuous` → `switch.turn_on/off` 设备实体 → 固件
+`setContinuousDialogue`（NVS `cDialogue` 唯一收口 + BLE 回读通知 + deferred
+publish 回显）。**真源在设备**——面板按钮显示的就是实体实时态
+（台账视图 `continuous_dialogue` 三态：True/False/None=固件 <v2.1.46 或离线），
+与小程序开关互相即时可见。
+
+- 集成 `huijian/http.py`：新 `HuijianSatelliteContinuousView`（requires_auth，
+  永不抛折叠 200 JSON，OTA 中继视图同纪律）；寻址走 unique_id 后缀契约
+  `-continuous_dialogue_switch`（aioesphomeapi build_unique_id=MAC-object_id，
+  与固件 set_object_id 一对一，两侧任何改名由钉拦截）；台账每设备补
+  `continuous_dialogue` 字段。
+- core `ota_api.py`：`/api/device/continuous` 纯转发（判据不装两面，桥断 502/
+  缺 mac 400/设备话术原样回显）。
+- 面板：设备表 6→7 列（空行 colspan 同步），按钮按态显示
+  「开启中/已关闭/需固件≥2.1.46」，点击翻转 → toast → 台账自动刷新。
+- 新钉 `tests/test_v1080_continuous_panel.py` 6 项：核心行为 4（happy 转发体
+  逐字/桥断/缺 mac/拒绝折叠）+ 集成契约源级 + 面板接线源级。
+- 六源齐 1.0.80；全量回归绿/基线 9 平台红存续。
+
 ## [1.0.79] - 2026-09-15 TTS 实体可用态自愈（"不可用"卡死根修）
 
 现场 history.csv 实锤：`tts.huijian_speech` 播报链路早已恢复、状态卡却永挂

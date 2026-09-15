@@ -18,6 +18,9 @@
                                   链接为备存形态，面板话术已如实降级；
                                   固件 v2.1.36+ 的 ota_services 非空后面板同键
                                   切真下发（集成侧已探测）。
+  POST /api/device/continuous  → {mac, enabled} 连续对话开关（v1.0.80）：中继
+                                  集成写设备 esphome switch 实体（真源=设备 NVS
+                                  cDialogue，HA/小程序/面板三边同源回显）。
 """
 from __future__ import annotations
 
@@ -201,8 +204,30 @@ def setup(app, ctx):
             "note": "设备已受理并立即下载（局域网约 1-3 分钟），成功后自动重启；"
                     "5-10 分钟后刷新台账核对版本号"})
 
+    async def _device_continuous(request):
+        """v1.0.80：面板「连续对话」开关 → 中继集成写设备 switch 实体。
+        真源在设备 NVS（cDialogue，HA/小程序/面板三边同源），本端点纯转发；
+        桥断/无实体/失败全折叠 JSON 永不抛（F-OTA-04 同纪律）。"""
+        body = await _json_body(request)
+        mac = str(body.get("mac", "")).strip()[:40]
+        if not mac:
+            return web.json_response({"success": False, "error": "mac 必填"}, status=400)
+        enabled = bool(body.get("enabled", False))
+        bridge_ok = bool(ctx.ha and getattr(ctx.ha, "ok", False))
+        if not bridge_ok:
+            return web.json_response({"success": False, "error": "HA 桥未连接"}, status=502)
+        ack = await ctx.ha.rest_write("POST", "/api/huijian-ai/satellites/continuous",
+                                      {"mac": mac, "enabled": enabled})
+        if not ack.get("success"):
+            logger.info("[连续对话] 中继拒绝 mac=%s: %s", mac, ack.get("error", "?"))
+            return web.json_response({"success": False,
+                                      "error": ack.get("error", "集成未受理")})
+        logger.info("[连续对话] mac=%s → %s", mac, "开" if enabled else "关")
+        return web.json_response({"success": True, "enabled": enabled})
+
     app.router.add_get("/api/devices", _devices)
     app.router.add_get("/api/firmware", _firmware)
     app.router.add_post("/api/firmware/download", _download)
     app.router.add_post("/api/firmware/issue", _issue)
     app.router.add_post("/api/firmware/dispatch", _dispatch)
+    app.router.add_post("/api/device/continuous", _device_continuous)

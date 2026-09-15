@@ -8,6 +8,7 @@ from aiohttp import web
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.http import KEY_HASS, HomeAssistantView
 
 from ..const import CONF_STT_ENTITY_ID, CONF_TTS_ENTITY_ID, DOMAIN
@@ -27,6 +28,7 @@ async def async_setup_https(hass: HomeAssistant):
     hass.http.register_view(HuijianDeviceInfoView)
     hass.http.register_view(HuijianSatellitesView)
     hass.http.register_view(HuijianSatelliteOtaView)
+    hass.http.register_view(HuijianSatelliteContinuousView)
 
 
 class HuijianHttpView(HomeAssistantView):
@@ -276,6 +278,8 @@ class HuijianSatellitesView(HuijianHttpView):
                 "fw_source": fw_source,
                 "fw_reported_at": rec.get("ts"),
                 "ota_services": ota_services,
+                # v1.0.80：面板「连续对话」列数据源（True/False/None=不可判）
+                "continuous_dialogue": _continuous_state(hass, entry),
             })
         return self.json({"devices": out})
 
@@ -343,6 +347,80 @@ class HuijianSatelliteOtaView(HuijianHttpView):
             return self.json({"success": False, "error": f"服务调用失败: {e}"[:160]})
         _LOGGER.info("[OTA] ota_upgrade 已下发 %s (mac=%s)", target.title, mac or "-")
         return self.json({"success": True, "service": svc.name})
+
+
+_CONT_SUFFIX = "-continuous_dialogue_switch"  # unique_id 契约：MAC-object_id（aioesphomeapi
+# build_unique_id 上游式）；object_id 由固件 v2.1.46 钉死 "continuous_dialogue_switch"
+
+
+def _find_continuous_entity(hass, entry):
+    """定位卫星条目的「连续对话」switch 实体（实体注册在设备条目下）。"""
+    reg = er.async_get(hass)
+    for ent in reg.async_entries_for_config_entry(entry.entry_id):
+        if (ent.entity_id.startswith("switch.")
+                and str(ent.unique_id or "").endswith(_CONT_SUFFIX)):
+            return ent.entity_id
+    return None
+
+
+def _continuous_state(hass, entry):
+    """True/False=实体在且可达；None=无实体（固件 <v2.1.46）或态不可判（离线）。"""
+    eid = _find_continuous_entity(hass, entry)
+    if eid is None:
+        return None
+    st = hass.states.get(eid)
+    if st is not None and st.state in ("on", "off"):
+        return st.state == "on"
+    return None
+
+
+class HuijianSatelliteContinuousView(HuijianHttpView):
+    """v1.0.80 连续对话开关（加载项面板用）：写设备同一个 esphome switch 实体
+    ——设备侧 setContinuousDialogue 是 NVS 唯一收口（BLE/HA/面板三边同源回显，
+    固件 v2.1.46 deferred publish）。永不抛折叠 200 JSON（OTA 中继视图同纪律）。"""
+
+    url = "/api/huijian-ai/satellites/continuous"
+    name = "api:huijian-ai:satellites-continuous"
+    requires_auth = True
+
+    async def post(self, request: web.Request):
+        hass = request.app[KEY_HASS]
+        try:
+            body = await request.json() or {}
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        mac = str(body.get("mac", "") or "").strip().lower()
+        entry_id = str(body.get("entry_id", "") or "").strip()
+        enabled = bool(body.get("enabled", False))
+        if not mac and not entry_id:
+            return self.json({"success": False, "error": "mac/entry_id 必填其一"})
+        target = None
+        for ent in hass.config_entries.async_loaded_entries(DOMAIN):
+            if not ent.data.get("host"):
+                continue
+            if (mac and str(ent.data.get("mac", "") or "").lower() == mac) or \
+               (entry_id and ent.entry_id == entry_id):
+                target = ent
+                break
+        if target is None:
+            return self.json({"success": False,
+                              "error": f"卫星台账无此设备（mac={mac or entry_id}）"})
+        eid = _find_continuous_entity(hass, target)
+        if eid is None:
+            return self.json({"success": False,
+                              "error": "该设备无「连续对话」实体（固件需 ≥v2.1.46）"})
+        try:
+            await hass.services.async_call(
+                "switch", "turn_on" if enabled else "turn_off",
+                {"entity_id": eid}, blocking=True)
+        except Exception as e:
+            _LOGGER.warning("[连续对话] 调实体失败 %s: %s", eid, e)
+            return self.json({"success": False, "error": f"服务调用失败: {e}"[:160]})
+        _LOGGER.info("[连续对话] %s → %s (mac=%s)", eid,
+                     "on" if enabled else "off", mac or entry_id)
+        return self.json({"success": True, "entity_id": eid, "enabled": enabled})
 
 
 def parse_tts_stt_options(raw):
