@@ -460,6 +460,34 @@ def test_ledger_fw_version_chain(tmp_path):
     assert '"fw_version":' in cf, "config_flow 建账时持久化 fw_version"
 
 
+# ── v1.0.77 仓库真 lock 完整性钉（发布账本手滑防线）──────────────────
+
+REPO_LOCK = Path(__file__).resolve().parents[1] / "firmware.lock.json"
+
+
+def test_repo_lock_integrity():
+    """_doc 纪律机械化：结构健全 + 现行版本条目与构建实测对账（禁凭记忆填值）。"""
+    import re
+    data = json.loads(REPO_LOCK.read_text(encoding="utf-8"))
+    rels = data["releases"]
+    assert rels, "发布锁不得为空表"
+    for r in rels:
+        v = str(r.get("version", ""))
+        assert re.fullmatch(r"\d+\.\d+\.\d+", v), f"version 须 x.y.z：{v!r}"
+        assert r.get("file") == f"huijian-s3-{v}.bin", "落盘名与版本必须对应"
+        assert re.fullmatch(r"[0-9a-f]{64}", str(r.get("sha256", ""))), "sha256 缺=拒上架"
+        assert isinstance(r.get("size"), int) and r["size"] > 0, "size 须正整数"
+        urls = r.get("urls") or []
+        assert urls and all(str(u).startswith("https://") for u in urls), \
+            "至少一源且全 https（GitHub→Gitee 容灾序）"
+        assert r.get("notes_zh"), "对外话术必填（内部文档禁发约束下的最小必要说明）"
+    cur = next(r for r in rels if r["version"] == "2.1.44")
+    assert cur["sha256"] == \
+        "34385d817e51fb7b12705d4d1257fec76dd07a6b54c5528833d326d38144f212", \
+        "2.1.44 sha 与固件仓构建实测对账不符（源：0513gujian commit edd67f0 消息）"
+    assert cur["size"] == 2858112
+
+
 # ── v1.0.74 OTA 真下发：/api/firmware/dispatch + 集成中继视图 + 面板接线 ──
 
 def _dispatch_ctx(store, ha):
