@@ -7,7 +7,7 @@ from pathlib import Path
 APP_NAME = "huijian_voice"
 # 裸 docker build 会把 ENV 烘成占位值 0.0.0：毒值不得穿透成对外版本
 _env_ver = os.environ.get("HUIJIAN_VERSION", "")
-APP_VERSION = _env_ver if _env_ver and _env_ver != "0.0.0" else "1.0.75"
+APP_VERSION = _env_ver if _env_ver and _env_ver != "0.0.0" else "1.0.76"
 
 
 def addon_version() -> str:
@@ -68,11 +68,12 @@ FRAME_BYTES = FRAME_SAMPLES * 2                  # s16le = 1920B PCM/帧
 # 客户端先收 60s 断连、服务器迟到的 stop 帧成下一条残留（"清掉上一轮残留"
 # 每轮一条）。现：52 + 3 + 3 = 58 ≤ 60-2（2s 网络余量），发送闸见
 # session._SEND_TIMEOUT_S；三行数字改任何一个都必须重算这条和。
-# 固件 v2.1.42 下行对账：本预算同时是设备端帧间隙窗的上界——卫星
-# T_DL_STALL=30s 必须严格小于 52s（整流真死由我们显性截断 stop+truncated
-# 先收口，设备看门狗只兜 HA 搬运僵死，绝不抢在协议收口前动手）；卫星
-# 45s/90s 封顶已改心跳语义（只约束"等首包"段），>45s 长回复不再被设备误杀。
-# 改本值须同步固件台架 [VA] 预算对账钉（test_firmware.py ADDON_* 外置钉）。
+# 固件 v2.1.44 下行对账：本预算同时是设备端帧间隙窗的上界——卫星
+# T_DL_STALL=48s（v2.1.42 定 30s，v2.1.44 按语速钳位底线 0.5 的冷长句合法
+# 间隙 44.4s×1.05 自适应加宽）必须严格小于 52s（整流真死由我们显性截断
+# stop+truncated 先收口，设备看门狗只兜 HA 搬运僵死，绝不抢在协议收口前动手）；
+# 卫星 45s/90s 封顶已改心跳语义（只约束"等首包"段），>45s 长回复不再被设备误杀。
+# 改本值/分句上限/语速下限任一项，须同步固件台架 [VA] 预算对账钉。
 STT_RESULT_BUDGET_S = 52.0    # 客户端等 stt 帧 60s（stt.py:109）
 TTS_STREAM_BUDGET_S = 52.0    # 客户端整流 fail_after 60（tts_transport.py:38）
 LLM_TURN_BUDGET_S = 50.0      # 客户端外层 fail_after 60（conversation.py:73-80）

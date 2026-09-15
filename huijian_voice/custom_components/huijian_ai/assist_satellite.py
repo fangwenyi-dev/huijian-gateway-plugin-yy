@@ -1009,6 +1009,14 @@ class EsphomeAssistSatellite(
         started = loop.time()
         frames_sent = 0
         first_chunk_ms: int | None = None
+        # v1.0.76（归因钉）：连续块发送时刻跟踪——收口一行给出跨度/速率/最大
+        # 块隙。现场 09:38/10:37 两案：服务器秒级发完，设备却 0.42~0.44× 摊拍
+        # 收货——"播报像断开"的真凶在 HA→设备这一跳，但推流循环饥饿（数据晚到
+        # /事件循环被抢）与 aioesphomeapi writer/TCP/设备侧两型此前不可分。
+        # rate≈1.0 而设备跨度大 → writer/网络/设备侧；rate<1 → 本循环被饿，
+        # max_gap 直接暴露最长一次等待（数据没来 or 没被调度）。
+        _last_send_t: float | None = None
+        _max_gap_ms = 0
 
         def _converge_response() -> None:
             # v1.0.70（深审⑭尾收口）：一切非取消早退都必须落这两行。旧形态
@@ -1057,6 +1065,12 @@ class EsphomeAssistSatellite(
 
                     samples_in_chunk = len(chunk) // (sample_width * sample_channels)
                     frames_sent += samples_in_chunk
+                    now_t = loop.time()
+                    if _last_send_t is not None:
+                        gap_ms = int((now_t - _last_send_t) * 1000)
+                        if gap_ms > _max_gap_ms:
+                            _max_gap_ms = gap_ms
+                    _last_send_t = now_t
                     if first_chunk_ms is None:
                         first_chunk_ms = int((loop.time() - started) * 1000)
                         # M13（2026-09-23 深审）：背压基准此前从 STREAM_START
@@ -1109,11 +1123,23 @@ class EsphomeAssistSatellite(
                 # 灯照常执行、播报全哑。流式下只能在流尾判定，故在此点名。
                 _LOGGER.warning("[TTS] 音频 0 帧（流结束仍无音频），设备将静音")
             else:
+                # v1.0.76 归因收口：音频时长 ÷ 实发跨度 = 推流速率。健康流
+                # ≈1.0×（背压水位 0.384s 会略拉高跨度）；<0.8× 即设备侧会
+                # 出现可闻饿拍——与设备串口 TTS stream end 时刻对表即分锅
+                # （此处<1 → HA 侧推流被饿；此处≈1 而设备仍慢 → writer/网络/设备）。
+                _audio_s = frames_sent / sample_rate
+                _span_s = (_last_send_t - started) if _last_send_t is not None else 0.0
+                # 极短流（首尾同刻/亚毫秒跨度）无节奏可言：报 99 哨兵=瞬间完成
+                # 形态，绝不报 0.00 让现场把"快"误读成"饿"。
+                _rate = (_audio_s / _span_s) if _span_s > 0.001 else 99.0
                 _LOGGER.info(
-                    "[TTS] 推流 %d 帧 %.2fs（流式，首块 %sms）",
+                    "[TTS] 推流 %d 帧 %.2fs（流式，首块 %sms；跨度 %.2fs 速率 %.2f× 最大块隙 %dms）",
                     frames_sent,
-                    frames_sent / sample_rate,
+                    _audio_s,
                     first_chunk_ms if first_chunk_ms is not None else -1,
+                    _span_s,
+                    _rate,
+                    _max_gap_ms,
                 )
         except asyncio.CancelledError:
             return  # Don't trigger state change
