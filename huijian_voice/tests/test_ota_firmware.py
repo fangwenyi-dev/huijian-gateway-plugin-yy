@@ -426,6 +426,8 @@ def test_panel_ota_js_contract():
     assert "it.urls_hosts" in block
     assert "d.fw_source" in block, "「入驻时」兜底版本必须在 UI 区分标注"
     assert "空包!" in block, "0 字节在盘包必须标红（设备按 content_length==0 拒收）"
+    assert "(fw.items||[]).slice(0, 2)" in block, \
+        "固件仓表显示面钉：只列最新 2 版（items 已 vkey 降序；API 全量供排障不动）"
 
 
 def test_satellites_view_registered_and_authed():
