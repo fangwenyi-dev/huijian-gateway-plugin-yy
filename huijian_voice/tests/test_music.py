@@ -121,6 +121,19 @@ def test_parse_ctrl_forms():
         assert parse_music(text)["action"] == act, text
 
 
+def test_parse_ctrl_compound_object_20260915():
+    # 现场 2026-09-15：「暂停播放音乐」动词+播放+音乐宾语复合形掉兜底。
+    for text, act in [("暂停播放音乐", "pause"), ("暂停播放歌曲", "pause"),
+                      ("暂停播放这首歌", "pause"), ("暂停音乐播放", "pause"),
+                      ("暂停这首歌", "pause"), ("把音乐暂停", "pause"),
+                      ("停止播放音乐", "stop"), ("停止播放歌曲", "stop"),
+                      ("继续播放音乐", "resume")]:
+        assert parse_music(text)["action"] == act, text
+    # 负钉：裸「暂停」「停止」不收音乐带（窗户/设备语义让位，fast_path 钉同律）
+    assert parse_music("暂停") is None
+    assert parse_music("停止") is None
+
+
 def test_parse_guards_refuse_non_music():
     for text in ("打开客厅的灯", "关灯", "播放客厅的灯", "放轻松", "放假",
                  "把它关掉", "现在几点了", "停止", "空调调到26度", "听我的"):

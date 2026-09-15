@@ -1,4 +1,18 @@
 {
   "_doc": "ESP32 卫星固件发布锁（OTA 方案 Phase 2）。releases 每条=一个可下发版本：version(x.y.z)/file(public 目录内落盘名)/urls(按容灾顺序 GitHub→Gitee，私有仓须内嵌一次性访问串)/sha256(64hex 必填，缺=拒下载)/size/notes_zh(对外话术，受内部文档禁发约束)/min_compatible。镜像内置文件之外，/data/firmware/firmware.lock.json 同名整文件优先（现场热修不重打镜像）。版本值以固件仓 release 实测为准，禁止凭记忆填写。",
-  "releases": []
+  "releases": [
+    {
+      "version": "2.1.43",
+      "file": "huijian-s3-2.1.43.bin",
+      "urls": [
+        "https://gh-proxy.com/https://github.com/fangwenyi-dev/huijian-gateway-plugin-yy/releases/download/v1.0.75/huijian-s3-2.1.43.bin",
+        "https://github.com/fangwenyi-dev/huijian-gateway-plugin-yy/releases/download/v1.0.75/huijian-s3-2.1.43.bin",
+        "https://gitee.com/fangwenyi-dev/huijian-gateway-plugin-yy/releases/download/v1.0.75/huijian-s3-2.1.43.bin"
+      ],
+      "sha256": "043c0e88aea13f8cf09dd729a217bd408fe911f3af4417d2e8ef04f71848269c",
+      "size": 2858112,
+      "notes_zh": "长播报与常聆听稳定性增强，建议升级",
+      "min_compatible": "2.1.36"
+    }
+  ]
 }

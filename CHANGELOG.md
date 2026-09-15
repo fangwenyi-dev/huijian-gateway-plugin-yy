@@ -1,5 +1,23 @@
 # 变更日志
 
+## [1.0.75] - 2026-09-15 播控复合形根治 + 固件仓首批上架（v2.1.43）
+
+- **音乐播控**（现场 09:47「暂停播放音乐」→ 兜底）：`core/nlu/music.py` 播控
+  表项为整句锚定，动词+播放+音乐宾语的复合形不命中。pause/stop/resume 三组
+  放宽收「暂停/停止/继续播放(音乐|歌曲|歌|这首歌)」等形态；负钉：裸「暂停」
+  「停止」不收音乐带（窗户/设备语义让位，fast_path 负向前瞻同律）。
+  新增 test_parse_ctrl_compound_object_20260915（9 正 + 2 负钉）。
+- **固件仓首批上架**：`firmware.lock.json` 登记卫星固件 v2.1.43。渠道定案：
+  固件仓私有且其 release workflow 有意不附 bin → 资产 `huijian-s3-2.1.43.bin`
+  挂**本商店仓**公开 Release v1.0.75（GitHub，CI 出 Release 后挂资产；Gitee
+  镜像 Release 同步挂，缺位时拉取自动换源降级），urls 容灾序
+  gh-proxy → GitHub 直连 → Gitee（models.lock.json 同式）。sha256/size 为
+  v2.1.43 钉 commit 本地 build 产物**实测**（bin 内三重版本戳互证：app_desc
+  2.1.43、Project 串、v2.1.43 独有 PS 拒绝日志），出厂后与 GitHub asset
+  digest 复对（boot.sh Klar 同式供应链纪律）。投递口人工收编仍为兜底渠道，
+  文件命名与 v1.0.74 运营口径 `huijian-s3-<ver>.bin` 对齐可去重。
+- 回归：全量 pytest 1346 项，基线 9 平台红存续零新增；六源齐 1.0.75。
+
 ## [1.0.74] - 2026-09-14 OTA 真下发批（卫星固件"下发"按钮成真）
 
 配合固件 v2.1.43（长播报封顶心跳化 + PS 地雷全挖）打通加载项→卫星的远程固件
