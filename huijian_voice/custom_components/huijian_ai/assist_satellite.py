@@ -119,6 +119,12 @@ def _queue_audio_chunk(queue: "asyncio.Queue[bytes | None]", item) -> bool:
     except asyncio.QueueFull:       # 理论不可达（刚腾出一格）
         return True
     return True
+
+# v1.0.86：僵尸轮 TTS 防护窗（仅在 _drain_stale_pipeline 超时时 arm）。
+# 8s ≈ 一轮 STT+intent 的最短合法尾——晚于此的僵尸 TTS 已被新轮开场洗掉
+# 设备端状态（v2.1.32 免疫窗/世代闸兜后续），不再需要 HA 侧拦截。
+_ZOMBIE_TTS_GUARD_S = 8.0
+
 _WAKE_WORD_CONFIG_SCHEMA = vol.Schema(
     {
         vol.Required("type"): str,
@@ -309,6 +315,8 @@ class EsphomeAssistSatellite(
             maxsize=_MAX_AUDIO_QUEUE_CHUNKS
         )
         self._stream_end_pending = False   # v1.0.41 审查 S4：哨兵兜底标记（随新流清零）
+        # v1.0.86：僵尸轮 TTS 防护窗截止（仅 drain 超时 arm，见常量注释）
+        self._zombie_tts_guard_until: float = 0.0
         self._audio_dropped_chunks: int = 0
         self._tts_streaming_task: asyncio.Task | None = None
         self._udp_server: VoiceAssistantUDPServer | None = None
@@ -486,26 +494,17 @@ class EsphomeAssistSatellite(
         self._stop_pipeline()
 
     @callback
-    def _is_stale_round_event(self) -> bool:
-        """v1.0.83（修#2）：当前调用栈是否属于**已失活的旧轮**。
+    def _zombie_tts_guard_active(self) -> bool:
+        """v1.0.86：drain 超时（实锤旧轮还活着）后的窄防护窗是否生效。
 
-        core 在 run 协程内联派发事件（PipelineRun.process_event →
-        _internal_on_pipeline_event → 本实体 on_pipeline_event），故事件的
-        `current_task()` 恒等于该 run 的身份任务。正常形态下它是当前轮的内层
-        任务（core accept 重绑后的 `_pipeline_task`）或外层轮任务（intercept
-        路径直接 `_internal_on_pipeline_event(RUN_END)` 时跑在外层里）。
-        `_drain_stale_pipeline` 超时（2s 收不掉、WARN"若伴随杂流/半句播报请查
-        此条"点名的正是这型）后，旧 run 仍活着并继续产事件——旧轮的 TTS_END
-        若被放行，将带着上一轮音频在新轮里起推流（现场=半句播报/串音/新轮
-        上行被 play_reset 掐掉）。设备端 v2.1.32 的 stale 免疫窗只护
-        RUN_END/ERROR，STREAM 事件不设防，故 HA 侧必须自己收口。
-        判据全空（首轮/拆除窗口）放行——甄别只拦"有当前轮且不匹配"的事件。
+        v1.0.83 曾用"事件任务身份"甄别旧轮事件并在 on_pipeline_event 顶部
+        整扇丢弃——现场（2026-09-16 09:37 案）证明该前提在实际 core 的派发
+        形态下不成立：健康轮 run-start→run-end 全序列被误杀=播报整轮消失，
+        杀伤面远大于被保护的窄竞态。现收缩为：只有 _drain_stale_pipeline
+        超时（WARN"半句播报请查此条"点名的真僵尸时刻）才 arm；窗内只拦
+        TTS_END 建推流（僵尸灌进新轮的唯一实质damage），其余事件放行。
         """
-        run = asyncio.current_task()
-        if run is None or self._pipeline_task is None:
-            return False
-        return (run is not self._pipeline_task
-                and run is not self._round_outer_task)
+        return asyncio.get_running_loop().time() < self._zombie_tts_guard_until
 
     @callback
     def _clear_tts_streaming_task(self, task: asyncio.Task) -> None:
@@ -522,16 +521,6 @@ class EsphomeAssistSatellite(
 
     def on_pipeline_event(self, event: PipelineEvent) -> None:
         """Handle pipeline events."""
-        # v1.0.83（修#2）：旧轮尸体的迟到事件一律就地丢弃——不得建推流、
-        # 不得向设备转发、不得动本文件内的轮状态。core 的实体态推进发生
-        # 在 _internal_on_pipeline_event（本覆写之前），属残留面，见钉文件
-        # 头注；设备端仍有 v2.1.32 免疫窗兜底。
-        if self._is_stale_round_event():
-            _LOGGER.warning(
-                "慧尖卫星: 丢弃旧轮迟到事件 %s（drain 超时残留，不得灌入当前轮）",
-                event.type,
-            )
-            return
         try:
             event_type = _VOICE_ASSISTANT_EVENT_TYPES.from_hass(event.type)
         except KeyError:
@@ -591,15 +580,27 @@ class EsphomeAssistSatellite(
                 if feature_flags & (
                     VoiceAssistantFeature.SPEAKER | VoiceAssistantFeature.API_AUDIO
                 ) and (stream := tts.async_get_stream(self.hass, tts_output["token"])):
-                    tts_task = self.config_entry.async_create_background_task(
-                        self.hass,
-                        self._stream_tts_audio(stream),
-                        "esphome_voice_assistant_tts",
-                    )
-                    # v1.0.83（修#3）：完成即清句柄，RUN_END 的"本轮无 TTS"
-                    # 判据不再被历史轮永久顶住。
-                    tts_task.add_done_callback(self._clear_tts_streaming_task)
-                    self._tts_streaming_task = tts_task
+                    if self._zombie_tts_guard_active():
+                        # v1.0.86：僵尸轮（drain 超时实锤）晚到的 TTS 不建流——
+                        # 带上一轮音频的 STREAM_START 灌进当前轮正是"半句播报/
+                        # 串音"的形态。API 推流设备连带抑制 TTS_END{url}（放行
+                        # 会重演 v1.0.27 抢跑拆轮）。其余事件与本分支外的轮照常。
+                        _LOGGER.warning(
+                            "慧尖卫星: 僵尸防护窗内丢弃晚到 TTS 建流（%r）",
+                            (tts_output.get("url") or "")[:40],
+                        )
+                        if feature_flags & VoiceAssistantFeature.API_AUDIO:
+                            suppress_event = True
+                    else:
+                        tts_task = self.config_entry.async_create_background_task(
+                            self.hass,
+                            self._stream_tts_audio(stream),
+                            "esphome_voice_assistant_tts",
+                        )
+                        # v1.0.83（修#3）：完成即清句柄，RUN_END 的"本轮无 TTS"
+                        # 判据不再被历史轮永久顶住。
+                        tts_task.add_done_callback(self._clear_tts_streaming_task)
+                        self._tts_streaming_task = tts_task
                     if feature_flags & VoiceAssistantFeature.API_AUDIO:
                         # 只吃 API 音频、无 media_player 自取能力的设备（慧尖板
                         # v2.1.11 起只宣告 API_AUDIO）：url 事件对它无意义，
@@ -828,8 +829,13 @@ class EsphomeAssistSatellite(
         except TimeoutError:
             _LOGGER.warning(
                 "慧尖卫星旧轮 pipeline 未在 %ds 内收口（已取消在途），"
-                "新一轮照常开跑——若伴随杂流/半句播报请查此条",
+                "新一轮照常开跑——僵尸轮晚到的 TTS 建流将由防护窗丢弃（8s）",
                 timeout,
+            )
+            # v1.0.86：实锤僵尸才开窄窗（v1.0.83 的全扇身份闸在现场误杀健康轮，
+            # 已撤）。窗内唯一拦截点=TTS_END 建推流（见 on_pipeline_event）。
+            self._zombie_tts_guard_until = (
+                asyncio.get_running_loop().time() + _ZOMBIE_TTS_GUARD_S
             )
             return False
         except asyncio.CancelledError:

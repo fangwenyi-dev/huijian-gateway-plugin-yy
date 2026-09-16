@@ -18,7 +18,8 @@
   A/B 行为钉（真 anyio）：trickle 流不得被截断（旧形态必红）、间隙真死
      必须截断（语义存续）、总闸兜底必须截断；
   C 算术钉（新⑧口径，改任何一项必须重算）；
-  D/E 形态钉 + _is_stale_round_event / _clear_tts_streaming_task 行为；
+  D/E 形态钉 + _zombie_tts_guard_active（v1.0.86 撤身份闸后的窄僵尸窗）/
+     _clear_tts_streaming_task 行为；
   F _round_outer_task 记账（core 会重绑 _pipeline_task 为内层任务，
      done-callback 身份判据必须同时认外层）。
 """
@@ -324,38 +325,48 @@ def _extract_method(path, name):
     raise AssertionError(f"{path} 缺 {name}")
 
 
-def test_stale_round_event_gate():
-    fn = _extract_method(SAT, "_is_stale_round_event")
+# ── D：#2 串轮防护（v1.0.86 契约：撤身份闸，留窄僵尸窗）──────────
+def test_identity_gate_must_be_gone():
+    """v1.0.83 的任务身份闸在 09:37 案把健康轮 run-start→run-end 全序列误杀
+    （事件的实际派发任务上下文与"内联于轮任务"的假设不符）。v1.0.86 起该闸
+    必须整体不存在——只准拦 TTS 建流，不准拦任何事件。"""
+    src = SAT.read_text(encoding="utf-8")
+    assert "_is_stale_round_event" not in src, "身份闸回潮=健康轮可能被整扇误杀"
+
+
+def test_zombie_guard_only_arms_on_drain_timeout():
+    src = SAT.read_text(encoding="utf-8")
+    i = src.index("async def _drain_stale_pipeline")
+    body = src[i:src.index("async def _handle_pipeline_start_impl", i)]
+    assert "self._zombie_tts_guard_until =" in body, "僵尸窗未在 drain 超时分支 arm"
+    assert src.count("self._zombie_tts_guard_until =") == 1, \
+        "arm 点必须唯一（只在实锤僵尸处；__init__ 声明用注解形式不计赋值）"
+
+
+def test_zombie_guard_active_window_behavior():
+    fn = _extract_method(SAT, "_zombie_tts_guard_active")
 
     class Self:
-        _pipeline_task = None
-        _round_outer_task = None
+        _zombie_tts_guard_until = 0.0
 
     async def scenario():
-        cur = asyncio.current_task()
-        other = asyncio.create_task(asyncio.sleep(5))
         s = Self()
-        # 记账为空（首轮/拆除窗口）→ 放行
-        assert fn(s) is False
-        s._pipeline_task = cur
-        assert fn(s) is False, "当前内层 run 的事件被误杀"
-        s._pipeline_task = other
-        s._round_outer_task = cur
-        assert fn(s) is False, "外层轮任务上下文（intercept RUN_END 等）被误杀"
-        s._round_outer_task = other
-        assert fn(s) is True, "#2 回潮：旧 run 迟到事件不再甄别"
-        other.cancel()
+        assert fn(s) is False, "未 arm 不得生效（默认=全部放行）"
+        s._zombie_tts_guard_until = asyncio.get_running_loop().time() + 8.0
+        assert fn(s) is True
+        s._zombie_tts_guard_until = asyncio.get_running_loop().time() - 0.01
+        assert fn(s) is False, "窗过期必须自动失效"
 
     asyncio.run(scenario())
 
 
-def test_stale_gate_wired_into_on_pipeline_event():
+def test_zombie_guard_wired_only_at_tts_spawn():
     src = SAT.read_text(encoding="utf-8")
-    assert "self._is_stale_round_event()" in src, "甄别未接线"
-    # 接线点必须在 on_pipeline_event 开头（早于 TTS_END 建流与向设备转发事件）
-    i = src.index("def on_pipeline_event")
-    j = src.index("self._is_stale_round_event()")
-    assert i < j < i + 700, "_is_stale_round_event 未接线在 on_pipeline_event 开头"
+    i = src.index("if self._zombie_tts_guard_active():")
+    # 消费点必须落在 TTS_END 建流分支内（其下紧邻建流路）
+    assert "async_create_background_task" in src[i:i + 1400]
+    assert src.count("self._zombie_tts_guard_active()") == 1, \
+        "僵尸窗只准消费一次（TTS 建流点），不得扩面到事件转发"
 
 
 # ── E：#3 推流任务句柄确定性清零 ────────────────────────────────

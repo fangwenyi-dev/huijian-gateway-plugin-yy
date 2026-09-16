@@ -375,7 +375,9 @@ def _build_drain_harness():
         def debug(self, *a):
             pass
 
-    ns = {"asyncio": asyncio, "_LOGGER": FakeLog()}
+    # v1.0.86：drain 超时分支新增僵尸窗 arm（引用模块常量 _ZOMBIE_TTS_GUARD_S）
+    # ——桩随生产函数体同步（同上 FakeLog.info 的先例）。
+    ns = {"asyncio": asyncio, "_LOGGER": FakeLog(), "_ZOMBIE_TTS_GUARD_S": 8.0}
     exec(compile(seg, "<sat>", "exec"), ns)  # noqa: S102
     return ns["_drain_stale_pipeline"], ns["_LOGGER"]
 
