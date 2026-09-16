@@ -7,6 +7,11 @@
   tts  : 无 hello；收 {"type":"tts","state":"detect","text":…} ⇒ 流裸 opus binary，
          收束发 {"type":"tts","state":"stop"}；新 detect 到达丢弃旧流且不得有孤儿帧；
          任何 JSON 帧不得含 "error" 键；每 detect 必有 stop。
+         v1.0.88 边带身份（proto=2，建连欢迎帧申报）：detect 可带 "rid":<u32>
+         （集成 mint 的下行流标识，谁可能被污染谁 mint）。带 rid ⇒ 本流任何帧
+         之前先回声 {"state":"stream_start","rid":N}，收束 {"state":"stop","rid":N}；
+         消费端据此"未同步到自己 rid 前全丢"。rid 缺省/畸形=0=旧协议逐字节不变。
+         不变量（锁内归属守卫保证）：stream_start(N) 之后不可能再有旧流帧上栈。
   llm  : 收 listen detect(mode=prompt,text) ⇒ {"type":"text","state":"start"} →
          逐句 {"type":"text","state":"sentence_end","data":…} →
          终帧 {"type":"text","state":"end"}（客户端 end 判定先于 type，且 end 必发）。
@@ -62,11 +67,27 @@ class BaseSession:
         if t is not None and not t.done():
             t.cancel()
 
-    async def send_json(self, obj: dict) -> bool:
-        return await self._send(lambda: self.ws.send_str(_json(obj)))
+    # ── 发送三态与归属守卫（v1.0.88 下行流标识 Stage 1 的地基）──────────────
+    # True=已入栈；False=发送失败（对端停读/断连）；None=**归属守卫判定本帧
+    # 所属流已作废**（新 detect 已顶替，一帧都不许多发）。三态必须可分：
+    # False 走"按断连处理"的既有路径，None 走"顶替截断"路径（不发孤儿 stop）。
+    #
+    # 为什么守卫必须在锁内、紧邻真实 enqueue（这是边带身份 1b 成立的前提）：
+    # 集成侧的判定是"见到本流 stream_start 之前的帧全丢"，它**辨不出**
+    # stream_start 之后才冒出来的旧流残帧（帧形制不变、无逐帧身份）。若在
+    # 「锁外查代际 → 进锁 send」，中间那一次 await 就是竞态窗：新 detect 在
+    # 此刻顶替、新流 stream_start 先进锁发出，旧流随后这一帧就成了"ack 之后
+    # 的残段"，现场形态=播报头部混半句旧音频。守卫下沉后，旧流任何一帧要么
+    # 在 stream_start 之前上栈（被集成同步门前丢弃），要么被本守卫当场拦死
+    # ——二者必居其一，无需 drain/屏障等待（零首帧延迟）。
+    def _send_guard(self, guard) -> bool:
+        return True if guard is None else bool(guard())
 
-    async def send_bytes(self, data: bytes) -> bool:
-        return await self._send(lambda: self.ws.send_bytes(data))
+    async def send_json(self, obj: dict, guard=None):
+        return await self._send(lambda: self.ws.send_str(_json(obj)), guard)
+
+    async def send_bytes(self, data: bytes, guard=None):
+        return await self._send(lambda: self.ws.send_bytes(data), guard)
 
     # v1.0.65（TTS 深审 F2）：v1.0.45 的 wait_for 只包住了生成侧，发送侧此前
     # 无闸——aiohttp 对端零窗口（连着但不读）时 ws.send_* 在内部 drain 无限期
@@ -78,11 +99,14 @@ class BaseSession:
     # ≤3 = 58 ≤ 客户端 60-2s 网络余量；此值是求和项，改动须同看 const ⑧注释。
     _SEND_TIMEOUT_S = 3.0
 
-    async def _send(self, coro_fn) -> bool:
-        async def _locked() -> bool:
+    async def _send(self, coro_fn, guard=None):
+        async def _locked():
             async with self._send_lock:
                 if self.ws.closed:
                     return False
+                # 归属判定与真实 enqueue 同持锁、之间零 await（见上注释）
+                if not self._send_guard(guard):
+                    return None
                 await coro_fn()
                 return True
         try:
@@ -224,7 +248,24 @@ class TtsSession(BaseSession):
     def __init__(self, ws, ctx):
         super().__init__(ws, ctx)
         self._gen = 0
+        # v1.0.88（Stage 1 边带身份）：本会话当前有效流的线上标识。由**集成
+        # mint、服务端回显**（谁可能被污染谁 mint：混入的受害者是集成）。
+        # 0 = 客户端未带 rid（旧集成）→ 整条路径与本变更前逐字节一致。
+        self._rid = 0
         self._task: Optional[asyncio.Task] = None
+
+    @staticmethod
+    def _parse_rid(obj: dict) -> int:
+        """宽容解析 detect 携带的 rid（契约：未知键忽略、值形态不可信）。
+
+        u32 且 0 作 legacy 哨兵，故越界/非数字/负数一律折成 0（按旧协议跑），
+        绝不因一个畸形键把播报打死（fail-open 方向恒为"有声音"）。
+        """
+        try:
+            rid = int(obj.get("rid") or 0)
+        except (TypeError, ValueError):
+            return 0
+        return rid if 0 < rid < (1 << 32) else 0
 
     async def on_text(self, raw: str) -> None:
         try:
@@ -266,22 +307,30 @@ class TtsSession(BaseSession):
             # 一整分钟且全程持有播报通道 _request_lock。空文本统一走整流：
             # split 出 0 句 → 零帧 → 干净 stop，顶替语义也一并保住。
             if state in ("detect", "sentence_start", None):
-                self._start_stream(text, cap_truncated)
+                # v1.0.88：detect 可带 rid（集成 mint 的下行流标识）→ 本流所有
+                # 控制帧回显同一 rid；不带/畸形=0=legacy 路径，行为与旧版一致。
+                self._start_stream(text, cap_truncated, self._parse_rid(obj))
         # listen stop 等在 tts 通道无义务响应（客户端不收口）
 
     async def on_binary(self, data: bytes) -> None:
         pass    # tts 通道无上行音频（卫星形态）
 
-    def _start_stream(self, text: str, cap_truncated: bool = False) -> None:
+    def _start_stream(self, text: str, cap_truncated: bool = False,
+                      rid: int = 0) -> None:
         # 新 detect 到达 → 旧流作废（generation 守卫，不发孤儿帧）
         self._gen += 1
         gen = self._gen
+        self._rid = rid
         if self._task and not self._task.done():
             self._task.cancel()
-        self._task = asyncio.create_task(self._stream(text, gen, cap_truncated))
+        self._task = asyncio.create_task(self._stream(text, gen, cap_truncated, rid))
 
     async def _stream(self, text: str, gen: int,
-                      cap_truncated: bool = False) -> None:
+                      cap_truncated: bool = False, rid: int = 0) -> None:
+        # 归属守卫：本流仍是当前代际才许上栈。判定发生在 _send_lock 临界区内
+        # （见 BaseSession._send 注释）——这是"stream_start 之后绝无旧流残帧"
+        # 的全部依据，边带身份方案（1b）成立与否就看这一条。
+        mine = lambda: gen == self._gen    # noqa: E731（同块内联，勿提函数）
         # v1.0.83（修#1）：旧形态是单一整轮墙钟（52s 到点即截）——长播报
         # （句句正常产出、只是总合成超 52s）被必然腰斩，现场=播报缺尾。
         # 现拆两道窗（对账见 const ⑧ v1.0.83 块）：
@@ -305,6 +354,25 @@ class TtsSession(BaseSession):
         # v1.0.70（深审②）：cap 截断（on_text 判定点）从出生就带旗。
         truncated = cap_truncated
         try:
+            # ── v1.0.88（Stage 1 边带身份）：本流的一切帧之前先回声 stream_start
+            # 集成侧的门是"未同步到自己 rid 前，binary 与 stop 一律丢弃"，故本
+            # ack 必须先于本流任何一帧上栈：它与帧发送共用 _send_lock + 同一
+            # 归属守卫，先后次序在锁内锁死（见 BaseSession._send 注释）。
+            # rc=None=本流在 ack 前已被顶替（静默退场，不发孤儿 stop）；
+            # rc=False=对端停读/断连 → 与帧失败同径早退（后续帧也发不出去）。
+            if rid:
+                rc = await self.send_json(
+                    {"type": "tts", "state": "stream_start", "rid": rid}, mine)
+                if rc is None:
+                    logger.warning("[TTS] 旧流在身份声明前即被顶替（rid=%s）/ %r",
+                                   rid, text[:30])
+                    return
+                if not rc:
+                    truncated = True
+                    logger.warning("[TTS] stream_start(rid=%s) 发送失败——本流按"
+                                   "断连收束（集成侧同步超时后 fail-open）: %r",
+                                   rid, text[:30])
+                    return
             # F5：预算必须覆盖「生成器挂起」——逐包用剩余预算做 wait_for，
             # native 合成卡死也能按点收束（finally 的 stop 义务不变）。
             it = self.ctx.tts.stream_opus(text, engine_out=engine).__aiter__()
@@ -336,7 +404,15 @@ class TtsSession(BaseSession):
                     logger.warning("[TTS] 合成流停滞超预算，截断收束（已发 %d 帧）: %r",
                                    n_frames, text[:30])
                     return
-                if not await self.send_bytes(pkt):
+                rc = await self.send_bytes(pkt, mine)
+                if rc is None:
+                    # 锁内守卫拦下这一帧：新 detect 已顶替，且新流的 stream_start
+                    # 只可能在本帧之后上栈（同一把锁）→ 集成侧同步门前必丢它。
+                    # 这是"ack 之后绝无旧流残帧"的落地点，勿改成锁外判定。
+                    logger.warning("[TTS] 旧流被新播报顶替截断（锁内守卫 rid=%s）："
+                                   "已发 %d 帧 / %r", rid, n_frames, text[:30])
+                    return
+                if not rc:
                     # v1.0.45：连接中断同样点名——半截音频在此对账（对端多半
                     # 正在重连，本端 stop 也会失败，只有这行 WARN 说明真相）。
                     truncated = True
@@ -373,6 +449,11 @@ class TtsSession(BaseSession):
                     # 生成器是"正常耗尽"，本函数各早退位点看不见，必须在此并档。
                     truncated = True
                 stop_frame = {"type": "tts", "state": "stop"}
+                if rid:
+                    # v1.0.88：stop 也回显 rid——顶替后晚到的旧流 stop 若不带身份，
+                    # 集成会把"上一轮的收口"当成本轮的干净结束（半截音频以
+                    # 正常收口进 HA 无 TTL 盘缓存 = v1.0.55 定案②的毒化形态回潮）。
+                    stop_frame["rid"] = rid
                 if truncated:
                     stop_frame["truncated"] = True
                 # v1.0.84（O3）：「每 detect 必有 stop」是尽力而为——漏发时

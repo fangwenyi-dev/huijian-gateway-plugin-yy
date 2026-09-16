@@ -196,14 +196,20 @@ def _bare_session(packets, delay=0.0, hang=False, send_ok=True):
 
     s = TtsSession.__new__(TtsSession)
     s._gen = 0
+    s._rid = 0            # v1.0.88：边带身份关（本文件钉的是逐帧间隙/整轮总闸预算）
     s._task = None
     sent = {"json": [], "bytes": 0}
 
-    async def send_json(frame):
+    async def send_json(frame, guard=None):
+        # v1.0.88：三态与真 BaseSession._send 同构（None=锁内归属守卫拦下）
+        if guard is not None and not guard():
+            return None
         sent["json"].append(frame)
         return True
 
-    async def send_bytes(b):
+    async def send_bytes(b, guard=None):
+        if guard is not None and not guard():
+            return None
         if not send_ok:
             return False
         sent["bytes"] += 1

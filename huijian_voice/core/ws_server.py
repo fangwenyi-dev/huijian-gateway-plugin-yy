@@ -126,7 +126,11 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
         # fail-open：指纹只是缓存键轮换增强，任何异常不得杀掉播报主链。
         try:
             await session.send_json({"type": "settings",
-                                     "voice_fp": ctx.tts.voice_fingerprint()})
+                                     "voice_fp": ctx.tts.voice_fingerprint(),
+                                     # v1.0.88：同处申报协议代次——集成见 >=2 才启用
+                                     # 下行流标识（detect 带 rid + 未同步即丢）。旧集成
+                                     # 未知键忽略，本帧从不进业务帧流，零暴露。
+                                     "tts_proto": const.TTS_PROTO_VERSION})
         except Exception:
             logger.exception("[WS] tts 欢迎指纹发送失败（不影响播报）")
     try:

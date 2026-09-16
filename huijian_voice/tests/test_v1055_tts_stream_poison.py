@@ -278,6 +278,10 @@ def _transport_stream():
         "time": time,
         "anyio": _ANYIO_REAL,
         "Dict": _extract(CC / "huijian" / "__init__.py", "Dict", {"json": json}),
+        # v1.0.88：stream() 现在取模块级协议常量（边带身份门 + 同步 fail-open
+        # 预算）——夹具与真类同值，改一边必改另一边（同 _ROUND_TOTAL_BUDGET_S 纪律）
+        "_TTS_PROTO_STREAM_ID": 2,
+        "_SYNC_BUDGET_S": 3.0,
     }
     return _extract(CC / "huijian" / "tts_transport.py", "stream", ns), ns["Dict"]
 
@@ -303,12 +307,24 @@ class _FakeTransport:
     # v1.0.83：真 TtsTransport 的整轮总闸常量——stream() 直接取 self 属性，
     # 鸭子实例必须同备（与真类同值，改一边必改另一边）。
     _ROUND_TOTAL_BUDGET_S = 720.0
+    # v1.0.88：本协议代次=0（未协商）⇒ stream() 走旧语义（rid=0、无需 ack 配对）。
+    # 认领三件套同备：真 stream() 会 claim/release，鸭子照做即可。
+    _proto = 0
+    _conn_gen = 0
 
     def __init__(self, items):
         self._request_lock = asyncio.Lock()
         self._recv_reader = _Reader(items)
+        self._round_active = False
         self.logger = logging.getLogger("pin")
         self.restarts = []
+
+    def _claim_round(self):
+        self._round_active = True
+        return self._conn_gen
+
+    def _release_round_claim(self):
+        self._round_active = False
 
     async def ensure_connected(self):
         return True
@@ -355,14 +371,20 @@ def _bare_session(packets, delay=0.0, flag=False, send_ok=True, hang=False):
 
     s = TtsSession.__new__(TtsSession)
     s._gen = 0
+    s._rid = 0            # v1.0.88：边带身份关（本文件钉的是 truncated 声明，与 rid 无关）
     s._task = None
     sent = {"json": [], "bytes": 0}
 
-    async def send_json(frame):
+    async def send_json(frame, guard=None):
+        # v1.0.88：与真 BaseSession._send 同语义——锁内归属守卫，作废即 None（三态）
+        if guard is not None and not guard():
+            return None
         sent["json"].append(frame)
         return True
 
-    async def send_bytes(b):
+    async def send_bytes(b, guard=None):
+        if guard is not None and not guard():
+            return None
         if not send_ok:
             return False
         sent["bytes"] += 1

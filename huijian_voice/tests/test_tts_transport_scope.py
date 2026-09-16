@@ -48,7 +48,10 @@ def _extract_stream():
     fn = next(n for n in cls.body
               if isinstance(n, ast.AsyncFunctionDef) and n.name == "stream")
     mod = ast.Module(body=[fn], type_ignores=[])
-    ns = {"anyio": anyio, "asyncio": asyncio, "time": time, "Dict": _Dict}
+    # v1.0.88：stream() 现取模块级协议常量（边带身份门 + 同步 fail-open
+    # 预算）——夹具与真类同值，改一边必改另一边（同 _ROUND_TOTAL_BUDGET_S 纪律）
+    ns = {"anyio": anyio, "asyncio": asyncio, "time": time, "Dict": _Dict,
+          "_TTS_PROTO_STREAM_ID": 2, "_SYNC_BUDGET_S": 3.0}
     exec(compile(mod, str(SRC), "exec"), ns)
     return ns["stream"]
 
@@ -60,13 +63,25 @@ class FakeTransport:
     # v1.0.83：真 TtsTransport 新增整轮总闸类常量——stream() 经 self 取值，
     # 鸭子必须同备（与真类同值；改一边必改另一边）。
     _ROUND_TOTAL_BUDGET_S = 720.0
+    # v1.0.88：同上——本协议代次取 0（未协商）：本文件钉的是 cancel scope 的
+    # 任务仿射语义，不涉下行流身份；claim/release 同备真方法名。
+    _proto = 0
+    _conn_gen = 0
 
     def __init__(self, timeout_ok=True):
         self._request_lock = asyncio.Lock()
+        self._round_active = False
         self.sent = []
         self.restarts = []
         self.logger = logging.getLogger("test.scope")
         self._drained = False
+
+    def _claim_round(self):
+        self._round_active = True
+        return self._conn_gen
+
+    def _release_round_claim(self):
+        self._round_active = False
 
     async def ensure_connected(self):
         return True

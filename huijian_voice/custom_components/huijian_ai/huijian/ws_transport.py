@@ -52,6 +52,19 @@ class WsTransport:
         self._recv_reader: MemoryObjectReceiveStream = None  # type: ignore
         self._send_writer: MemoryObjectSendStream = None  # type: ignore
         self._send_reader: MemoryObjectReceiveStream = None  # type: ignore
+        # v1.0.88（下行流标识）：连接代次。每次 _create_streams 前进一号——
+        # 任何"绑定某条连接"的账（协议协商结果、本轮认领凭据）都必须与之配对
+        # 使用，否则半开旧连接的凭据会与新连接撞号。
+        self._conn_gen = 0
+
+    def _on_incoming(self, item) -> bool:
+        """recv 通道交付前的钩子；返回 True = 就地丢弃（连接保持）。
+
+        基类不过滤（stt/llm/mcp 语义零变化）；TtsTransport 用它实现"无人认领
+        的旧轮残料不进 reader 队列"。放在交付点而不是消费点，是因为残料一旦
+        进了队列，就再也分不清它属于哪一轮——那正是 v1.0.45 猜了一年的形态。
+        """
+        return False
 
     @property
     def available(self):
@@ -158,6 +171,8 @@ class WsTransport:
 
     async def _create_streams(self):
         """Create memory object streams for communication."""
+        # v1.0.88：新 stream 对 = 新连接凭据（换连后一切"属这条连接"的账重算）
+        self._conn_gen += 1
         self._recv_writer, self._recv_reader = anyio.create_memory_object_stream(0)
         self._send_writer, self._send_reader = anyio.create_memory_object_stream(0)
 
@@ -445,6 +460,11 @@ class WsTransport:
 
     async def _deliver(self, writer, item) -> bool:
         """把一条消息交给消费端；返回 False = 消费端已消失，调用方须收口。"""
+        # v1.0.88：recv 通道交付前先过子类过滤器（TTS 用它丢弃无人认领的旧轮
+        # 残料）。被丢弃的消息**不进出队**，故不会与下一轮的头对不上；返回
+        # True 表示链路健康、只是这条不算数（连接保持，绝不因丢弃而断连）。
+        if writer is self._recv_writer and self._on_incoming(item):
+            return True
         try:
             if self._CONSUMER_HANDOFF_TIMEOUT_S is None:
                 await writer.send(item)

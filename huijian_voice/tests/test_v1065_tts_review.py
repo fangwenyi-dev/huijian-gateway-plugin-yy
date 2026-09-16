@@ -570,7 +570,9 @@ def test_t7_available_and_preflight():
 def test_t4_satellite_chunk_iter_deterministic_close():
     src = (INTEGRATION / "assist_satellite.py").read_text(encoding="utf-8")
     i = src.index("chunk_iter = _iter_wav_pcm_chunks(")
-    blk = src[i:i + 3600]
+    # 窗口锚在"本函数尾"（下一个方法定义），不用定长 3600 字：v1.0.88 加归属闸
+    # 注释后定长窗会把 finally 挤出窗外（断言的是"存在确定性收链"，窗宽不该随注释涨）
+    blk = src[i:src.index("    async def _wrap_audio_stream", i)]
     assert "finally:" in blk and "await chunk_iter.aclose()" in blk, \
         "barge-in 取消落在生成器帧外时收链不得赌 GC（tts_transport 自家纪律）"
 

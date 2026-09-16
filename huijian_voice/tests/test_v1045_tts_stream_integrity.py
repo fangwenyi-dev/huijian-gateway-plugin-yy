@@ -394,7 +394,14 @@ def test_stream_serializes_concurrent_requests(_real_anyio):
 
 
 def test_deliver_timeout_self_heals_reader(_real_anyio):
-    """消费端消失时交付必须判死返回 False（reader 才能 break 走重连）。"""
+    """消费端消失时交付必须判死返回 False（reader 才能 break 走重连）。
+
+    v1.0.88 补第二型语义（两者方向不同，都必须成立）：
+      • **认领中**却无人收（消费端被取消后没走收口）→ 判死 False → 换连自愈；
+      • **无人认领**（旧轮消费者的残料在它消失后才到）→ 就地丢弃 True，
+        连接保持、且绝不落进 reader 队列——残料一旦进队列就再也分不清属于
+        哪一轮，那正是"下一轮拿到上一轮的头"的原始形态。
+    """
     mod2, _ = _load_modules()
 
     async def scenario():
@@ -403,9 +410,20 @@ def test_deliver_timeout_self_heals_reader(_real_anyio):
         t._CONSUMER_HANDOFF_TIMEOUT_S = 0.1
         # 换成 buffer-0（与真 _create_streams 同构）：满缓冲会吞掉阻塞语义
         t._recv_writer, t._recv_reader = anyio.create_memory_object_stream(0)
+        t._round_active = True          # 本轮认领中：僵尸 reader 判据的前提
         assert await t._deliver(t._recv_writer, b"orphan") is False, \
             "无消费者交付未判死 = 僵尸 reader 复发"
+        # 无人认领 → 丢弃并保持连接，且不得落进队列
+        t._round_active = False
+        assert await t._deliver(t._recv_writer, b"stale") is True, \
+            "无人认领应就地丢弃并保持连接（不判死、不换连）"
+        try:
+            leaked = t._recv_reader.receive_nowait()
+            raise AssertionError(f"无人认领的残料漏进队列：{leaked!r}")
+        except anyio.WouldBlock:
+            pass
         # 有消费者时正常交付
+        t._round_active = True
         async with anyio.create_task_group() as tg:
             box = {}
             async def grab():

@@ -62,6 +62,13 @@ FRAME_MS = 60
 FRAME_SAMPLES = SAMPLE_RATE * FRAME_MS // 1000   # 960
 FRAME_BYTES = FRAME_SAMPLES * 2                  # s16le = 1920B PCM/帧
 
+# v1.0.88 下行流标识（边带身份，Stage 1）协议代次：tts 通道建连欢迎帧申报
+# 本值，集成见 >=2 才 mint rid 并启用"未同步到自己 rid 前一律丢弃"。
+# 缺失/0 = 旧协议（旧集成把未知 state 只记一条 INFO，行为逐字节不变）。
+# 形状与不变量见 session.py 模块 docstring tts 段；带内逐帧头（1a）是本协议
+# 的兼容超集，将来升代不改边带语义。
+TTS_PROTO_VERSION = 2
+
 # 超时预算（服务器侧收尾必须早于客户端预算，防滞留帧污染下一请求，契约 §6-5）
 # v1.0.70（深审⑧算术钉死）：预算不是单数字，是「整流 + 在飞帧发送 + 收口
 # stop 发送」的总和对账。旧值 55+5+5=65s > 客户端 60s——超时竞跑现场表现=

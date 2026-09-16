@@ -125,6 +125,10 @@ def _queue_audio_chunk(queue: "asyncio.Queue[bytes | None]", item) -> bool:
 # 设备端状态（v2.1.32 免疫窗/世代闸兜后续），不再需要 HA 侧拦截。
 _ZOMBIE_TTS_GUARD_S = 8.0
 
+# v1.0.88（下行流所有权）：被接管旧流的残帧丢弃告警限频（与固件 v2.1.28
+# 同族纪律一致：成串丢弃不许淹没同刻其它信号）。
+_DL_DROP_LOG_EVERY = 20
+
 _WAKE_WORD_CONFIG_SCHEMA = vol.Schema(
     {
         vol.Required("type"): str,
@@ -327,6 +331,24 @@ class EsphomeAssistSatellite(
         # 溢出计数——两者归因完全不同（前者=设备无开轮推流，后者=消费停顿）
         self._audio_orphan_chunks: int = 0
         self._tts_streaming_task: asyncio.Task | None = None
+        # ── v1.0.88：TTS 下行流所有权（Hop B「旧 run 晚到音频混入新流头部」根修）──
+        # 设备侧世代 s_va_epoch 绑的是 play_reset 现值（固件 CHANGELOG v2.1.50
+        # 未收口条），**认不清一帧属于 HA 哪一次推流**；而每条下行流自己的
+        # START/帧/END 都由各自的后台任务发出，两个任务共用同一条 API 连接，
+        # 谁先 enqueue 谁先上 wire。故旧 run 的帧完全可以落在新 run 的
+        # TTS_STREAM_START 之后——设备刚 play_reset 换过世代，那批旧音频就以
+        # "合法新帧"的形态进了新流头部（现场=播报开头混半句）。
+        # 本集成是唯一向该设备写音频的实体，故由它 mint 所有权并把判定下沉到
+        # 每帧 enqueue 之前（与 enqueue 之间零 await）。不变量：
+        #   I-1 接管动作（吊销旧 seq + cancel）与新流 START 之间无 await
+        #       ⇒ 旧任务此后 enqueue 的帧全部被本闸拦掉；已 enqueue 的因同连接
+        #       FIFO 必在新 START 之前上 wire，被设备 play_reset 冲掉。
+        #   I-2 只允许归属者向设备发 TTS_STREAM_END——旧流代发 END 会把新流
+        #       当场收口（固件 :411-425 直接 STOP_PIPELINE），现场=新播报静音。
+        #   I-3 只允许归属者落本轮状态收口（tts_response_finished/pipeline_state）
+        #       ⇒ 旧任务不得替新流落 IDLE（那是另一型串扰）。
+        self._dl_seq: int = 0             # 0 = 无人占有；每次建流 +1 吊销上一个
+        self._dl_drop_total: int = 0      # 归属闸拦下的残帧累计（对账用）
         self._udp_server: VoiceAssistantUDPServer | None = None
 
         # Empty config. Updated when added to HA.
@@ -523,6 +545,26 @@ class EsphomeAssistSatellite(
         return asyncio.get_running_loop().time() < self._zombie_tts_guard_until
 
     @callback
+    def _dl_takeover(self) -> int:
+        """v1.0.88：新下行流接管本设备的 API 音频写权，返回其归属 seq。
+
+        **调用点与新流 START 之间不得有 await**（不变量 I-1，见 __init__ 注释）：
+        本方法同步吊销旧 seq 并取消旧任务，旧任务此后即使被唤醒也想 enqueue 帧，
+        会被 _stream_tts_audio 的归属闸拦掉；它在吊销之前已 enqueue 的帧因同一条
+        API 连接 FIFO 必在新 START 之前上 wire，被设备 play_reset 冲掉。
+        旧任务被取消后由 I-2/I-3 保证它既不代发 TTS_STREAM_END（那会当场掐死
+        新流）、也不替新流落状态收口。
+        """
+        self._dl_seq += 1
+        old = self._tts_streaming_task
+        if old is not None and not old.done():
+            old.cancel()
+            _LOGGER.info(
+                "慧尖卫星: 下行流接管，旧推流已吊销（新 seq=%s，累计丢残帧 %d）",
+                self._dl_seq, self._dl_drop_total,
+            )
+        return self._dl_seq
+
     def _clear_tts_streaming_task(self, task: asyncio.Task) -> None:
         """v1.0.83（修#3）：推流任务自然收口后清句柄。
 
@@ -608,9 +650,13 @@ class EsphomeAssistSatellite(
                         if feature_flags & VoiceAssistantFeature.API_AUDIO:
                             suppress_event = True
                     else:
+                        # v1.0.88（I-1）：接管必须与新流 START 同处一个无 await
+                        # 段——本行之后直到任务首行的 send STREAM_START 之间不得
+                        # 插入任何 await，否则旧流有机会再 enqueue 一帧。
+                        dl_seq = self._dl_takeover()
                         tts_task = self.config_entry.async_create_background_task(
                             self.hass,
-                            self._stream_tts_audio(stream),
+                            self._stream_tts_audio(stream, dl_seq),
                             "esphome_voice_assistant_tts",
                         )
                         # v1.0.83（修#3）：完成即清句柄，RUN_END 的"本轮无 TTS"
@@ -1119,6 +1165,7 @@ class EsphomeAssistSatellite(
     async def _stream_tts_audio(
         self,
         tts_result: tts.ResultStream,
+        dl_seq: int | None = None,
         sample_rate: int = 16000,
         sample_width: int = 2,
         sample_channels: int = 1,
@@ -1130,6 +1177,11 @@ class EsphomeAssistSatellite(
         把上游延迟 1:1 放大成设备静音，见本文件顶部 _DEVICE_BUFFER_TARGET_S 注释）。
         背压口径对齐上游：保持设备环形缓冲约 75% 水位（384ms）。
         fail-loud 原样保留：非 WAV 早退 / 形态不符报错 / 0 帧告警。
+
+        v1.0.88（下行流所有权）：`dl_seq` 是本流向设备写音频的归属凭据，由
+        `_dl_takeover()` 在建流前发下；生产路径必须传（`None` 只留给直接调用/
+        夹具，表示"不判归属"）。三处受它管辖：每帧 enqueue 前的归属闸、
+        TTS_STREAM_END 是否由本流发（I-2）、本轮状态收口是否由本流落（I-3）。
         """
         self.cli.send_voice_assistant_event(
             VoiceAssistantEventType.VOICE_ASSISTANT_TTS_STREAM_START, {}
@@ -1153,6 +1205,15 @@ class EsphomeAssistSatellite(
             # pipeline_state，实体卡"仍在应答"，后续唤醒被卡死旧 run 无声吞
             # ——现场 12:14 案：播报半路夭折后连续两轮 8s 无应答×2 直到熔断。
             # CancelledError 支豁免（打断方自会收口，维持原语义不动）。
+            # v1.0.88（I-3）：已被接管的旧流不得替新流落状态——core 的
+            # tts_response_finished 就是 _set_state(IDLE)，旧流晚到一步会把新流
+            # 正在播报的状态踩成空闲（同一种串扰的另一个面）。收口归现归属者。
+            if dl_seq is not None and dl_seq != self._dl_seq:
+                _LOGGER.info(
+                    "慧尖卫星: 旧下行流让位（seq=%s 现归属=%s），状态收口交新流",
+                    dl_seq, self._dl_seq,
+                )
+                return
             self.tts_response_finished()
             self._entry_data.async_set_assist_pipeline_state(False)
 
@@ -1186,6 +1247,23 @@ class EsphomeAssistSatellite(
                 async for chunk, is_last in chunk_iter:
                     if not self._is_running:
                         break
+
+                    # ── v1.0.88 归属闸（I-1 的落地点）────────────────────────
+                    # 与紧随其后的 enqueue（API 侧 send_voice_assistant_audio 是
+                    # 同步入队、UDP 侧 sendto 同为同步）**之间没有 await**：被
+                    # 接管的旧流一旦被吊销，这一帧就是它能为这条连接写的最后一
+                    # 帧。旧 run 音频混进新流头部（播报开头半句残段）自此不可能
+                    # 再由 HA 侧产生——设备侧的自证要等协议批（run/stream id）。
+                    if dl_seq is not None and dl_seq != self._dl_seq:
+                        self._dl_drop_total += 1
+                        if (self._dl_drop_total == 1
+                                or self._dl_drop_total % _DL_DROP_LOG_EVERY == 0):
+                            _LOGGER.warning(
+                                "慧尖卫星: 旧下行流被接管后仍在吐帧，丢第 %d 帧"
+                                "（本流 seq=%s 现归属=%s）——不丢即混入新流头部",
+                                self._dl_drop_total, dl_seq, self._dl_seq,
+                            )
+                        return
 
                     if self._udp_server is not None:
                         self._udp_server.send_audio_bytes(chunk)
@@ -1273,13 +1351,24 @@ class EsphomeAssistSatellite(
         except asyncio.CancelledError:
             return  # Don't trigger state change
         finally:
-            self.cli.send_voice_assistant_event(
-                VoiceAssistantEventType.VOICE_ASSISTANT_TTS_STREAM_END, {}
-            )
+            # v1.0.88（I-2）：只有现归属者能向设备宣告"这条流结束了"。被接管
+            # 的旧流若在这里补发 TTS_STREAM_END，设备会在**新流刚起**的
+            # STREAMING_RESPONSE 态收到一条属于旧流的结束，直接切 STOP_PIPELINE
+            # （固件 :411-425），现场=新播报只响半句甚至全哑。旧流的 END 由
+            # _dl_takeover 的接管者负责（新流自己会成对发 START/END）。
+            if dl_seq is None or dl_seq == self._dl_seq:
+                self.cli.send_voice_assistant_event(
+                    VoiceAssistantEventType.VOICE_ASSISTANT_TTS_STREAM_END, {}
+                )
+            else:
+                _LOGGER.info(
+                    "慧尖卫星: 被接管的旧流不代发现场 TTS_STREAM_END"
+                    "（seq=%s 现归属=%s）——否则新流被当场收口",
+                    dl_seq, self._dl_seq,
+                )
 
         # State change
-        self.tts_response_finished()
-        self._entry_data.async_set_assist_pipeline_state(False)
+        _converge_response()
 
     async def _wrap_audio_stream(self) -> AsyncIterable[bytes]:
         """Yield audio chunks from the queue until None."""
