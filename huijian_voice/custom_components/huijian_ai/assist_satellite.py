@@ -317,7 +317,15 @@ class EsphomeAssistSatellite(
         self._stream_end_pending = False   # v1.0.41 审查 S4：哨兵兜底标记（随新流清零）
         # v1.0.86：僵尸轮 TTS 防护窗截止（仅 drain 超时 arm，见常量注释）
         self._zombie_tts_guard_until: float = 0.0
+        # v1.0.87：窗的**主判据**换成"被 drain 掉的那一轮还活着"——晚到的
+        # TTS_END 只可能由仍在跑的旧轮发出；旧轮一旦收口，窗即刻失效，新轮
+        # 自己合法的 TTS 就不可能再被时间窗误杀（1.0.86 的 8s 纯时间窗正是
+        # 这么丢的）。上面的 until 只留作硬上限兜底（旧轮永不收口的极端形态）。
+        self._zombie_tts_guard_task: "asyncio.Task | None" = None
         self._audio_dropped_chunks: int = 0
+        # v1.0.87：无消费者（未开轮/本轮已收口）时直投丢弃的计数，独立于队列
+        # 溢出计数——两者归因完全不同（前者=设备无开轮推流，后者=消费停顿）
+        self._audio_orphan_chunks: int = 0
         self._tts_streaming_task: asyncio.Task | None = None
         self._udp_server: VoiceAssistantUDPServer | None = None
 
@@ -504,6 +512,14 @@ class EsphomeAssistSatellite(
         超时（WARN"半句播报请查此条"点名的真僵尸时刻）才 arm；窗内只拦
         TTS_END 建推流（僵尸灌进新轮的唯一实质damage），其余事件放行。
         """
+        task = self._zombie_tts_guard_task
+        if task is None:
+            return False
+        if task.done():
+            # 旧轮已收口：晚到 TTS 的来源消失，窗即刻关（不等 8s 到期）——
+            # 这就是与 1.0.86 的关键差别：新轮 TTS 不再被时间窗吃掉。
+            self._zombie_tts_guard_task = None   # 只清身份即关窗（arm 点保持唯一）
+            return False
         return asyncio.get_running_loop().time() < self._zombie_tts_guard_until
 
     @callback
@@ -837,6 +853,8 @@ class EsphomeAssistSatellite(
             self._zombie_tts_guard_until = (
                 asyncio.get_running_loop().time() + _ZOMBIE_TTS_GUARD_S
             )
+            # v1.0.87：同时记住"是哪一轮"——窗的生死随该轮收口即刻结束。
+            self._zombie_tts_guard_task = old_task
             return False
         except asyncio.CancelledError:
             # 区分两种取消：旧任务"以 cancelled 收尾"（shield 把结果抛给我们，
@@ -959,6 +977,19 @@ class EsphomeAssistSatellite(
 
         return port
 
+    def _round_alive(self) -> bool:
+        """v1.0.87：本轮是否有消费者在跑（判据=外层轮任务在且未完成）。
+
+        必须用 `_round_outer_task`（本仓自有的外层身份），不能用
+        `_pipeline_task`：后者被 core 的 async_accept_pipeline_from_satellite
+        重绑为内层任务、并在 finally 里置 None，而 barge-in 的
+        `_drain_stale_pipeline` 窗（≤2s）内它恒为 None——拿它判活会把接管期间
+        真正该转写的音频误杀（v1.0.83 身份闸事故同源：那次错在事件面，这次
+        若判错就错在音频面）。
+        """
+        task = self._round_outer_task
+        return task is not None and not task.done()
+
     async def handle_audio(self, data: bytes, data2: bytes | None = None) -> None:
         """Handle incoming audio chunk from API.
 
@@ -967,6 +998,23 @@ class EsphomeAssistSatellite(
         台架×固件协议审计实锤）。data2=增强音频第二通道，本固件只发单声道
         取偶通道后的流（data2 恒 None），收到即忽略；保留参数以兼容双通道设备。
         """
+        # v1.0.87（现场 09:37–09:41：本 WARN 63 条 / 累计丢弃 9300 块）：本轮没有
+        # 消费者时帧永远不可能被转写——旧形态照样塞进 160 格有界队列，既挤占
+        # 哨兵与有效帧的容身空间，又每 100 块刷一条"管线消费停顿"的误导性归因
+        # （真因是"根本没开轮"，与 STT 慢/事件循环被占无关）。下一轮开轮时
+        # _handle_pipeline_start_impl 本就会清空队列，队列里这些帧注定是垃圾，
+        # 故此处直投丢弃零信息损失，且把归因说准。
+        if not self._round_alive():
+            self._audio_orphan_chunks += 1
+            if (self._audio_orphan_chunks == 1
+                    or self._audio_orphan_chunks % _AUDIO_DROP_LOG_EVERY == 0):
+                _LOGGER.warning(
+                    "上行音频无消费者（未开轮或本轮已收口）→ 直投丢弃，累计 %d 块"
+                    "：设备在无开轮状态下持续推流，HA 侧无从转写，请核对开轮时序"
+                    "（连续对话轮后是否重开轮属固件行为）",
+                    self._audio_orphan_chunks,
+                )
+            return
         if _queue_audio_chunk(self._audio_queue, data):
             self._audio_dropped_chunks += 1
             if (self._audio_dropped_chunks == 1

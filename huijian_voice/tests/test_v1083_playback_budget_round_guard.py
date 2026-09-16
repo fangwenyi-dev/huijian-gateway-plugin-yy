@@ -344,18 +344,32 @@ def test_zombie_guard_only_arms_on_drain_timeout():
 
 
 def test_zombie_guard_active_window_behavior():
-    fn = _extract_method(SAT, "_zombie_tts_guard_active")
+    """v1.0.87 窗行为真身改档：主判据=被 drain 掉的旧轮**还活着**（晚到 TTS 的
+    唯一来源），旧轮一收口窗即刻失效——1.0.86 的"8s 纯时间窗"会把新轮自己合法的
+    TTS 一起丢（现场 13:07 案面），8s 现仅存为硬上限。防回潮面（身份闸不得回来、
+    arm 点唯一、接线唯一）三条原样保留。"""
+    guard = _extract_method(SAT, "_zombie_tts_guard_active")   # 真实生产体
 
     class Self:
         _zombie_tts_guard_until = 0.0
+        _zombie_tts_guard_task = None
 
     async def scenario():
         s = Self()
-        assert fn(s) is False, "未 arm 不得生效（默认=全部放行）"
+        assert guard(s) is False                    # 没 arm → 一律放行
+        ev = asyncio.Event()
+        old = asyncio.ensure_future(ev.wait())      # 实锤僵尸：旧轮未收口
+        s._zombie_tts_guard_task = old
         s._zombie_tts_guard_until = asyncio.get_running_loop().time() + 8.0
-        assert fn(s) is True
+        assert guard(s) is True
+        ev.set()
+        await old                                   # 旧轮收口
+        assert guard(s) is False, "旧轮已死还拦=误杀新轮 TTS"
+        assert s._zombie_tts_guard_task is None
+        s._zombie_tts_guard_task = old
         s._zombie_tts_guard_until = asyncio.get_running_loop().time() - 0.01
-        assert fn(s) is False, "窗过期必须自动失效"
+        assert guard(s) is False                    # 硬上限仍在（僵尸永不收口兜底）
+        old.cancel()
 
     asyncio.run(scenario())
 

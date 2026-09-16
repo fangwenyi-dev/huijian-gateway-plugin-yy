@@ -100,8 +100,13 @@ def test_watchdog_loop_structure():
     body = src[i:src.index("async def on_connect_error")]
     assert "asyncio.wait_for(self.cli.device_info(), timeout=6.0)" in body, \
         "探针必须是应用层往返（与 VoiceAssistantRequest 同派发路径）"
-    assert "except TimeoutError" in body and "await self.cli.disconnect()" in body, \
-        "超时必须强制断连交 ReconnectLogic 重建"
+    # v1.0.87 改档：现场 12:17:36 那次重建里 disconnect() 自己等满 10s 抛库级
+    # ERROR 栈（半僵死连接本就回不了 ack），且 90s 节奏赶不上设备 8s×2=16s 的耐心。
+    # 超时仍必须强制重建，但 3s 拿不到回执就转公开重载 API；节奏降到 45s。
+    assert "except TimeoutError" in body and "timeout=3.0" in body, \
+        "超时必须强制断连，且不得干等 10s 回执"
+    assert "async_schedule_reload" in body, "断开失败必须转条目重载（重建不排队）"
+    assert "await asyncio.sleep(45.0)" in body, "探活节奏必须保持 45s（90s 慢于设备熔断）"
     assert "if not self._link_up" in body, "断线中不得抢 ReconnectLogic 的地盘"
     assert "半僵死" in body, "重建动作必须留 WARN（现场可归因）"
 

@@ -9,7 +9,7 @@ from homeassistant.components.tts import TextToSpeechEntity as BaseEntity
 from homeassistant.components.tts import TtsAudioType
 from homeassistant.components.tts.const import DOMAIN as ENTITY_DOMAIN
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.event import async_track_time_interval
@@ -109,8 +109,16 @@ class HuijianTtsEntity(BaseEntity):
         # 卡"不可用"至下一轮条目 reload 才顺带救活（history.csv：每次恢复都伴随
         # "" 重建，且 12:07 起播报全好状态永不回升）。周期复核只治状态卡面：
         # 值不变不 write（不产生冗余事件）；async_on_remove 随实体摘除。
+        # v1.0.87（现场 09:39 双条日志根修）：本回调**必须**带 @callback 装饰——
+        # 裸同步闭包被 HassJob 判成 JobType.Any，async_track_time_interval 于是
+        # 把它丢进默认线程池执行（现场 traceback：concurrent/futures/thread.py
+        # run → _avail_recheck → async_write_ha_state）→ frame 红线
+        # RuntimeError（ReportBehavior.ERROR 直接抛）→ 状态写入被吞杀：v1.0.79
+        # 的可用态自愈从未生效，且每次可用态真变化时倒贴一条错误日志。
+        # 守卫钉：tests/test_v1087_job_thread_safety.py（AST 级，全集成同规则）。
         self._avail_last = self.available
 
+        @callback
         def _avail_recheck(_now) -> None:
             avail = self.available
             if avail != self._avail_last:

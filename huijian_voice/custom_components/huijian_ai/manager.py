@@ -986,10 +986,16 @@ class ESPHomeManager:
         形态由设备侧熔断+升级梯+受控重启兜底（设备是独立进程，看得见到不到
         应答）。本狗覆盖的是"循环活着、这条连接/派发半死"的大多数真实形态。
         """
+        # v1.0.87：节奏 90s → 45s。现场（13:07:28 案）设备侧耐心是 8s×2=16s
+        # （两次无应答即自拆链+升级梯+唤醒词 parked replay），96s 才探一次的狗
+        # 永远赶不上；降到 45s 后最坏 51s，仍慢于设备熔断——**设备自拆链仍是
+        # 第一味药**（它是独立进程，看得见到不到应答），本狗的职责是别让 HA 侧
+        # 在这之后还抱着一条瘫连接不放。再往下加密探针（每 ~10s 一次全量
+        # device_info）性价比不划算，且假阳性会误拆活轮，不做。
         entry_key = self.entry.entry_id or ""
-        await asyncio.sleep(90.0 + (sum(map(ord, entry_key[-4:])) % 20))
+        await asyncio.sleep(45.0 + (sum(map(ord, entry_key[-4:])) % 15))
         while True:
-            await asyncio.sleep(90.0)
+            await asyncio.sleep(45.0)
             if not self._link_up:
                 continue  # 断线中：ReconnectLogic 的地盘，狗不插手
             try:
@@ -1000,10 +1006,27 @@ class ESPHomeManager:
                     "→ 主动断连重建（设备侧补播/等待窗将无缝续起）",
                     self.entry.title,
                 )
+                # 现场 12:17:36：disconnect() 自己等 DisconnectResponse 10s 超时
+                # 并抛库级 ERROR 栈——半僵死的连接本就回不了 ack，等它就是再瘫
+                # 10s。改为 3s 短等；拿不到回执就直接走条目 reload（公开 API，
+                # unload 路径关 client 不等设备 ack），重建不再排队。
+                rebuilt = False
                 try:
-                    await self.cli.disconnect()
-                except Exception:  # noqa: BLE001 —— 断开失败也已达目的
-                    pass
+                    await asyncio.wait_for(self.cli.disconnect(), timeout=3.0)
+                    rebuilt = True
+                except asyncio.CancelledError:
+                    raise
+                except Exception as err:  # noqa: BLE001 —— 断开失败也已达目的
+                    _LOGGER.debug("%s: 断开回执未取回（%s）→ 转条目重载",
+                                  self.entry.title, err)
+                if not rebuilt:
+                    try:
+                        self.hass.async_create_task(
+                            self.hass.config_entries.async_schedule_reload(
+                                self.entry.entry_id))
+                    except Exception:  # noqa: BLE001
+                        _LOGGER.debug("%s: 重载排期失败", self.entry.title,
+                                      exc_info=True)
             except asyncio.CancelledError:
                 raise
             except Exception as err:  # noqa: BLE001 —— 连接类异常=正在重连路上

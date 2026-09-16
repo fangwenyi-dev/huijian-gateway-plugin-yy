@@ -14,8 +14,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#1d1750">
 <title>慧尖HA语音插件</title>
-<link rel="stylesheet" href="css/huijian.css?v=1.0.86">
-<link rel="stylesheet" href="css/voice.css?v=1.0.86">
+<link rel="stylesheet" href="css/huijian.css?v=1.0.87">
+<link rel="stylesheet" href="css/voice.css?v=1.0.87">
 </head>
 <body>
 <!-- 「星辰大海」背景层（与网关加载项同一设计标准/同一固定种子＝同一片天）：
@@ -302,7 +302,7 @@
 
 <script>
 "use strict";
-const CURRENT_VERSION = "1.0.86";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
+const CURRENT_VERSION = "1.0.87";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
 // 音色表 = kokoro-multi-lang-v1_1 官方 103 sid 全表（k2-fsa docs sid 表实证；
 // 标注=对用户上传试听样本的 CAM++ 声纹溯源榜：v1_1 不含晓晓/云扬，
 // sid18=zf_026 女声最似晓晓(0.454 全场最近)，sid81=zm_055 最似云扬）
@@ -724,6 +724,12 @@ $("#reloadBtn").onclick = async ()=>{ try{ const r=await post("/api/system/reloa
 
 /* ── 设备/固件（OTA Phase 2，近场链接兜底形态）── */
 let _otaLatest = "";
+// v1.0.87：连续对话按钮话术改按集成诊断码出。v1.0.80 把「真无实体／实体在 HA
+// 被禁用／设备离线／实体未就绪」四种因混成一句"需固件≥2.1.46"（现场据此换固件
+// 仍不亮，白折腾）。数据源=集成台账 continuous_dialogue_diag，判据在 HA 侧，
+// 面板不复装（F-OTA-04 纪律：一种文案不背两种锅）。
+const CONT_LABELS = {on:"开启中", off:"已关闭", no_entity:"需固件≥2.1.46",
+                     disabled:"实体被禁用", offline:"设备离线", pending:"待就绪"};
 async function loadOta(){
   let dv={devices:[]}, fw={items:[]};
   try { dv = await api("/api/devices"); } catch(e){ dv={devices:[],error:e.message}; }
@@ -747,17 +753,26 @@ async function loadOta(){
       <td>${pill(d.online?"在线":"离线", d.online?"ok":"bad")}</td>
       <td>${fv}</td>
       <td>${badge}</td>
-      <td>${d.mac?`<button class="act" data-cont="${esc0(d.mac)}" data-on="${d.continuous_dialogue===true?1:0}">${d.continuous_dialogue===true?"开启中":d.continuous_dialogue===false?"已关闭":"需固件≥2.1.46"}</button>`:""}</td>
+      <td>${d.mac?`<button class="act" data-cont="${esc0(d.mac)}" data-on="${d.continuous_dialogue===true?1:0}">${CONT_LABELS[d.continuous_dialogue_diag]||"需固件≥2.1.46"}</button>`:""}</td>
       <td>${_otaLatest?`<button class="act" data-issue="${esc0(d.mac||d.name)}" data-remote="${remote?1:0}">${remote?"下发":"发放链接"}</button>`:""}</td>`;
     tb.appendChild(tr);
   }
   // v1.0.80：连续对话开关——中继到集成写设备 switch 实体（真源=设备 NVS，三边
   // 同源回显）；None 态（固件旧）按钮仍可点，失败由服务端话术点名
   tb.querySelectorAll("button[data-cont]").forEach(b=>b.onclick=async()=>{
-    try{
-      const r = await post("/api/device/continuous",{mac:b.dataset.cont, enabled:b.dataset.on!=="1"});
-      toast(r.success?(b.dataset.on!=="1"?"连续对话已开启":"连续对话已关闭"):("失败："+(r.error||"?")));
-    }catch(e){ toast("失败："+e.message); }
+    // v1.0.87：在飞禁点（旧形态连点两次会把开关打乒乓——两下都按渲染时的旧态取反）
+    const want = b.dataset.on!=="1";
+    b.disabled = true; const _txt = b.textContent; b.textContent = "下发中";
+    let r = {success:false, error:"?"};
+    try { r = await post("/api/device/continuous",{mac:b.dataset.cont, enabled:want}); }
+    catch(e){ r = {success:false, error:e.message}; }
+    b.disabled = false; b.textContent = _txt;
+    // success 只代表"服务调用返回"（esphome switch_command 即发即回）；真出声
+    // 效果由集成侧 ≤1.6s 回显复核报 echoed，三分话术，不再拿 success 当"已生效"。
+    toast(!r.success ? ("失败："+(r.error||"?"))
+        : r.echoed === true ? (want?"连续对话已开启":"连续对话已关闭")
+        : (want?"连续对话：指令已下发，设备未回显（查在线/固件版本）"
+               :"连续对话：关闭指令已下发，设备未回显"));
     loadOta();
   });
   // v1.0.74：有 ota_upgrade 接收口（≥v2.1.36）→真下发（离线等失败由服务端视图
@@ -998,6 +1013,6 @@ $("#regenBtn").onclick = async ()=>{
   try { await post("/api/token/regenerate",{}); toast("已重置"); loadEndpoints(); } catch(e){ toast(e.message); }
 };
 </script>
-<script src="js/starsky.js?v=1.0.86"></script>
+<script src="js/starsky.js?v=1.0.87"></script>
 </body>
 </html>

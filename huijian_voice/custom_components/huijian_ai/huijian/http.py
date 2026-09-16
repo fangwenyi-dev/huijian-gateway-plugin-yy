@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import hmac
 import json
@@ -280,6 +281,8 @@ class HuijianSatellitesView(HuijianHttpView):
                 "ota_services": ota_services,
                 # v1.0.80：面板「连续对话」列数据源（True/False/None=不可判）
                 "continuous_dialogue": _continuous_state(hass, entry),
+                # v1.0.87：None 的四种成因如实分开（面板按钮话术数据源）
+                "continuous_dialogue_diag": _continuous_diag(hass, entry),
             })
         return self.json({"devices": out})
 
@@ -353,25 +356,61 @@ _CONT_SUFFIX = "-continuous_dialogue_switch"  # unique_id 契约：MAC-object_id
 # build_unique_id 上游式）；object_id 由固件 v2.1.46 钉死 "continuous_dialogue_switch"
 
 
-def _find_continuous_entity(hass, entry):
-    """定位卫星条目的「连续对话」switch 实体（实体注册在设备条目下）。"""
+# v1.0.87：连续对话态诊断码。v1.0.80 的 None 三态把"真无实体/实体被禁用/设备
+# 离线/实体未就绪"混成一句"需固件≥2.1.46"——现场据此换固件仍不亮，白折腾一轮
+# （v1.0.65 F-OTA-04 纪律：一种文案不背两种锅）。True/False/None 对外契约不变
+# （面板 data-on 与 v1080 钉仍吃它），细分原因另走 continuous_dialogue_diag。
+_CONT_ON, _CONT_OFF = "on", "off"
+_CONT_MISSING = "no_entity"      # 注册表无此实体：固件 < v2.1.46（或从未上报）
+_CONT_DISABLED = "disabled"      # 实体存在但在 HA 被禁用（用户在 HA 实体页关过）
+_CONT_OFFLINE = "offline"        # 实体在，HA 态 unavailable：设备/API 断链
+_CONT_PENDING = "pending"        # 实体在，还没有态：HA 刚起/平台未加载完
+_CONT_ERRORS = {
+    _CONT_MISSING: "该设备无「连续对话」实体（固件需 ≥v2.1.46）",
+    _CONT_DISABLED: "「连续对话」实体在 HA 中被禁用——请在 HA 里启用该实体后再试",
+    _CONT_OFFLINE: "设备当前离线（API 连接断开），开关指令无法送达——上线后再试",
+    _CONT_PENDING: "设备实体尚未就绪（HA 刚重启/平台加载中）——稍后重试",
+}
+
+
+def _continuous_entity(hass, entry):
+    """→ (entity_id | None, 诊断码)。禁用实体不作为可写实体，但单独报因。
+
+    注意 er 的注册表条目**含禁用实体**：不查 ent.disabled 就会把"被禁用"当成
+    "可以 turn_on"，服务调用必然以"服务调用失败: …"回话，病因被折叠成怪症状。
+    """
     reg = er.async_get(hass)
+    disabled = None
     for ent in reg.async_entries_for_config_entry(entry.entry_id):
-        if (ent.entity_id.startswith("switch.")
+        if not (ent.entity_id.startswith("switch.")
                 and str(ent.unique_id or "").endswith(_CONT_SUFFIX)):
-            return ent.entity_id
-    return None
+            continue
+        if ent.disabled:
+            disabled = disabled or ent.entity_id
+            continue
+        return ent.entity_id, ""
+    return None, (_CONT_DISABLED if disabled else _CONT_MISSING)
+
+
+def _continuous_diag(hass, entry) -> str:
+    """台账诊断码：on|off|no_entity|disabled|offline|pending（面板话术数据源）。"""
+    eid, reason = _continuous_entity(hass, entry)
+    if eid is None:
+        return reason
+    st = hass.states.get(eid)
+    if st is None:
+        return _CONT_PENDING
+    if st.state == _CONT_ON:
+        return _CONT_ON
+    if st.state == _CONT_OFF:
+        return _CONT_OFF
+    return _CONT_OFFLINE if st.state == "unavailable" else _CONT_PENDING
 
 
 def _continuous_state(hass, entry):
-    """True/False=实体在且可达；None=无实体（固件 <v2.1.46）或态不可判（离线）。"""
-    eid = _find_continuous_entity(hass, entry)
-    if eid is None:
-        return None
-    st = hass.states.get(eid)
-    if st is not None and st.state in ("on", "off"):
-        return st.state == "on"
-    return None
+    """True/False=实体在且可达；None=不可判（无实体/禁用/离线/未就绪）。"""
+    d = _continuous_diag(hass, entry)
+    return True if d == _CONT_ON else (False if d == _CONT_OFF else None)
 
 
 class HuijianSatelliteContinuousView(HuijianHttpView):
@@ -407,10 +446,14 @@ class HuijianSatelliteContinuousView(HuijianHttpView):
         if target is None:
             return self.json({"success": False,
                               "error": f"卫星台账无此设备（mac={mac or entry_id}）"})
-        eid = _find_continuous_entity(hass, target)
+        eid, reason = _continuous_entity(hass, target)
         if eid is None:
+            return self.json({"success": False, "error": _CONT_ERRORS[reason]})
+        if _continuous_diag(hass, target) == _CONT_OFFLINE:
+            # 离线时服务调用只会以异常收口（"服务调用失败: Connection…"），
+            # 病因说是连接还是固件全靠猜——这里直接点名，且省掉下面的复核等待。
             return self.json({"success": False,
-                              "error": "该设备无「连续对话」实体（固件需 ≥v2.1.46）"})
+                              "error": _CONT_ERRORS[_CONT_OFFLINE]})
         try:
             await hass.services.async_call(
                 "switch", "turn_on" if enabled else "turn_off",
@@ -418,9 +461,22 @@ class HuijianSatelliteContinuousView(HuijianHttpView):
         except Exception as e:
             _LOGGER.warning("[连续对话] 调实体失败 %s: %s", eid, e)
             return self.json({"success": False, "error": f"服务调用失败: {e}"[:160]})
-        _LOGGER.info("[连续对话] %s → %s (mac=%s)", eid,
-                     "on" if enabled else "off", mac or entry_id)
-        return self.json({"success": True, "entity_id": eid, "enabled": enabled})
+        # v1.0.87（现场"点了没反应，再点一次才变"根修）：esphome 的 switch_command
+        # 是即发即回（写进发送缓冲就返回，blocking=True 也只代表服务调用完成），
+        # 真态要等设备 NVS 写 + deferred publish 回灌（固件 v2.1.46 一拍）。旧形态
+        # 面板拿 success 立刻重读台账 → 读到旧态 → 按钮纹丝不动。这里有界复核
+        # ≤1.6s，把"设备已回显"与"仅令已下发"分成两句话，面板据此出话术。
+        echoed = False
+        for _ in range(8):
+            await asyncio.sleep(0.2)
+            st = hass.states.get(eid)
+            if st is not None and (st.state == _CONT_ON) == enabled:
+                echoed = True
+                break
+        _LOGGER.info("[连续对话] %s → %s (mac=%s) 设备回显=%s", eid,
+                     "on" if enabled else "off", mac or entry_id, echoed)
+        return self.json({"success": True, "entity_id": eid, "enabled": enabled,
+                          "echoed": echoed})
 
 
 def parse_tts_stt_options(raw):

@@ -535,6 +535,18 @@ class Pipeline:
             trace = list(plan.trace)
             if not ok:
                 fb = select_fallback_plan(plan, fp_plan, kl_plan, speech)
+                # v1.0.87（现场 13:06:37 案）：降级同样是**动作**——主发次若是
+                # "结果不确定"（超时/连接/5xx：HA 可能已执行，只是回执丢了），
+                # 再放一发等于把同一件事做两遍（灯幂等没事，门锁/卷帘/相对量
+                # 最伤），且把播报再压后一发时长（现场 klar 执行超时 → 降级
+                # TurnDeviceOn 又跑 4.5s → 全轮 15.4s 才出声 → 用户以为没反应
+                # 重唤醒 → 又拆一轮）。同一判据（exec_risk）下方 LLM 复议闸
+                # 早已生效，这里补齐——"多一层兜底"不得变成"多一次动作"。
+                if fb is not None and exec_risk:
+                    logger.info("[级联] %s 执行结果不确定（可能已生效）→ 不降级重放，"
+                                "如实播报: %r", plan.source, speech[:24])
+                    trace.append("降级跳过:结果不确定")
+                    fb = None
                 if fb is not None:
                     fb = self._apply_context(fb, text, origin)
                     ask = self._confirm_ask(fb, origin)   # 降级计划同样过风险闸

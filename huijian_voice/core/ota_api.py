@@ -222,8 +222,13 @@ def setup(app, ctx):
             logger.info("[连续对话] 中继拒绝 mac=%s: %s", mac, ack.get("error", "?"))
             return web.json_response({"success": False,
                                       "error": ack.get("error", "集成未受理")})
-        logger.info("[连续对话] mac=%s → %s", mac, "开" if enabled else "关")
-        return web.json_response({"success": True, "enabled": enabled})
+        # v1.0.87：echoed=设备是否已把新态回灌到 HA（集成侧有界复核 ≤1.6s）。
+        # 本端纯转发不装判据、原样透传；None=对面集成尚不报此字段（版本不齐）。
+        echoed = ack.get("echoed")
+        logger.info("[连续对话] mac=%s → %s（设备回显=%s）",
+                    mac, "开" if enabled else "关", echoed)
+        return web.json_response({"success": True, "enabled": enabled,
+                                  "echoed": echoed})
 
     app.router.add_get("/api/devices", _devices)
     app.router.add_get("/api/firmware", _firmware)
