@@ -7,14 +7,15 @@
  * 上面那些 WXSS 专属禁令均不适用，可正常使用 backdrop-filter。但配色令牌、
  * 分层架构、克制光哲学逐字对齐母本：
  *
- *  设计语言：深空 #030712 上星光/星云/行星/流星构成活的宇宙，内容以透明玻璃
- *  悬浮其上。哲学＝克制的光——发光宁淡勿浓（标准里"白光/过糊/过大"多次被否），
- *  运动宁慢勿快但必须有独立节奏层次。
+ *  设计语言：深蓝夜空（#071426→#0c2138 自带蓝相）上星光/星云/行星/流星构成活
+ *  的宇宙，内容以透明玻璃悬浮其上。哲学＝克制的光——发光宁淡勿浓（标准里
+ *  "白光/过糊/过大"多次被否），运动宁慢勿快但必须有独立节奏层次。
  *
  *  令牌（青蓝主系，逐值照抄标准）：--primary #0ea5e9 / --primary-dark #0284c7 /
  *  --primary-light #38bdf8 / --accent #06b6d4 / --secondary #f59e0b。
- *  紫(#8b5cf6/#6366f1) 仅允许出现在氛围底色层（左上蓝角云一带），星点板/中心
- *  辉光/图标/按钮一律不加紫——旧版整套 #4f46e5 紫蓝主色已随本次设计作废。
+ *  紫(#8b5cf6/#6366f1) 按 ea92e36c 方案A④ 全站仅两通道：氛围层右下小角
+ *  α.06 + 星云尾锥 α.035；星点板/中心辉光/图标/按钮一律不加紫——旧版整套
+ *  #4f46e5 紫蓝主色与 v1.0.42 大面积染紫路线均已作废。
  *
  *  分层：.star-bg（fixed z0）→ .page（relative z1）。硬性规矩①内容根背景必须
  *  transparent，否则整块盖住星空（标准里曾 9 页踩此坑）。
@@ -28,9 +29,11 @@
     --accent: #06b6d4;
     --glow: #7dd3fc;            /* 深空提亮专用（logo 光环/高亮文字），非紫 */
     --secondary: #f59e0b;       /* 琥珀——仅告警/进度点缀 */
-    --bg-main: #1d1750;         /* v1.0.42 用户令「星辰大海白天太黑，加紫提亮」：近黑
-                                   #030712 → 深靛紫；白字对比度仍 ~15:1，夜间不刺眼 */
-    --surface: #241d5c;         /* 下拉选项底随基底同系提亮 */
+    --bg-main: #071426;         /* ea92e36c 方案A「深蓝夜空」定案（小程序 v1.4.15/98ebc5b，
+                                   用户 2026-09 推广到全部仓 Web UI）：夜空感靠底色自带蓝相。
+                                   已作废路线勿回潮：近黑 #030712「过黑」、v1.0.42 深靛紫
+                                   #1d1750「过紫」；白字 #f8fafc 对比 ~16:1 */
+    --surface: #0a1a30;         /* --bg-surface/--apple-gray6 随动（定案③） */
     --bg-card: rgba(255, 255, 255, .07);
     --bg-elevated: rgba(255, 255, 255, .10);
     --card-border: rgba(255, 255, 255, .14);
@@ -62,8 +65,8 @@ body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
     color: var(--text-primary);
     min-height: 100vh;
-    /* 深空基底：v1.0.42 起为深靛紫 --bg-main（原标准 .sky 纯色 #030712），
-       作为最底层铺满（star-bg 的星云/星点浮于其上） */
+    /* 夜空基底：方案A --bg-main #071426（原标准 .sky 纯色 #030712 已否为"过黑"），
+       作最底层兜底铺满；.star-bg 氛围层在其上叠 180° 深蓝渐变（定案①） */
     background: var(--bg-main);
     -webkit-font-smoothing: antialiased;
     /* Web 移植：内容层横向留白与最大宽从此处移到 .page（body 需全宽铺星空） */
@@ -82,38 +85,36 @@ body {
     z-index: 0;
     overflow: hidden;
     pointer-events: none;
-    /* 三档氛围底 + 纯色（用户定案保留紫）：全部大柔边 radial，禁内核白雾。
-       v1.6.30 首加紫（右上 #8b5cf6 靛紫云 .09，宁淡）。
-       v1.0.42 用户令「白天看不清，加紫提亮」：靛紫云 .09→.22 并移心扩面、
-       中上新增薰衣草紫大云 .16、底靛 .16→.24、左上蓝角 .18→.22、弱青 .10→.12。
-       紫仍限氛围底色层——星点/行星/按钮一律不加紫（口径不变）。 */
+    /* ea92e36c 方案A「深蓝夜空」逐值移植（母本 star-bg.wxss .sky @98ebc5b）：
+       夜空感改由底色带蓝相承担，不靠大面积染紫——v1.0.42 的右上弱青大云、
+       靛紫云 .22、薰衣草大云 .16、底靛大云 .24（小程序 195° 斜贯带的 Web 对应）
+       全部删除且不回加（"过黑+过紫/氛围压主体"被否）。左上蓝角云降档 .22→.14；
+       紫全站仅两通道（定案④）：右下小角 rgba(139,92,246,.06) + 星云尾锥 .035；
+       星点/行星/按钮一律无紫口径不变。 */
     background:
-        radial-gradient(60% 48% at 12% 4%, rgba(14, 165, 233, .22), rgba(14, 165, 233, .08) 42%, transparent 72%),
-        radial-gradient(50% 42% at 88% 12%, rgba(6, 182, 212, .12), transparent 66%),
-        radial-gradient(58% 48% at 78% 16%, rgba(139, 92, 246, .22), transparent 70%),
-        radial-gradient(62% 44% at 36% 8%, rgba(167, 139, 250, .16), transparent 70%),
-        radial-gradient(76% 58% at 50% 104%, rgba(99, 102, 241, .24), transparent 72%),
-        var(--bg-main);
+        radial-gradient(ellipse at 12% 4%, rgba(14, 165, 233, .14), rgba(14, 165, 233, .05) 30%, transparent 55%),
+        radial-gradient(ellipse at 88% 96%, rgba(139, 92, 246, .06), transparent 40%),
+        linear-gradient(180deg, #071426 0%, #0a1a30 55%, #0c2138 100%);
 }
-/* 星云团：逐字移植官网母本 v0.0.1（www/index.html L104-117）的
-   .bg-aurora::before（左上蓝）+ ::after（右下青）+ .bg-aurora-3.v-gold
-   （中上金，α.07），45s/50s/60s 三组 aurora-move 各自漂移。
-   2026-09-07 用户校准：web 星云口径以官网为准（此前单团 α.16 小程序
-   适配版作废）；三团皆 radial 柔边、无 blur、无内核白雾——官网原文。 */
+/* 星云团：结构仍按官网母本 v0.0.1 三团（左上蓝/右下青/中上金，45s/50s/60s
+   aurora-move 各自漂移，radial 柔边、无 blur、无内核白雾）；配色随
+   ea92e36c 方案A 定案⑤——主星云（蓝团）核提亮 rgba(56,189,248,.10)，
+   紫仅尾锥 .035（"氛围退、主体进"）；青/金两团随"氛围退"退回官网
+   克制原值 .08/.07（v1.0.42 的 .12/.10 提浓作废）。 */
 .nebula { position: absolute; top: 0; left: 0; right: 0; bottom: 0; overflow: hidden; pointer-events: none; }
 .nebula::before {
     content: ''; position: absolute; top: -30%; left: -10%; width: 60%; height: 80%;
-    background: radial-gradient(ellipse at center, rgba(14, 165, 233, .14) 0%, transparent 60%);
+    background: radial-gradient(ellipse at center, rgba(56, 189, 248, .1) 0%, rgba(99, 102, 241, .05) 45%, rgba(139, 92, 246, .035) 65%, transparent 80%);
     animation: aurora-move1 45s ease-in-out infinite;
 }
 .nebula::after {
     content: ''; position: absolute; bottom: -20%; right: -10%; width: 50%; height: 70%;
-    background: radial-gradient(ellipse at center, rgba(6, 182, 212, .12) 0%, transparent 60%);
+    background: radial-gradient(ellipse at center, rgba(6, 182, 212, .08) 0%, transparent 60%);
     animation: aurora-move2 50s ease-in-out infinite;
 }
 .nebula3 {
     position: absolute; top: 5%; left: 50%; width: 40%; height: 50%;
-    background: radial-gradient(ellipse at center, rgba(245, 158, 11, .10) 0%, transparent 55%);
+    background: radial-gradient(ellipse at center, rgba(245, 158, 11, .07) 0%, transparent 55%);
     animation: aurora-move3 60s ease-in-out infinite; pointer-events: none;
 }
 @keyframes aurora-move1 { 0%, 100% { transform: translate(0, 0) scale(1); } 33% { transform: translate(50px, 25px) scale(1.08); } 66% { transform: translate(-30px, 40px) scale(0.95); } 50% { transform: translate(60px, 30px) scale(1.1); } }
@@ -178,53 +179,89 @@ body {
     0%, 100% { opacity: 0; }
     50%      { opacity: var(--peak, .9); }
 }
-/* 流星：7 颗，10~16s 全周期线性坠落，行程 1100px（标准：压缩部分周期＝5 倍速被否；
-   官网 700px 手机竖屏截断故加长），只准向下。尾焰用细渐变线，头部亮点。 */
+/* 流星：7 颗，10~16s 全周期线性，行程 1100px（官网 700px 手机竖屏截断故
+   加长，贯穿整屏）。几何=母本同款斜坠（用户 2026-09 点报"运行方向不对"
+   订正——旧实现 translateY(1100px)+rotate(18deg) 近乎垂直下坠、7 道同向，
+   丢了母本角度语义）：rotate(var(--mrot)) translateX(1100px)，默认
+   --mrot:145deg＝斜左下（起点右半屏 4 道）；.mr=35deg 斜右下（起点左半屏
+   3 道）。头=2px 光点带辉光、尾=133px 渐隐细线（透明→头侧增亮）。
+   只准向下：-35° 爬升版已废弃，禁负角度。 */
 .meteor {
     position: absolute;
-    top: -12%;
+    /* 起点高度=var(--my)，默认 -12%（母本手机竖屏编排：1100px 斜行程
+       纵向分量≈0.57×1100≈631px，在 ~667px 高的手机屏恰好贯穿整屏）。
+       桌面视口更高，只留顶部起点会导致"流星只在上半屏"（用户点报），
+       故 v1.7.25 起逐颗编排：3 道起点下放到 12%~40% 中高度，斜轨迹
+       扫过下半屏；角度/行程/节奏/只准向下纪律不变。 */
+    top: var(--my, -12%);
     left: var(--mx, 50%);
+    --mrot: 145deg;
     width: 2px;
-    height: 120px;
-    background: linear-gradient(180deg, rgba(255, 255, 255, .0), rgba(224, 242, 254, .85) 70%, #fff);
-    border-radius: 999px;
+    height: 2px;
+    background: #fff;
+    border-radius: 50%;
+    box-shadow: 0 0 6px #fff, 0 0 12px rgba(255, 255, 255, .5);
     opacity: 0;
-    transform: rotate(18deg);
+    transform: rotate(var(--mrot)) translateX(0);
     animation: meteor-fall var(--mdur, 12s) linear var(--mdelay, 0s) infinite;
     will-change: transform, opacity;
 }
+.meteor::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    right: 0;
+    width: 133px;
+    height: 1px;
+    background: linear-gradient(to right, transparent, rgba(255, 255, 255, .4), rgba(255, 255, 255, .85));
+    transform: translateY(-50%);
+    border-radius: 1px;
+}
+.meteor.mr { --mrot: 35deg; }   /* 斜右下 35°（左半屏起点的 3 道） */
 /* 负延迟＝进场即有流星在途（正延迟会让打开页面前 1~11s 一颗流星都
-   看不到——用户实测反馈"没看到流星"的根因；10~16s 全周期节奏不变） */
-.meteor-1 { --mx: 8%;  --mdur: 11s; --mdelay: -9s; }
-.meteor-2 { --mx: 26%; --mdur: 14s; --mdelay: -3s; }
-.meteor-3 { --mx: 44%; --mdur: 10s; --mdelay: -6s; }
-.meteor-4 { --mx: 61%; --mdur: 16s; --mdelay: -12s; }
-.meteor-5 { --mx: 77%; --mdur: 12s; --mdelay: -1s; }
-.meteor-6 { --mx: 90%; --mdur: 13s; --mdelay: -8s; }
-.meteor-7 { --mx: 35%; --mdur: 15s; --mdelay: -4s; }
+   看不到——用户实测反馈"没看到流星"的根因；10~16s 全周期节奏不变）。
+   --my 起点高度（v1.7.25 用户点报"流星只有上半屏有，中下部也该有进入"）：
+   4 道顶部 -12% + 3 道中高度 12%/26%/40%，斜轨迹扫过下半屏 */
+.meteor-1 { --mx: 8%;  --my: -12%; --mdur: 11s; --mdelay: -9s; }
+.meteor-2 { --mx: 26%; --my: 26%;  --mdur: 14s; --mdelay: -3s; }
+.meteor-3 { --mx: 44%; --my: -12%; --mdur: 10s; --mdelay: -6s; }
+.meteor-4 { --mx: 61%; --my: 40%;  --mdur: 16s; --mdelay: -12s; }
+.meteor-5 { --mx: 77%; --my: -12%; --mdur: 12s; --mdelay: -1s; }
+.meteor-6 { --mx: 90%; --my: 12%;  --mdur: 13s; --mdelay: -8s; }
+.meteor-7 { --mx: 35%; --my: -12%; --mdur: 15s; --mdelay: -4s; }
 /* v1.7.4 用户令流星三色——官网 createMeteor 配比 60% 白/25% 蓝/15% 琥珀
-   （7 道分配：蓝 2/琥珀 1），尾迹渐变头色 + 同色辉光（官网 box-shadow 口径） */
+   （7 道分配：蓝 2/琥珀 1）；v1.7.24 随母本几何改点头光点+尾线同色
+   （box-shadow 双晕 + drop-shadow 轮廓辉光口径不变） */
 .meteor.m-blue {
-    background: linear-gradient(180deg, rgba(56, 189, 248, 0), rgba(56, 189, 248, .5) 70%, #38bdf8);
+    background: #38bdf8;
+    box-shadow: 0 0 6px #38bdf8, 0 0 12px rgba(56, 189, 248, .5);
     filter: drop-shadow(0 0 6px rgba(56, 189, 248, .7));
 }
+.meteor.m-blue::before {
+    background: linear-gradient(to right, transparent, rgba(56, 189, 248, .35), #38bdf8);
+}
 .meteor.m-amber {
-    background: linear-gradient(180deg, rgba(251, 191, 36, 0), rgba(251, 191, 36, .5) 70%, #fbbf24);
+    background: #fbbf24;
+    box-shadow: 0 0 6px #fbbf24, 0 0 12px rgba(251, 191, 36, .45);
     filter: drop-shadow(0 0 6px rgba(251, 191, 36, .6));
 }
+.meteor.m-amber::before {
+    background: linear-gradient(to right, transparent, rgba(251, 191, 36, .35), #fbbf24);
+}
 @keyframes meteor-fall {
-    0%   { transform: translateY(0) rotate(18deg); opacity: 0; }
-    6%   { opacity: 1; }
-    70%  { opacity: 1; }
-    100% { transform: translateY(1100px) rotate(18deg); opacity: 0; }
+    0%   { transform: rotate(var(--mrot)) translateX(0); opacity: 0; }
+    5%   { opacity: 1; }
+    85%  { opacity: .7; }
+    100% { transform: rotate(var(--mrot)) translateX(1100px); opacity: 0; }
 }
 /* reduce 慢速变体（官网 meteor-fall-slow 同款几何节奏）：亮度峰值 .9 尾段
-   .5、行程收短到 850px，比全速温和但仍斜穿天幕 */
+   .5、行程收短到 850px，比全速温和但仍斜穿天幕；--mrot 元素级自定义属性
+   使 .mr 在 reduce 下同样保持 35° 右下方向 */
 @keyframes meteor-fall-slow {
-    0%   { transform: translateY(0) rotate(18deg); opacity: 0; }
+    0%   { transform: rotate(var(--mrot)) translateX(0); opacity: 0; }
     5%   { opacity: .9; }
     90%  { opacity: .5; }
-    100% { transform: translateY(850px) rotate(18deg); opacity: 0; }
+    100% { transform: rotate(var(--mrot)) translateX(850px); opacity: 0; }
 }
 
 /* =====================================================================
