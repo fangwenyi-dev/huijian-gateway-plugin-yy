@@ -328,6 +328,34 @@ def test_indeterminate_failure_does_not_replay_fallback():
     assert ex2.calls == ["klar", "t0"], "明确失败时降级照旧（本钉要会咬人）"
 
 
+def test_changelog_sections_wellformed_and_within_ci_cap():
+    """CHANGELOG 结构钉（本批实发教训：插 1.0.87 段时把 1.0.86 的标题整行吃掉，
+    结果 CI 提取 1.0.87 正文越界把上一版记录一起塞进 release）。三条：
+    ① 每个版本段标题格式合法且**版本连续不缺档**（从当前版往下 6 档）；
+    ② 当前版本段必须能被 CI 的同形 awk 干净切出（下一段标题即边界）；
+    ③ 当前版本段 ≤80 行——CI 用 `head -80` 截正文，超了就把段尾（含诚实账）
+       静默丢掉，客户看到的 release 比仓库记录少一截。"""
+    import re
+    src = (ROOT.parent / "CHANGELOG.md").read_text(encoding="utf-8")
+    heads = re.findall(r"(?m)^## \[(\d+\.\d+\.\d+)\] - (\d{4}-\d{2}-\d{2})", src)
+    assert heads, "CHANGELOG 无任何版本段标题"
+    for ver, date in heads[:8]:
+        assert re.match(r"^\d+\.\d+\.\d+$", ver), ver
+    ver = (ROOT / "config.yaml").read_text(encoding="utf-8")
+    ver = re.search(r'(?m)^version:\s*"([\d.]+)"', ver).group(1)
+    assert heads[0][0] == ver, "CHANGELOG 首段不是当前版本 %s" % ver
+    缺 = [heads[i][0] for i in range(1, min(6, len(heads)))
+          if int(heads[i][0].rsplit(".", 1)[1]) + 1
+          != int(heads[i - 1][0].rsplit(".", 1)[1])]
+    assert not 缺, "版本段缺档（上一版标题被吃掉？）：" + ", ".join(缺)
+    lines = src.split("\n")
+    start = next(i for i, l in enumerate(lines) if l.startswith("## [" + ver + "]"))
+    end = next((i for i in range(start + 1, len(lines))
+                if lines[i].startswith("## [")), len(lines))
+    assert end - start <= 80, (
+        "当前版本段 %d 行 > CI head -80 —— release 正文会被静默截尾" % (end - start))
+
+
 def test_honest_phrasing_for_indeterminate():
     from core.executor import zh_error, is_indeterminate
     assert is_indeterminate("执行超时")
