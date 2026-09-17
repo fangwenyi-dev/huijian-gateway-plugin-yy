@@ -106,6 +106,14 @@ def test_watchdog_loop_structure():
     assert "except TimeoutError" in body and "timeout=3.0" in body, \
         "超时必须强制断连，且不得干等 10s 回执"
     assert "async_schedule_reload" in body, "断开失败必须转条目重载（重建不排队）"
+    # v1.0.89（F5-d）：拆连前必须**双探**确认。真机实证（2026-09-16 19:47:11 /
+    # 19:52:37 两轮误判）：单次 6s 探针超时即 reload 整条条目，reload 又踩库内
+    # 10s disconnect + 二次 unload ValueError + 握手 69s 超时 ⇒ 一次误判 = 94 秒
+    # 语音全哑（即现场"播报中再唤醒就熔断"的主放大器）。退回单探当场红。
+    assert body.count(
+        "await asyncio.wait_for(self.cli.device_info(), timeout=6.0)") == 2, \
+        "探针必须双探确认（单探误判=94s 黑洞）"
+    assert "双探针" in body, "半僵死 WARN 必须点明双探均无回（现场归因）"
     assert "await asyncio.sleep(45.0)" in body, "探活节奏必须保持 45s（90s 慢于设备熔断）"
     assert "if not self._link_up" in body, "断线中不得抢 ReconnectLogic 的地盘"
     assert "半僵死" in body, "重建动作必须留 WARN（现场可归因）"

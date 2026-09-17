@@ -161,7 +161,10 @@ def test_recognize_cancelled_attribution():
     anyio = _AnyioStub()
     lg = _Log()
     ns = {"asyncio": asyncio, "anyio": anyio, "time": time,
-          "_SEND_TIMEOUT_S": _stt_send_timeout(), "_LOGGER": lg}
+          # 桩随生产体同步：本钉只验"取消穿透+归因+断连清算"，喂的音频即时到达，
+          # v1.0.89 新增的首帧窗取大值使其不参与（False 参与=改测别的事）。
+          "_SEND_TIMEOUT_S": _stt_send_timeout(), "_LOGGER": lg,
+          "_FIRST_CHUNK_TIMEOUT_S": 30.0}
     body = ("class _S:\n"
             "    def __init__(self):\n"
             "        self.logger = lg_holder['lg']\n"

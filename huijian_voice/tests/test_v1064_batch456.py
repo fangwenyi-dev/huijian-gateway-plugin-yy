@@ -372,6 +372,10 @@ def _get_recognize():
         code = "\n".join(l[4:] if l.startswith("    ") else l
                          for l in code.splitlines())
         code = code.replace("_SEND_TIMEOUT_S", "0.3")  # 测试加速，分支语义不变
+        # 桩随生产体同步（v1.0.89 F5-a2 新增"首帧窗"）：本文件三枚 recognize 钉验的
+        # 是串行锁/发送失败/等转录超时，音频均即时喂入 ⇒ 首帧窗必须**不参与**，
+        # 取大值令其永不触发，否则三枚钉集体改测了另一件事。
+        code = code.replace("_FIRST_CHUNK_TIMEOUT_S", "30")
         ns = {"asyncio": asyncio, "anyio": _ANYIO_REAL, "logging": logging,
               "_LOGGER": logging.getLogger("t")}
         exec(compile(code, "<recognize>", "exec"), ns)  # noqa: S102

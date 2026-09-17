@@ -1001,8 +1001,27 @@ class ESPHomeManager:
             try:
                 await asyncio.wait_for(self.cli.device_info(), timeout=6.0)
             except TimeoutError:
+                # v1.0.89（F5-d）：单次探针超时**不再拆连**——隔 1s 再探一次。
+                # 真机实证（2026-09-16 19:47:11 与 19:52:37 两轮，均本狗误判）：
+                # 会话期一次 6s 探针不回，本狗就 reload 整条条目；而 reload 自己
+                # 又踩 `disconnect()` 库内 10s + 二次 unload `ValueError: Config
+                # entry was never loaded!` + 新连接握手 69s 超时 ⇒ **一次误判 = 94
+                # 秒语音全哑**（19:47:11→19:48:45 实测）。这是"播报中再唤醒就
+                # 熔断"的主放大器，比设备侧任何一环都贵。真僵死的链路不会 7s 后
+                # 就活过来（设备侧 keepalive 50s / 升级梯 90s 才动，仍有窗口），
+                # 而一次拥塞抖动不再把好连接拆掉。双探皆无回才执行原处置。
+                try:
+                    await asyncio.sleep(1.0)
+                    await asyncio.wait_for(self.cli.device_info(), timeout=6.0)
+                    continue          # 第二探针通了＝抖动，不动这条链路
+                except asyncio.CancelledError:
+                    raise
+                except TimeoutError:
+                    pass              # 双探无回 → 落回原断连+重载处置
+                except Exception:  # noqa: BLE001 连接类异常交给 ReconnectLogic
+                    continue
                 _LOGGER.warning(
-                    "%s: VA 链路半僵死（device_info 探测 6s 无回）"
+                    "%s: VA 链路半僵死（device_info 双探针 6s+6s 均无回）"
                     "→ 主动断连重建（设备侧补播/等待窗将无缝续起）",
                     self.entry.title,
                 )
@@ -1657,10 +1676,41 @@ async def cleanup_instance(entry: ESPHomeConfigEntry) -> RuntimeEntryData:
     data.async_on_disconnect()
     for cleanup_callback in data.cleanup_callbacks:
         cleanup_callback()
+    # v1.0.89（F5-c2）：**先摘 assist_satellite 的 loaded 闩锁，再关连接**。
+    # 现场 18:14:48.740：正常 unload 已把平台弹出，但 `entry_data.loaded_platforms`
+    # 里 ASSIST_SATELLITE 还在；紧接着本函数关 client → ReconnectLogic 回调
+    # on_disconnect（:880）判"仍 loaded"→ **二次 async_unload_platforms** → core
+    # entity_component.py:200 抛 `ValueError: Config entry was never loaded!` 整栈落
+    # ERROR。except 虽兜住不影响结果，但现场看像"集成把自己 unload 炸了"，且与
+    # 设备侧升级梯同时自愈会让观测面塌成"全线失联"。discard 幂等，摘早无副作用。
+    data.loaded_platforms.discard(Platform.ASSIST_SATELLITE)
     try:
         await data.async_cleanup()
     finally:
-        await data.client.disconnect()
+        # v1.0.89（F5-c1）：断连必须**有界**。aioesphomeapi 的 disconnect() 内部等
+        # DisconnectResponse 满 10.0s（库常量 DISCONNECT_RESPONSE_TIMEOUT），半僵死
+        # 链路本就回不了 ack——现场实测条目 reload 因此在 38.7s 之后又白瘫 10s
+        # （18:14:38.7 → 18:14:48.737 才抛 "disconnect request failed"）。v1.0.87 的
+        # 3s 短等只罩住了看门狗体内那一次（:1015），本条必经路径是修一漏一。
+        # 2s 拿不到回执即转强制关闭（force_disconnect 为同步原语，不等 ack）；库版本
+        # 无该原语时静默略过——client 随后随条目重载重建，绝不因"关不干净"再拖 unload。
+        try:
+            await asyncio.wait_for(data.client.disconnect(), timeout=2.0)
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001 —— 关不掉也要收口
+            _LOGGER.debug(
+                "%s: 断连回执未取回（%s）→ 转强制关闭，不再占用 unload 时间窗",
+                entry.title, err,
+            )
+            force = getattr(data.client, "force_disconnect", None)
+            if callable(force):
+                try:
+                    force()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001
+                    _LOGGER.debug("%s: 强制关闭亦失败", entry.title, exc_info=True)
     return data
 
 

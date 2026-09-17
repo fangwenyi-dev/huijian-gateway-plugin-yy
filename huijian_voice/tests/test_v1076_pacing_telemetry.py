@@ -155,7 +155,11 @@ def test_push_stream_telemetry_fields(path):
     """源级：收口 INFO 必须带三字段，且绝对时刻背压公式原样（改动即红）。"""
     src = (path / SAT).read_text(encoding="utf-8")
     assert "跨度 %.2fs 速率 %.2f× 最大块隙 %dms" in src
-    assert "(audio_duration_sent - _DEVICE_BUFFER_TARGET_S) - elapsed" in src, \
+    # v1.0.89（F3）改档说明：本钉守的是"**绝对时刻背压公式不许退化成拍数计数/
+    # 去掉 sleep**"这一口径，不是水位字面值。水位自 v1.0.89 起按设备固件能力分流
+    # （0.384 / 1.536s，见 tests/test_v1089_downlink_prebuf.py），故变量名随之下沉。
+    # 反向删除（把 sleep 去掉、或改回写死常量）本钉当场红——已实证。
+    assert "(audio_duration_sent - buffer_target_s) - elapsed" in src, \
         "背压公式被动过——遥测口径失效"
 
 

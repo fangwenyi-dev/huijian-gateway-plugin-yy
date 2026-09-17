@@ -23,6 +23,13 @@ ATTR_TRANSPORT = "stt_transport"
 
 _SEND_TIMEOUT_S = 10.0
 _STALE_DRAIN_BUDGET_S = 0.5
+# v1.0.89（F5-a2）：开轮后"首帧音频"等待窗。设备侧 abort/自触发后会留下**一帧都
+# 不推**的空轮（现场 18:09~18:14 反复四条 `STT 事务被外部取消（发送相 在途4.1s
+# 已发0帧）`；4.0/4.1s 既不是本仓常量也不是 core 常量，而是"下一个拆轮者到来"的
+# 时刻——即这轮一直自己挂着）。挂着的代价不止延迟：事务不收口 ⇒ 它的回包在
+# buffer-0 内存流上堵死 reader ⇒ 30s 交付判死换连（18:14:14.84 → 18:14:44.841
+# 恰好 30.0s）⇒ 与条目 reload 撞车，就是现场"播报中再唤醒就熔断"的放大器之一。
+_FIRST_CHUNK_TIMEOUT_S = 3.0
 
 
 def get_entry_transport(hass: HomeAssistant, entry: ConfigEntry) -> "SttTransport":
@@ -51,6 +58,24 @@ class SttTransport(WsTransport):
         super().__init__(hass, entry, endpoint, attr_endpoint, logger)
         # M9：整段对话上锁串行是唯一解（v1.0.45 TTS 定案原文同病同理）。
         self._request_lock = asyncio.Lock()
+        # v1.0.89（F5-a1）认领判定＝"本通道的对话锁是否被持有"。recognize 全程持
+        # 锁（含被取消时的上下文管理器释放），所以 `locked()` 为真 ⇔ 此刻有一个
+        # 消费者在收；为假时到达的消息必属**已消失的上一轮**，在交付点就地丢弃
+        # （连 reader 都不进）。与 v1.0.88 TTS 的 `_round_active` 同效，但零新增
+        # 生命周期状态——不再有"认领未释放"这类二次泄漏面。
+        self._unclaimed_total = 0
+
+    def _on_incoming(self, item):
+        """交付前过滤（基类钩子）：无在途事务 ⇒ 就地丢弃，返回 True=丢。"""
+        if self._request_lock.locked():
+            return False
+        self._unclaimed_total += 1
+        if self._unclaimed_total == 1 or self._unclaimed_total % 20 == 0:
+            self.logger.warning(
+                "STT 通道无在途事务，就地丢弃消息（上一轮已消失：被取消/超时未收口）"
+                "，累计 %d 条——残包不再堵 reader，避免 30s 交付判死把整条通道换连",
+                self._unclaimed_total)
+        return True
 
     def _drain_stale(self) -> int:
         """事务前排净 reader 上已排队的残帧/残转录（上一轮超时/取消遗留）。"""
@@ -95,10 +120,42 @@ class SttTransport(WsTransport):
                 await asyncio.wait_for(
                     self.send_message({"type": "listen", "state": "start"}),
                     _SEND_TIMEOUT_S)
-                async for chunk in chunks:
+                # v1.0.89（F5-a2）：**首帧单独设 3s 窗**。开轮后设备一帧不推
+                # （barge-in/abort 后静默、自触发空轮）时，旧形态抱着这条事务等
+                # "下一个拆轮者"（现场 4.1s 悬挂 ×N），悬挂期间它的回包还会堵死
+                # buffer-0 reader 直到 30s 交付判死换连。现当场以 stop 收口、按
+                # **契约内的合法空识别**返回（见本函数 docstring）。后续帧不设窗：
+                # 稳态推流节拍由设备决定，误砍=丢音频（宁慢勿砍）。
+                it = chunks.__aiter__()
+                try:
+                    chunk = await asyncio.wait_for(
+                        it.__anext__(), _FIRST_CHUNK_TIMEOUT_S)
+                except StopAsyncIteration:
+                    chunk = None
+                except asyncio.TimeoutError:
+                    self.logger.warning(
+                        "STT 开轮后 %.1fs 无上行音频（设备未推流/轮已被打断）"
+                        "→ 就地 stop 收口为空识别，不再悬挂等拆轮者",
+                        _FIRST_CHUNK_TIMEOUT_S)
+                    try:
+                        await it.aclose()
+                    except Exception:  # noqa: BLE001 收口尽力而为，不掩盖主因
+                        pass
+                    try:
+                        await asyncio.wait_for(
+                            self.send_message({"type": "listen", "state": "stop"}),
+                            _SEND_TIMEOUT_S)
+                    except Exception as err:  # noqa: BLE001
+                        self.logger.debug("STT 空轮收口 stop 未送达: %s", err)
+                    return "", None
+                while chunk is not None:
                     await asyncio.wait_for(self.send_message(chunk),
                                            _SEND_TIMEOUT_S)
                     frames += 1
+                    try:
+                        chunk = await it.__anext__()
+                    except StopAsyncIteration:
+                        chunk = None
                 await asyncio.wait_for(
                     self.send_message({"type": "listen", "state": "stop"}),
                     _SEND_TIMEOUT_S)

@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import re
 import socket
 from collections.abc import AsyncGenerator, AsyncIterable
 from functools import partial
@@ -166,7 +167,53 @@ async def async_setup_entry(
 # 设备侧水位事实（固件 audio_service.h）：MAX_PLAYBACK_TASKS_IN_QUEUE=40 块 × 32ms
 # ≈ 1.28s，满则丢最旧并计数。沿用上游"目标 75% 水位"口径取 384ms（比设备容量更
 # 保守 → 抗欠载；代价是约 0.4s 预缓冲）。
+# 2026-09-16 跨仓事实更新（固件 v2.1.51 批）：该 40 块已扩到 64 块（≈2.048s），
+# 且固件下行改为一拍最多读 10 包（旧"一拍 1 包"把长播报摊成 0.22× 到达，就是
+# "一句话分好几次说完"的真凶）。**水位分流（F3）见本块下方 v1.0.89 段**：对存量
+# ≤v2.1.50 设备（容量仍 1.28s）超发会撞它"满则丢最旧"=「缺头/丢头」症状族，所以
+# 抬水位必须按 project_version 分流，绝不一刀切。判据回读：设备侧 `TTS stream end`
+# 时刻 − `Downlink audio start` 应≈音频时长；仍远大于时长再看本行推流收口的
+# 「速率 X.XX×」与「水位 X.XXXs」（v1.0.89 起一并打印，用于对账分流是否落地）。
 _DEVICE_BUFFER_TARGET_S = 0.384
+
+# ── v1.0.89（F3）：按设备固件能力分流的下行预灌水位 ──────────────────────────
+# 0.384s 不是经验值，而是**上游 512ms 环缓冲 × 75% = 12 块 × 32ms** 继承下来的
+# 字面值；落到本板（固件 audio_service.h 的 MAX_PLAYBACK_TASKS_IN_QUEUE=40 块
+# ×32ms = 1.28s）只等于 30%——刻意保守，代价就是"一慢就饿"。
+# 固件 v2.1.51 把该队列扩到 64 块（= 2.048s）并把下行 ingest 从"每拍 1 包"改成
+# "每拍 ≤10 包"（真机实测：7.02s 音频到达跨度从 0.22× 抬到 ≈1.1×），于是同一
+# "75% 容量"口径的新水位＝0.75 × 2.048s ＝ **1.536s**。
+# 为什么必须分流、不能一刀切抬：对存量 ≤v2.1.50 设备（容量仍 1.28s）超发到 1.5s 会
+# 撞它"满则丢最旧"=「缺头/丢头」症状族，比现在的句间停顿更难查。判据源＝设备自己经
+# DeviceInfoResponse 上报的 project_version（v2.1.37 起随 PROJECT_VER 编译进 bin，
+# 集成 manager.py 已拿它拼 sw_version）。
+# 铁律：方向恒为 **fail-open**——device_info 不在、project_version 缺失/畸形、版本
+# 低于门槛，一律回 0.384s（＝今天的行为），绝不因"读不到版本"把播报做成缺头。
+_DEVICE_BUFFER_TARGET_S_V2151 = 1.536
+_PREBUF_FW_MIN = (2, 1, 51)   # 具备 64 块队列 + 10 包/拍批读的最低固件版本
+
+_RE_PROJECT_VER = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)")
+
+
+def _parse_project_version(raw: object) -> tuple[int, int, int] | None:
+    """'2.1.51' / '2.1.51 (…)' / 'v2.1.51' → (2, 1, 51)；解析不出 → None。
+
+    只认 `x.y.z` 数字前缀，后缀（beta/编译标记）忽略；元组比较天然对 2.10.0 这类
+    位权正确，绝不做字符串大小比较。"""
+    m = _RE_PROJECT_VER.match(str(raw or "").strip())
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2)), int(m.group(3))
+
+
+def _prebuf_target_for_version(raw: object) -> float:
+    """project_version → 本设备的预灌水位（秒）；**未知一律旧行为**。
+
+    纯函数=可钉可测：真值表见 tests/test_v1089_downlink_prebuf.py。"""
+    ver = _parse_project_version(raw)
+    if ver is not None and ver >= _PREBUF_FW_MIN:
+        return _DEVICE_BUFFER_TARGET_S_V2151
+    return _DEVICE_BUFFER_TARGET_S
 
 #: WAV 头最大攒量：坏流兜底（超过即判协议异常，绝不无限攒内存）
 _MAX_WAV_HEADER_BYTES = 64 * 1024
@@ -1188,6 +1235,14 @@ class EsphomeAssistSatellite(
         )
         loop = asyncio.get_running_loop()
         started = loop.time()
+        # v1.0.89（F3）：本设备的预灌水位——按固件能力分流，**逐条失败都回旧值**。
+        # 写成"先赋默认、再 suppress 整段尝试"而不是 let-else：AST 摘真身的行为钉
+        # 只喂部分桩（没有 device_info/_entry_data 也不许炸），NameError/AttributeError
+        # 一并落回 0.384s＝今天的行为，方向恒 fail-open。
+        buffer_target_s = _DEVICE_BUFFER_TARGET_S
+        with contextlib.suppress(Exception):
+            buffer_target_s = _prebuf_target_for_version(
+                self._entry_data.device_info.project_version)
         frames_sent = 0
         first_chunk_ms: int | None = None
         # v1.0.76（归因钉）：连续块发送时刻跟踪——收口一行给出跨度/速率/最大
@@ -1303,7 +1358,7 @@ class EsphomeAssistSatellite(
 
                     # 背压：把"已发音频时长 − 已用墙钟"压到水位以内（上游同口径）
                     elapsed = loop.time() - started
-                    if (wait_time := (audio_duration_sent - _DEVICE_BUFFER_TARGET_S) - elapsed) > 0:
+                    if (wait_time := (audio_duration_sent - buffer_target_s) - elapsed) > 0:
                         await asyncio.sleep(wait_time)
             except ValueError as err:
                 # fail-loud：非 WAV / 形态不符 / 头不完整 → 当场点名（旧实现是 error 行）
@@ -1340,13 +1395,14 @@ class EsphomeAssistSatellite(
                 # 形态，绝不报 0.00 让现场把"快"误读成"饿"。
                 _rate = (_audio_s / _span_s) if _span_s > 0.001 else 99.0
                 _LOGGER.info(
-                    "[TTS] 推流 %d 帧 %.2fs（流式，首块 %sms；跨度 %.2fs 速率 %.2f× 最大块隙 %dms）",
+                    "[TTS] 推流 %d 帧 %.2fs（流式，首块 %sms；跨度 %.2fs 速率 %.2f× 最大块隙 %dms 水位 %.3fs）",
                     frames_sent,
                     _audio_s,
                     first_chunk_ms if first_chunk_ms is not None else -1,
                     _span_s,
                     _rate,
                     _max_gap_ms,
+                    buffer_target_s,
                 )
         except asyncio.CancelledError:
             return  # Don't trigger state change
