@@ -18,8 +18,16 @@ import types
 from pathlib import Path
 from types import SimpleNamespace
 
-import anyio   # 收集期取真身（test_integration_link_stability 会在运行期把
-              # sys.modules['anyio'] 换成桩且不还原——本仓 v1064 同款防御）
+import pytest
+
+# anyio 只在集成运行期存在（HA 侧 aioesphomeapi 拉入），加载项 Lint 的精简
+# requirements 不含它——顶层若硬 `import anyio` 会让 collection 直接
+# ModuleNotFoundError、"1 error during collection" 拖垮整个 CI（v1.0.91 无此顶层
+# import 故绿；本文件 v1.0.92 新加，实为集成侧代码的桩化测试）。⇒ importorskip：
+# CI 无 anyio 时整模块优雅跳过（STT rid 属集成侧，由装有 anyio 的 dev/HA 覆盖），
+# 有则照跑。"收集期取真身、防 test_integration_link_stability 运行期换 sys.modules
+# 不还原"的 v1064 防御语义在有 anyio 的环境里完全不变。
+anyio = pytest.importorskip("anyio")
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
