@@ -1404,6 +1404,18 @@ class EsphomeAssistSatellite(
                     _max_gap_ms,
                     buffer_target_s,
                 )
+                # v1.0.90：饥饿形态额外升一条 WARNING。上面那行是 INFO，HA 默认
+                # 日志级（warning）下**现场看不到**，而"一句话分几次说完"的定锅
+                # 全靠这两个数：速率<0.8 或 最大块隙>1s ⇒ 锅在上游数据晚到/HA 推流
+                # 循环被饿（设备侧已排除：固件 v2.1.51+ 一拍可收 10 包、且停顿期无
+                # `Component … took a long time`）。现场复制这一行就能定方向。
+                if _rate < 0.8 or _max_gap_ms > 1000:
+                    _LOGGER.warning(
+                        "[TTS] 下行饥饿：音频 %.2fs 用了 %.2fs 推完（速率 %.2f×，"
+                        "最长一次等待 %dms）——听感为播报断续；锅在上游出帧晚或 HA 推流"
+                        "被饿，非设备丢帧",
+                        _audio_s, _span_s, _rate, _max_gap_ms,
+                    )
         except asyncio.CancelledError:
             return  # Don't trigger state change
         finally:

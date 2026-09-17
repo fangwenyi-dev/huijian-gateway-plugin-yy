@@ -331,7 +331,16 @@ class Executor:
     # 窗户执行器真实驱动是集成 ControlWindow 的 button.press，喂 turn_on 恒
     # 假动作。本闸只做保守拦截、不改道猜测（触发句形态不坐实的用户定案）：
     # 命中即如实失败并给出正确句式引导——宁如实失败，绝不谎报。永不抛。
-    _TURN_FAMILY = frozenset({"HassTurnOn", "HassTurnOff", "HassToggle"})
+    _TURN_FAMILY = frozenset({
+        "HassTurnOn", "HassTurnOff", "HassToggle",
+        # v1.0.90（现场 18:09:11 / 10:26 两案根修）：慧尖**自有**开关意图族。
+        # 旧集合只认 Hass* 三名 ⇒ klar 主计划被本闸拦下后，**降级/备用通道**改投
+        # TurnDeviceOn/TurnDeviceOff（args 形如 target:[{devices:[{name:'展厅'}]}]）
+        # 就不再复检，同一句话先"能力闸拦下"再"成功 | 好的，展厅的展厅关了"——
+        # 现场那条假成功 + media_player ServiceNotSupported 风暴正是从这里漏的。
+        # 判据文字完全复用（宁如实失败，绝不 area 扇出谎报），只补覆盖面。
+        "TurnDeviceOn", "TurnDeviceOff", "ToggleDevice",
+    })
     # 非"可开关设备"域（HA core 语义：这些域的实体没有 turn_on 动作）
     _UNTOGGLEABLE_DOMAINS = frozenset({
         "sensor", "binary_sensor", "number", "select", "text", "button",
@@ -359,6 +368,15 @@ class Executor:
             if any(w in t for w in self._WINDOW_HINT_WORDS):
                 return ("没有把握找到要开关的设备，不敢把整屋设备冒按；"
                         "是窗户的话请带上完整窗型名称")
+            # 已知残留缺口（v1.0.90 有意**不**在本批补，理由见 CHANGELOG 未收口）：
+            # ASR 把「推拉窗」听成「推纱窗」时，上面的"先剔纱窗再找窗型词"会把
+            # 窗型句洗成无窗句，于是 HassTurnOn{area} 仍会整区冒按并谎称"开了"
+            # （现场 10:26 复现）。纯词法判据修不了它——「纱窗」本身是合法 cover
+            # 词，一律按"含窗字"拦会误杀「打开客厅的窗帘」这类正常句。
+            # 正解＝扇出前用状态缓存**预演**该 area 实体可开关性（存在 sensor/
+            # number/button/media_player 等不支持 turn_on 的实体，或可开关实体
+            # 不唯一 ⇒ 如实失败并要求指名），属下一批（需 ha_client 暴露按区
+            # 域枚举 + 新行为钉），不在这里夹带半修。
             return None
         except Exception:
             return None

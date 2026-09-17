@@ -77,6 +77,12 @@ def _window_label(area_name: str | None, device_name: str | None,
     """播报主语：「区域+设备」，全屋形态「区域的所有窗户」（v1.0.49 口径）。"""
     _dev_label = device_name or window_name
     if _dev_label:
+        # v1.0.90（现场 18:09:11 / 10:25:41「好的，展厅的展厅关了」复现）：目标词
+        # 被 NLU 回落成**区域名本身**时，原样拼接会念出"展厅的展厅"，且这句话本身
+        # 就是在掩盖"没找到具体设备"。设备名与区域名同名 ⇒ 只报一次区域名；
+        # 该形态真正的冒按风险已由加载项 executor 开关族能力闸拦下，这里只修话术。
+        if area_name and _dev_label == area_name:
+            return area_name
         return f"{area_name}的{_dev_label}" if area_name else _dev_label
     return f"{area_name}的所有窗户" if area_name else "所有窗户"
 

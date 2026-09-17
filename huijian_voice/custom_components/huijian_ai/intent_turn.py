@@ -469,6 +469,24 @@ class TurnDeviceIntentBase(intent.IntentHandler):
                         )
 
                 task.add_done_callback(_log_exception)
+            elif done:
+                # v1.0.90（现场 18:09:11.983 与 10:25:41.742 复现的根因）：
+                # `asyncio.wait` **不会**取回已完成任务的异常，超时支有
+                # _log_exception 而"秒失败"支什么都没有 ⇒ 面积扇出里每个不支持
+                # 该 service 的实体（media_player.turn_off 这类
+                # ServiceNotSupported）都刷成 HA 全局
+                # `Error doing job: Task exception was never retrieved`，
+                # 把真因埋在一堆无主异常里（且本集成"永不抛全折叠"的纪律在此
+                # 漏了一半）。补齐另一半：异常在此消费并点名，不再进全局错误流。
+                for t in done:
+                    if t.cancelled():
+                        continue
+                    exc = t.exception()
+                    if exc is not None:
+                        _LOGGER.warning(
+                            "服务调用失败（已消费，不再产生未取回异常）%s: %s",
+                            t.get_name(), exc,
+                        )
         except asyncio.CancelledError:
             _LOGGER.debug("Service call was cancelled: %s", task.get_name())
             task.cancel()
