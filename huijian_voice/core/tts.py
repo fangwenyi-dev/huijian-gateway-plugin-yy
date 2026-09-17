@@ -72,6 +72,10 @@ from . import audio, const
 logger = logging.getLogger("huijian.tts")
 
 
+#: v1.0.91：出帧/合成单元的目标字数上限（≈3.4s 音频）。见 split_sentences 内注释。
+_CHUNK_CHARS = 20
+
+
 def split_sentences(text: str) -> list[str]:
     parts, buf = [], ""
     for ch in text:
@@ -98,6 +102,38 @@ def split_sentences(text: str) -> list[str]:
                 out.append(seg)
         else:
             out.append(p)
+    # v1.0.91（F4-B 出帧单元切小）：现场探针实测本机本地 Kokoro **RTF≈1.32**
+    # （63 字答复：首帧 4.02s；三个分句各自"一次性倒完 44~50 帧"，分句之间空
+    # 3.48s / 3.68s；总音频 8.46s 用了 11.19s 产出）。旧切法只在 >40 字且有逗号
+    # 时才二次切，于是一句 20~28 字的分句要"合成 4~5 秒 → 播放 3 秒"，播放侧
+    # 必然半路抽干 ⇒ 用户听感＝"一句话分好几次说完，中间有卡顿"。
+    # 出帧单元降到 ~20 字（≈3.4s 音频）后：单段空洞 ≈ 3.4×(RTF−1) ≈ 1.1s，落在
+    # "设备播放队列 2.05s + HA 预灌 1.536s"的吸收范围内；首帧也从 4.9s 级降到
+    # ~2.2s 级。优先在逗号/顿号处切、凑够半程才切（防切出碎片），无标点才硬切，
+    # 全程只改分段不改内容——拼接必须逐字还原（有钉）。
+    # （台架 x86 RTF 0.30 时本改动同样无害：段间停顿由 Kokoro 韵律决定。）
+    out2 = []
+    for p in out:
+        if len(p) <= _CHUNK_CHARS:
+            out2.append(p)
+            continue
+        pieces, cur = [], ""
+        for ch in p:
+            cur += ch
+            if ch in "，,、；;：: " and len(cur) >= _CHUNK_CHARS // 2:
+                pieces.append(cur)
+                cur = ""
+        if cur:
+            pieces.append(cur)
+        # 边界切完仍可能有一段超长（逗号只出现在 60 字外的场景），逐段再硬切，
+        # 保证**任何**出帧单元 ≤_CHUNK_CHARS（否则空洞回到 4~5s，本钉就白做）。
+        for piece in pieces:
+            while len(piece) > _CHUNK_CHARS:
+                out2.append(piece[:_CHUNK_CHARS])
+                piece = piece[_CHUNK_CHARS:]
+            if piece:
+                out2.append(piece)
+    out = out2
     # v1.0.65（TTS 深审 F1 第二道闸）：无标点超长句强制按长度切块。generate
     # 非流式——单句长度=引擎持锁时长，session 入口截到 4000 字后仍可能是一整
     # 句 4000 字（分钟级持锁照样冻死播报通道）。300 字/块：每块合成有界可
