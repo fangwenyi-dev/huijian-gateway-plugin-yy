@@ -200,6 +200,22 @@ _CLOUD_TOTAL_TIMEOUT_S = 120.0      # 整流总闸（> const.TTS_STREAM_BUDGET_S
 _CLOUD_CHUNK_BYTES = 8192           # iter_chunked 块大小
 _RIFF_MAX_HDR_BYTES = 8 << 20       # RIFF 头部缓冲硬闸（防 csz 撒谎导致无界缓冲）
 
+# ── 本地 Kokoro 推理线程数（引擎提速开放项，v1.0.92 起可显式抬）──────
+_TTS_THREADS_DEFAULT = 2
+# 台架实测（2026-09-17，主机直跑、与现场同 v1.1 fp32 包 65 字文本、RTF）：
+#   threads2=0.42 │ threads4=0.29 │ threads8=0.23 —— 提速真实存在。
+# 但现场加载项跑在 HAOS 容器里、CPU 配额未知，盲目抬线程会跟 HA 主进程抢核
+# （验证规矩：不得拿客户当测试）⇒ **默认保持 2 不变**，只开显式覆盖通道：
+# HAOS 加载项「配置→高级→环境变量」填 HUIJIAN_TTS_THREADS=4，无需发版。
+# 解析不了的正整数（空/abc/0/-1）一律回落默认。永不抛。
+def _engine_threads() -> int:
+    try:
+        n = int(os.environ.get("HUIJIAN_TTS_THREADS", "") or 0)
+    except ValueError:
+        return _TTS_THREADS_DEFAULT
+    return n if n > 0 else _TTS_THREADS_DEFAULT
+
+
 # ── 自定义音色（对模型包布局无感）──────────────────────────────────
 # 契约（与模型手动导入口同哲学）：投递目录 /data/tts_voices/*.bin，每文件
 # **恰好一路音色**的纯 float32 风格向量流，字节数必须等于当前包的「单音尺寸」
@@ -1020,7 +1036,7 @@ class TtsEngine:
                 # 纯中/中英混/纯英三型均完整产出（v1.0/v1.1 两代包同验，纯中零差异）。
                 model_cfg = so.OfflineTtsModelConfig()
                 model_cfg.kokoro = k
-                model_cfg.num_threads = 2
+                model_cfg.num_threads = _engine_threads()   # v1.0.92：默认仍 2，可 env 显式抬
                 model_cfg.provider = "cpu"
                 cfg = so.OfflineTtsConfig(model=model_cfg)
                 fsts = [f for f in ("number-zh.fst", "date-zh.fst", "phone-zh.fst") if (d / f).exists()]
@@ -1060,6 +1076,10 @@ class TtsEngine:
                 # v1.0.52：加载耗时独立成行（现场"首句慢"是加载还是合成，一眼可辨）
                 logger.info("[TTS] Kokoro 引擎就绪，耗时 %dms",
                             int((time.perf_counter() - t_load) * 1000))
+                # v1.0.92（引擎提速开放项，独立新行不改上面既有字面量——
+                # 现场 grep 口径受 test_v1052 钉保护）：带出实际生效线程数，
+                # 抬没抬 HUIJIAN_TTS_THREADS 一眼可辨，不再靠猜配置漂移归因。
+                logger.info("[TTS] Kokoro 推理线程 threads=%d", model_cfg.num_threads)
                 return True
             except Exception as e:
                 logger.error("[TTS] 加载失败: %s", e)

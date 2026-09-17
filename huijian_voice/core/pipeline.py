@@ -178,8 +178,78 @@ def _klar_window_lamp_conflict(kl: Optional[Plan]) -> bool:
         return False
 
 
-def select_primary_plan(fp: Optional[Plan], kl: Optional[Plan]) -> Optional[Plan]:
-    """纯裁决函数（可单测）：scene 契约 > 慧尖独占 > klar 标准 > 字面表剩余。"""
+# ── v1.0.92 控制步「目标证据」总闸（2026-09-17 17:35 双复现实锤）──────────
+# 「给我讲一个三百字左右的睡前故事」被 klar 回放兜底（draft.rs：未知目标+任意
+# 数字→硬套上一个可见灯+HassLightSet）grounded 成**办公室射灯亮度 1% 并真执行**
+# （现场 br=3 两次；与 v1.0.55「办公室瓶盖窗速度设为百分之三十五」同族病灶）。
+# v1.0.55 窗闸词表只拦「窗/速度」语义，纯闲聊句畅通无阻。本闸把判据升为通式：
+# grounded 控制步的**原话**里必须有目标证据——目标域设备词、已知区域名、回指
+# 代词三者之一；**数字不算证据**（draft.rs 回放的诱饵恰恰就是数字）。无证据整条
+# 弃用落级联下层（慧尖意图/查询族/LLM/兜底），宁可对闲聊说「我还不会」，绝不动
+# 用户没点名的设备。误拦代价=一句「我还不会」；误执行代价=真实世界设备动作。
+_KLAR_WRITE_INTENTS = frozenset({
+    "HassTurnOn", "HassTurnOff", "HassToggle", "HassLightSet",
+    "HassSetPosition", "HassClimateSetTemperature",
+})
+
+# 域→设备词表：任一子串命中即视为用户点了该类设备。刻意收着放（漏拦由降级链
+# 兜底，误拦才不可恢复）。
+_DOMAIN_EVIDENCE = {
+    "light": ("灯", "光", "亮", "暗", "照", "色温", "氛围", "台灯", "射灯",
+              "筒灯", "吊灯", "壁灯", "夜灯", "灯带", "荧光", "暖", "刺眼"),
+    "switch": ("开关", "插座", "电源", "断电", "通电"),
+    "cover": ("帘", "窗", "纱", "遮阳", "开合", "晾衣", "门", "幕"),
+    "fan": ("风扇", "扇", "换气", "排风"),
+    "climate": ("空调", "温度", "度", "冷", "暖", "制热", "制冷", "除湿", "风速"),
+    "lock": ("锁", "门"),
+    "media_player": ("音量", "音", "媒体", "暂停", "继续", "静音", "播放",
+                     "歌", "乐"),
+    "vacuum": ("扫地", "吸尘"),
+    "humidifier": ("加湿", "除湿"),
+    "scene": ("场景", "模式"),
+}
+
+# 回指：上下文继承轮（"把它关了"/"那个也打开"）合法，不在此闸职责内。
+_ANAPHORA_WORDS = ("它", "这", "那", "该", "刚才", "之前", "上面")
+
+
+def _klar_write_without_target_evidence(kl: Optional[Plan],
+                                        known_areas=()) -> bool:
+    """True = klar grounded 控制步在**原话里找不到任何目标证据**，主裁决弃用。
+    永不抛；utterance 缺失/域判定不了/词表拿不到一律放行（fail-open）。"""
+    try:
+        if kl is None or kl.intent not in _KLAR_WRITE_INTENTS:
+            return False
+        args = kl.args or {}
+        eid = str(args.get("entity_id") or "")
+        if "." in eid:
+            dom = eid.split(".", 1)[0]
+        else:
+            d = args.get("domain")
+            dom = d[0] if isinstance(d, list) and d else str(d or "")
+        words = _DOMAIN_EVIDENCE.get(dom)
+        if words is None:
+            return False                          # 不认识的域（含未 grounded）不管
+        t = kl.utterance or ""
+        if not t:
+            return False                          # 合成/回放轮无原话：放行
+        if any(w in t for w in words):
+            return False
+        if any(a in t for a in known_areas or ()):
+            return False                          # 用户真点了区域名
+        if any(a in t for a in _ANAPHORA_WORDS):
+            return False
+        return True
+    except Exception:  # noqa: BLE01 —— 守卫自身故障不得拦正常句
+        return False
+
+
+def select_primary_plan(fp: Optional[Plan], kl: Optional[Plan],
+                        known_areas=()) -> Optional[Plan]:
+    """纯裁决函数（可单测）：scene 契约 > 慧尖独占 > klar 标准 > 字面表剩余。
+
+    v1.0.92：known_areas 传入时启用「控制步目标证据」闸——见
+    _klar_write_without_target_evidence。"""
     if fp is not None:
         if fp.source == "scene":
             return fp
@@ -190,12 +260,16 @@ def select_primary_plan(fp: Optional[Plan], kl: Optional[Plan]) -> Optional[Plan
         # 灯/开关时**整条弃用**（返回 None 落级联下层，宁可不执行）。
         if _klar_window_lamp_conflict(kl):
             return None
+        # v1.0.92：说故事说出开灯——控制步必须先在原话里拿出目标证据。
+        if _klar_write_without_target_evidence(kl, known_areas):
+            return None
         return kl
     return fp
 
 
 def select_fallback_plan(primary: Optional[Plan], fp: Optional[Plan],
-                         kl: Optional[Plan], speech: str) -> Optional[Plan]:
+                         kl: Optional[Plan], speech: str,
+                         known_areas=()) -> Optional[Plan]:
     """纯函数：主计划执行失败后的降级选择；None = 不降级（如实报+LLM 复议）。"""
     if primary is None:
         return None
@@ -203,6 +277,10 @@ def select_fallback_plan(primary: Optional[Plan], fp: Optional[Plan],
         # 慧尖意图失败：常见根因就是「集成还没加载」——klar 直调不依赖集成，
         # 只要 klar 同句有命中（裁决时让位给契约/独占类），值得一试。
         if kl is None or kl is primary:
+            return None
+        # v1.0.92：降级支同样过目标证据闸——v1.0.90 假成功案根因就是
+        # 「主路被拦、降级通道不再复检」；只闸主裁决=半道闸。
+        if _klar_write_without_target_evidence(kl, known_areas):
             return None
         # v1.0.12 窗户误动作闸（2026-09-08 实机：ControlWindow 未注册时
         # 「打开 办公室平开窗」降级 klar 命中办公室灯，真把灯点亮——比
@@ -519,7 +597,7 @@ class Pipeline:
 
         # ⓪①②③④ klar 引擎与 T0/T1/场景并行判定，三层裁决（见模块头）
         fp_plan, kl_plan = await self._match_pair(text)
-        plan = select_primary_plan(fp_plan, kl_plan)
+        plan = select_primary_plan(fp_plan, kl_plan, self._known_areas())
         plan = self._apply_context(plan, text, origin)
         if plan:
             ob = self._overbroad_area_target(plan)
@@ -534,7 +612,8 @@ class Pipeline:
             exec_risk = self._exec_risk()          # 本次执行是否可能已生效（防复议重放）
             trace = list(plan.trace)
             if not ok:
-                fb = select_fallback_plan(plan, fp_plan, kl_plan, speech)
+                fb = select_fallback_plan(plan, fp_plan, kl_plan, speech,
+                                          self._known_areas())
                 # v1.0.87（现场 13:06:37 案）：降级同样是**动作**——主发次若是
                 # "结果不确定"（超时/连接/5xx：HA 可能已执行，只是回执丢了），
                 # 再放一发等于把同一件事做两遍（灯幂等没事，门锁/卷帘/相对量
@@ -1311,7 +1390,7 @@ class Pipeline:
         plans: list[Plan] = []
         chain_spec: Optional[dict] = None       # 链内回指：同句先行分句的具名目标
         for (fpp, klp), clause in zip(pairs, clauses):
-            p = select_primary_plan(fpp, klp)
+            p = select_primary_plan(fpp, klp, self._known_areas())
             if p is None:
                 return None                          # 任一分句不中 → 整句回退单发
             # 上下文注入按分句文本（先前误用整句文本，"它"会误标到首句）；
@@ -1673,7 +1752,7 @@ class Pipeline:
                 out["final"] = _NLU_OFF_TEXT
             return out
         fp_plan, kl_plan = await self._match_pair(text)   # 与真流量同构（并行）
-        plan = select_primary_plan(fp_plan, kl_plan)
+        plan = select_primary_plan(fp_plan, kl_plan, self._known_areas())
 
         def _dump(p):
             return None if p is None else {

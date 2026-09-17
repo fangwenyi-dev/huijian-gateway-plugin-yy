@@ -3,6 +3,9 @@
 通道语义回顾（集成侧 huijian_ai 源码实证后的服务器义务）：
   stt  : hello 可收可回；listen start 清缓冲；binary=裸 opus(16k/mono/60ms)；
          listen stop ⇒ 必须回且仅回一条 {"type":"stt","text":…}（静音也回 text:""）；
+         v1.0.92 轮次身份（与 tts 对偶，proto=2 建连欢迎帧申报）：start/stop 可带
+         "rid":<u32>（集成 mint）⇒ 该轮回显原样进回执；被抢占的空收束回**被抢占轮**
+         的 rid；rid 缺省/畸形=0=旧协议逐字节不变（旧集成零暴露）。
          此通道禁止 binary、禁发 tts/text 帧。
   tts  : 无 hello；收 {"type":"tts","state":"detect","text":…} ⇒ 流裸 opus binary，
          收束发 {"type":"tts","state":"stop"}；新 detect 到达丢弃旧流且不得有孤儿帧；
@@ -127,6 +130,20 @@ class BaseSession:
     async def on_close(self) -> None:
         pass
 
+    @staticmethod
+    def _parse_rid(obj: dict) -> int:
+        """宽容解析消息携带的 rid（契约：未知键忽略、值形态不可信）。
+
+        v1.0.92 从 TtsSession 上提——tts（detect）与 stt（listen start/stop）
+        两通道共用。u32 且 0 作 legacy 哨兵，越界/非数/负数一律折成 0（按旧
+        协议跑），绝不因一个畸形键打死主链（fail-open）。
+        """
+        try:
+            rid = int(obj.get("rid") or 0)
+        except (TypeError, ValueError):
+            return 0
+        return rid if 0 < rid < (1 << 32) else 0
+
     # 通用帧（ping/hello/tts 状态回声）——子类覆写前调用
     def _common(self, obj: dict) -> bool:
         typ = obj.get("type")
@@ -157,6 +174,12 @@ class SttSession(BaseSession):
         self._dec_err = False
         self._pcm_overflow_warned = False
         self._task: Optional[asyncio.Task] = None
+        # v1.0.92（与 TTS Stage-1 对偶）：轮次身份。客户端在 listen start
+        # （或 stop）携带 rid ⇒ 本会话把同一 rid 回显进该轮的 {"type":"stt"}
+        # 回执；不带/畸形=0=legacy，回执逐字节与旧版一致。_task_rid 记**在飞
+        # 转写所属轮**——被抢占收束时空文本必须回给那一轮，不能被新轮覆盖。
+        self._rid = 0
+        self._task_rid = 0
 
     async def on_text(self, raw: str) -> None:
         try:
@@ -169,8 +192,11 @@ class SttSession(BaseSession):
             state = obj.get("state")
             if state == "start":
                 self._pcm.clear()          # 新一轮 utterance（含 realtime restart）
+                r = self._parse_rid(obj)
+                if r:
+                    self._rid = r          # v1.0.92：本轮身份（不带=沿用 0=legacy）
             elif state == "stop":
-                await self._transcribe_and_reply()
+                await self._transcribe_and_reply(self._parse_rid(obj) or self._rid)
             # detect/cancel: 无操作（cancel 由下一轮 start 清缓冲天然生效）
 
     async def on_binary(self, data: bytes) -> None:
@@ -197,7 +223,7 @@ class SttSession(BaseSession):
             except Exception:
                 logger.debug("[STT] 解码异常帧 len=%d", len(data), exc_info=True)
 
-    async def _transcribe_and_reply(self) -> None:
+    async def _transcribe_and_reply(self, rid: int = 0) -> None:
         # 上一轮识别未回时不并发（保 stop 语义单条）
         if self._task and not self._task.done():
             # P1-8 契约「每 stop 必回且仅回一条」：被抢占的 stop 必须收束。
@@ -209,12 +235,15 @@ class SttSession(BaseSession):
             self._task = None
             logger.info("[STT] 在飞识别被抢占，本 stop 以空文本收束")
             with contextlib.suppress(Exception):
-                await self._reply_stt("")
+                # v1.0.92：收束回**被抢占轮**的身份（_task_rid），不是新轮的——
+                # 消费端拿 rid 配对，错带=把上一轮的债记到本轮头上。
+                await self._reply_stt("", self._task_rid)
         pcm = bytes(self._pcm)
         self._pcm.clear()
-        self._task = asyncio.create_task(self._run(pcm))
+        self._task_rid = rid
+        self._task = asyncio.create_task(self._run(pcm, rid))
 
-    async def _run(self, pcm: bytes) -> None:
+    async def _run(self, pcm: bytes, rid: int = 0) -> None:
         text = ""
         try:
             if pcm:
@@ -231,10 +260,14 @@ class SttSession(BaseSession):
             raise
         except Exception:
             logger.exception("[STT] 识别异常")
-        await self._reply_stt(text)
+        await self._reply_stt(text, rid)
 
-    async def _reply_stt(self, text: str) -> None:
-        await self.send_json({"type": "stt", "text": text or ""})
+    async def _reply_stt(self, text: str, rid: int = 0) -> None:
+        # v1.0.92：rid>0 才带键（legacy 客户端回执逐字节不变，fail-open）。
+        msg = {"type": "stt", "text": text or ""}
+        if rid:
+            msg["rid"] = rid
+        await self.send_json(msg)
 
     async def on_close(self) -> None:
         # F7a：断连即取消在飞转写（Wi-Fi 抖动重连风暴不占死 executor 线程）
@@ -254,18 +287,7 @@ class TtsSession(BaseSession):
         self._rid = 0
         self._task: Optional[asyncio.Task] = None
 
-    @staticmethod
-    def _parse_rid(obj: dict) -> int:
-        """宽容解析 detect 携带的 rid（契约：未知键忽略、值形态不可信）。
-
-        u32 且 0 作 legacy 哨兵，故越界/非数字/负数一律折成 0（按旧协议跑），
-        绝不因一个畸形键把播报打死（fail-open 方向恒为"有声音"）。
-        """
-        try:
-            rid = int(obj.get("rid") or 0)
-        except (TypeError, ValueError):
-            return 0
-        return rid if 0 < rid < (1 << 32) else 0
+    # v1.0.92：_parse_rid 已上提 BaseSession（stt 通道共用），此处继承直接用。
 
     async def on_text(self, raw: str) -> None:
         try:

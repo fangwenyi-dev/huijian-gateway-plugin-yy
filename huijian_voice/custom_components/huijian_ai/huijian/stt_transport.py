@@ -8,6 +8,7 @@ await_message 保留为兼容壳（新链路一律走 recognize）。
 """
 import asyncio
 import logging
+import random
 import time
 
 import anyio
@@ -30,6 +31,9 @@ _STALE_DRAIN_BUDGET_S = 0.5
 # buffer-0 内存流上堵死 reader ⇒ 30s 交付判死换连（18:14:14.84 → 18:14:44.841
 # 恰好 30.0s）⇒ 与条目 reload 撞车，就是现场"播报中再唤醒就熔断"的放大器之一。
 _FIRST_CHUNK_TIMEOUT_S = 3.0
+# v1.0.92：服务端欢迎帧 stt_proto >= 本值才启用轮次身份（客户端 mint，回执配对）。
+# 与 TTS 的 _TTS_PROTO_STREAM_ID 对偶；未协商=0 全程旧语义逐字节不变（fail-open）。
+_STT_PROTO_RID = 2
 
 
 def get_entry_transport(hass: HomeAssistant, entry: ConfigEntry) -> "SttTransport":
@@ -64,18 +68,83 @@ class SttTransport(WsTransport):
         # （连 reader 都不进）。与 v1.0.88 TTS 的 `_round_active` 同效，但零新增
         # 生命周期状态——不再有"认领未释放"这类二次泄漏面。
         self._unclaimed_total = 0
+        # ── v1.0.92 STT 轮次身份（stt_proto+rid，TTS Stage-1 的对偶）────────
+        # 真机定案（2026-09-17 现场 + 台架复现）：锁判只回答"有没有消费者"，
+        # 不回答"回执属于哪一轮"——旧轮（发送相被拆、事务已消失）的转写在
+        # 服务端 ≤52s 预算后迟到，恰好落进**新轮持锁**的队列，被新轮消费循环
+        # 认成本轮文本（张冠李戴），新轮自己的回执随后无人认领再堵 buffer-0
+        # reader → 30s 交付判死换连。现场"stt 通道 30s 交付判死换连仍在"即此。
+        # 现：协商连接上 mint rid（随机基+单调，0=legacy 哨兵），listen
+        # start/stop 携带、服务端回显；交付点(_on_incoming)与消费点双闸配对，
+        # 明确别轮回执**就地丢弃、不拆连接**——30s 判死降级回真僵尸末位兜底。
+        self._proto = 0
+        self._rid = random.getrandbits(31) | 1
+        self._round_rid = 0            # 本轮 rid（0=未协商/未开轮）
+        self._crossed_total = 0        # 别轮回执丢弃计数（限频 WARN）
+
+    def _next_rid(self) -> int:
+        rid = self._rid
+        self._rid = rid + 1 if rid < 0xFFFFFFFF else 1
+        return rid
+
+    async def _create_streams(self):
+        await super()._create_streams()
+        # 协商结果属"这一条连接"：换连即归零，等新连接欢迎帧重新申报
+        # （镜像 TTS v1.0.88；本轮 _round_rid 不动——轮若还活着由消费端配对）。
+        self._proto = 0
+
+    def _on_server_settings(self, data) -> None:
+        """欢迎帧旁路（基类不进业务流）：捕获 stt_proto 协商。"""
+        try:
+            proto = int(data.get("stt_proto") or 0)
+        except (TypeError, ValueError):
+            proto = 0
+        if proto != self._proto:
+            _LOGGER.info("huijian STT 协议代次: %s → %s（轮次身份%s）",
+                         self._proto, proto,
+                         "启用" if proto >= _STT_PROTO_RID else "不启用")
+            self._proto = proto
+
+    def _rid_of(self, item) -> int:
+        """消息携带的轮次身份（宽容：畸形/缺失=0=legacy 形态）。"""
+        try:
+            got = item.get("rid") if isinstance(item, dict) else \
+                getattr(item, "rid", None)
+            got = int(got or 0)
+        except (TypeError, ValueError):
+            return 0
+        return got if 0 < got < (1 << 32) else 0
 
     def _on_incoming(self, item):
         """交付前过滤（基类钩子）：无在途事务 ⇒ 就地丢弃，返回 True=丢。"""
-        if self._request_lock.locked():
-            return False
-        self._unclaimed_total += 1
-        if self._unclaimed_total == 1 or self._unclaimed_total % 20 == 0:
-            self.logger.warning(
-                "STT 通道无在途事务，就地丢弃消息（上一轮已消失：被取消/超时未收口）"
-                "，累计 %d 条——残包不再堵 reader，避免 30s 交付判死把整条通道换连",
-                self._unclaimed_total)
-        return True
+        if not self._request_lock.locked():
+            self._unclaimed_total += 1
+            if self._unclaimed_total == 1 or self._unclaimed_total % 20 == 0:
+                self.logger.warning(
+                    "STT 通道无在途事务，就地丢弃消息（上一轮已消失：被取消/超时未收口）"
+                    "，累计 %d 条——残包不再堵 reader，避免 30s 交付判死把整条通道换连",
+                    self._unclaimed_total)
+            return True
+        # v1.0.92：锁被持有只证明"有消费者"，不证明"这条回执是他的"。
+        # 协商轮上 rid 明确配不上 ⇒ 属旧轮债，交付点就地丢（若放行，它会
+        # 挂进本轮 reader 队列被本轮认走——就是 30s 判死链的第一环）。
+        # rid=0（旧服务端/未协商/旧形态）fail-open 放行，保护弱一档不哑管线。
+        round_rid = getattr(self, "_round_rid", 0)
+        if round_rid and getattr(item, "type", None) in ("stt", "tts"):
+            try:
+                raw = item.get("rid") if isinstance(item, dict) else \
+                    getattr(item, "rid", None)
+                got = int(raw or 0)
+            except (TypeError, ValueError):
+                got = 0
+            if got and got != round_rid:
+                self._crossed_total = getattr(self, "_crossed_total", 0) + 1
+                if self._crossed_total == 1 or self._crossed_total % 20 == 0:
+                    self.logger.warning(
+                        "STT 旧轮回执配错门（rid=%s 本轮=%s），就地丢弃不拆连，"
+                        "累计 %d 条", got, round_rid, self._crossed_total)
+                return True
+        return False
 
     def _drain_stale(self) -> int:
         """事务前排净 reader 上已排队的残帧/残转录（上一轮超时/取消遗留）。"""
@@ -104,11 +173,22 @@ class SttTransport(WsTransport):
             本方法栈就是判据本体。
         发送段一律 wait_for 可超时（悬挂 writer 永堵=持锁永堵，TTS :118
         原律）；任何非正常收口都 restart_connection 断连清算，残帧不跨轮。
+        v1.0.92：协商轮上全程携带 rid（start/stop 出、回执配对入），旧轮迟到
+        回执在交付点/消费点双双不认——**不拆连接**地解毒（30s 判死退回真僵尸
+        兜底位）。未协商（旧服务端）逐字节旧形态。
         """
         async with self._request_lock:
             if not await self.ensure_connected():
                 return None, "WebSocket connection unavailable"
             self._drain_stale()
+            # rid mint（fail-open：任何异常=0=旧协议，绝不打死识别链）。
+            rid = 0
+            try:
+                if self._proto >= _STT_PROTO_RID:
+                    rid = self._next_rid()
+                    self._round_rid = rid
+            except Exception:  # noqa: BLE001（含桩缺符号）
+                rid = 0
             frames = 0
             # v1.0.73 归因链·④钉年龄基准（与卫星端③钉成对）。用 loop.time 而非
             # time.monotonic：recognize 会被测试以最小命名空间提取执行（v1043/v1045
@@ -118,7 +198,8 @@ class SttTransport(WsTransport):
             try:
                 await asyncio.wait_for(self.send_hello(), _SEND_TIMEOUT_S)
                 await asyncio.wait_for(
-                    self.send_message({"type": "listen", "state": "start"}),
+                    self.send_message({"type": "listen", "state": "start",
+                                       **({"rid": rid} if rid else {})}),
                     _SEND_TIMEOUT_S)
                 # v1.0.89（F5-a2）：**首帧单独设 3s 窗**。开轮后设备一帧不推
                 # （barge-in/abort 后静默、自触发空轮）时，旧形态抱着这条事务等
@@ -143,7 +224,8 @@ class SttTransport(WsTransport):
                         pass
                     try:
                         await asyncio.wait_for(
-                            self.send_message({"type": "listen", "state": "stop"}),
+                            self.send_message({"type": "listen", "state": "stop",
+                                               **({"rid": rid} if rid else {})}),
                             _SEND_TIMEOUT_S)
                     except Exception as err:  # noqa: BLE001
                         self.logger.debug("STT 空轮收口 stop 未送达: %s", err)
@@ -157,7 +239,8 @@ class SttTransport(WsTransport):
                     except StopAsyncIteration:
                         chunk = None
                 await asyncio.wait_for(
-                    self.send_message({"type": "listen", "state": "stop"}),
+                    self.send_message({"type": "listen", "state": "stop",
+                                       **({"rid": rid} if rid else {})}),
                     _SEND_TIMEOUT_S)
             except asyncio.CancelledError:
                 # v1.0.73 归因链·④钉（发送相）：外部取消=HA 管线把这轮拆了
@@ -173,11 +256,37 @@ class SttTransport(WsTransport):
                 return None, f"Send failed: {err}"
             _LOGGER.debug("STT 发送完成：%d 帧，等待转录", frames)
             text = None
+            claimed_gen = getattr(self, "_conn_gen", None)   # 桩缺不判（旧语义）
             try:
                 with anyio.fail_after(timeout):
                     async for data in self._recv_reader:
                         if data.type in ["stt", "tts"]:
+                            # v1.0.92 轮配对（消费点兜底；交付点已丢过一道）：
+                            # 明确别轮回执→不认、继续等本轮；rid=0 legacy fail-open
+                            # 认（宁弱一档保护不哑管线，镜像 TTS paired 语义）。
+                            if rid:
+                                try:
+                                    got = int(getattr(data, "rid", 0) or 0)
+                                except (TypeError, ValueError):
+                                    got = 0
+                                if got and got != rid:
+                                    self._crossed_total += 1
+                                    if (self._crossed_total == 1
+                                            or self._crossed_total % 20 == 0):
+                                        self.logger.warning(
+                                            "STT 消费点跳过别轮回执（rid=%s 本轮=%s，"
+                                            "累计 %d）", got, rid, self._crossed_total)
+                                    continue
                             text = data.text
+                            break
+                        if claimed_gen is not None and \
+                                getattr(self, "_conn_gen", claimed_gen) != claimed_gen:
+                            # v1.0.92（镜像 TTS :271-277）：轮中换连——本轮 start/stop
+                            # 随旧连接作废，服务端从没见过这轮，回执永不到；当场
+                            # 错误收口，不再白等 timeout 窗（僵尸事务=堵 reader 元凶）。
+                            self.logger.warning(
+                                "STT 轮中连接被更换（gen %s→%s），本轮按错误收口",
+                                claimed_gen, getattr(self, "_conn_gen", None))
                             break
             except asyncio.CancelledError:
                 # v1.0.73 归因链·④钉（等转录相）：转录还没到、这轮先被拆——
@@ -197,6 +306,10 @@ class SttTransport(WsTransport):
                 if text is None:
                     await self.restart_connection(
                         "STT 未以转录消息收口（超时/异常），断连清算残留")
+            if text is None and claimed_gen is not None and \
+                    getattr(self, "_conn_gen", claimed_gen) != claimed_gen:
+                # 换连 break：显式 error（不得 (None,None) 让调用方猜成功）。
+                return None, "Connection replaced mid-round"
             return text, None
 
     async def await_message(self, timeout: int = 60):

@@ -130,7 +130,12 @@ async def _collect(ws, n_text, timeout=6.0):
             break
         msg = await ws.receive(remain)
         if msg.type == WSMsgType.TEXT:
-            texts.append(json.loads(msg.data))
+            parsed = json.loads(msg.data)
+            # v1.0.92：settings 欢迎帧=控制面（集成基类旁路，从不进业务帧流），
+            # 契约测试与客户同视角跳过，n_text 只数业务帧。
+            if parsed.get("type") == "settings":
+                continue
+            texts.append(parsed)
         elif msg.type == WSMsgType.BINARY:
             bins.append(msg.data)
         else:

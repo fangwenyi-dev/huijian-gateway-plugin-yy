@@ -133,6 +133,15 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
                                      "tts_proto": const.TTS_PROTO_VERSION})
         except Exception:
             logger.exception("[WS] tts 欢迎指纹发送失败（不影响播报）")
+    elif channel == "stt":
+        # v1.0.92：STT 轮次身份协商——建连欢迎帧申报 stt_proto，集成见 >=2 才
+        # 在 listen start/stop 携带 rid（服务端回显进回执）。settings 帧从不进
+        # 业务帧流（客户端基类旁路），旧集成零暴露；发不出也不影响识别主链。
+        try:
+            await session.send_json({"type": "settings",
+                                     "stt_proto": const.STT_PROTO_VERSION})
+        except Exception:
+            logger.exception("[WS] stt 协议欢迎发送失败（不影响识别）")
     try:
         async for msg in ws:
             if msg.type == web.WSMsgType.TEXT:

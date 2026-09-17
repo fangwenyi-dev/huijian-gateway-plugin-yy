@@ -7,7 +7,7 @@ from pathlib import Path
 APP_NAME = "huijian_voice"
 # 裸 docker build 会把 ENV 烘成占位值 0.0.0：毒值不得穿透成对外版本
 _env_ver = os.environ.get("HUIJIAN_VERSION", "")
-APP_VERSION = _env_ver if _env_ver and _env_ver != "0.0.0" else "1.0.91"
+APP_VERSION = _env_ver if _env_ver and _env_ver != "0.0.0" else "1.0.92"
 
 
 def addon_version() -> str:
@@ -68,6 +68,13 @@ FRAME_BYTES = FRAME_SAMPLES * 2                  # s16le = 1920B PCM/帧
 # 形状与不变量见 session.py 模块 docstring tts 段；带内逐帧头（1a）是本协议
 # 的兼容超集，将来升代不改边带语义。
 TTS_PROTO_VERSION = 2
+
+# v1.0.92 STT 轮次身份（与 TTS Stage-1 对偶）：stt 通道建连欢迎帧申报本值，
+# 集成见 >=2 才在 listen start/stop 携带 rid（客户端 mint），服务端把同一 rid
+# 回显进 {"type":"stt"} 回执——消费端据此把**旧轮迟到的回执**就地丢弃而非
+# 误认成本轮转写（现场：STT 30s 交付判死换连、张冠李戴转写的根修）。
+# 缺失/0 = 旧协议：回执逐字节不变（旧集成零暴露）。
+STT_PROTO_VERSION = 2
 
 # 超时预算（服务器侧收尾必须早于客户端预算，防滞留帧污染下一请求，契约 §6-5）
 # v1.0.70（深审⑧算术钉死）：预算不是单数字，是「整流 + 在飞帧发送 + 收口
