@@ -68,8 +68,16 @@ async def ch_stt():
             await asyncio.sleep(0.002)
         await ws.send_str('{"type":"listen","state":"stop"}')
         t0 = time.time()
-        msg = await ws.receive(timeout=60)
-        obj = json.loads(msg.data)
+        # v1.0.92：服务端现也在 stt 通道发 {"type":"settings","stt_proto":2} 协商欢迎帧
+        # （rid 特性依赖客户端由此学到 stt_proto，不可回收）。真实集成客户端经
+        # ws_transport._on_server_settings 旁路吸收它；此 e2e 裸客户端原先只读一帧 →
+        # 撞上 settings 就误报「STT 空结果」。改成跳过前导 settings/非-stt 帧再取转写。
+        while True:
+            msg = await ws.receive(timeout=60)
+            obj = json.loads(msg.data)
+            if obj.get("type") != "stt":
+                continue
+            break
         await ws.close()
         print(f"[STT] 真音频 {len(frames)} opus帧 → {time.time()-t0:.1f}s → {obj!r}")
         assert obj["type"] == "stt" and len(obj["text"]) > 0, "STT 空结果"
