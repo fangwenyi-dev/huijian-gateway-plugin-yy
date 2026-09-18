@@ -40,7 +40,7 @@
     ]
   },
   "tts_kokoro_multilang": {
-    "display_name": "TTS · Kokoro 中英多音色 v1.1 (103 音色，默认 sid18)",
+    "display_name": "TTS · Kokoro 中英多音色 v1.1 (103 音色，默认 sid28)",
     "default_provider": true,
     "tarball": "kokoro-multi-lang-v1_1.tar.bz2",
     "sha256": "a3f4c73d043860e3fd2e5b06f36795eb81de0fc8e8de6df703245edddd87dbad",

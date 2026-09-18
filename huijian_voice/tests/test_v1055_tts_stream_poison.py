@@ -500,8 +500,8 @@ def test_cloud_zero_frame_falls_back_and_pins():
     eng._encode = lambda pcm: [FRAME]
     out, e = _collect(eng, "开灯了。")
     # 终态标签含回缀：except 支先写 "local:fallback"，进本地循环时缝成
-    # "local:sid18(云回落)"——现场可观测性更好，钉此形状。
-    assert out == [FRAME] and e.get("engine") == "local:sid18(云回落)"
+    # "local:sid28(云回落)"——现场可观测性更好，钉此形状。
+    assert out == [FRAME] and e.get("engine") == "local:sid28(云回落)"
     assert "truncated" not in e, "本地整段补全了，不是半截口"
     assert eng._cloud_fail_ts > 0, "零帧=失败，开钉扎而非解除"
 
@@ -586,8 +586,8 @@ def test_cold_out_of_range_sid_rechecked_after_load():
     eng._synth = lambda sent, sid, speed: (seen.append(sid), b"\x00\x00" * 480)[1]
     eng._encode = lambda pcm: [FRAME]
     out, e = _collect(eng, "开灯了。")
-    assert seen == [18], "冷态越界 sid 必须在模型就绪后被复核拦下回落 18（定案⑥）"
-    assert out == [FRAME] and e["engine"] == "local:sid18"
+    assert seen == [28], "冷态越界 sid 必须在模型就绪后被复核拦下回落默认 28（定案⑥）"
+    assert out == [FRAME] and e["engine"] == "local:sid28"
 
 
 def test_recheck_warm_cache_replays_without_synth():
@@ -604,11 +604,11 @@ def test_recheck_warm_cache_replays_without_synth():
     eng.ensure_loaded = fake_load
     calls = []
     eng._synth = lambda *a: (calls.append(a), b"\x00\x00" * 480)[1]
-    eng._cache[("开灯了。", 18, 1.0)] = ([FRAME], len(FRAME))   # 预热真 18 嗓
+    eng._cache[("开灯了。", 28, 1.0)] = ([FRAME], len(FRAME))   # 预热真 28 嗓
     eng._encode = lambda pcm: [b"SHOULD-NOT-BE-USED"]
     out, e = _collect(eng, "开灯了。")
     assert calls == [], "命中回放不得再合成"
-    assert out == [FRAME] and e["engine"] == "local:sid18"
+    assert out == [FRAME] and e["engine"] == "local:sid28"
     assert eng.cache_hits == 1
 
 

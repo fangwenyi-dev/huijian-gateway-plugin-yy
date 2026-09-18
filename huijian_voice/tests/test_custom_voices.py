@@ -101,11 +101,11 @@ def test_resolve_sid_int_name_and_guards(tmp_path):
     eng.settings = _Settings({"tts.sid": "老婆"})
     assert eng.resolve_sid() == 5
     eng.settings = _Settings({"tts.sid": "不存在"})
-    assert eng.resolve_sid() == 18                     # 名字查不到 → 回落默认
+    assert eng.resolve_sid() == 28                     # 名字查不到 → 回落默认
     eng.settings = _Settings({"tts.sid": "99"})
-    assert eng.resolve_sid() == 18                     # 越界 → 回落默认
+    assert eng.resolve_sid() == 28                     # 越界 → 回落默认
     eng.settings = _Settings({})
-    assert eng.resolve_sid() == 18                     # 未配置 → 默认
+    assert eng.resolve_sid() == 28                     # 未配置 → 默认
 
 
 # ── voices_status / HTTP ───────────────────────────────────────

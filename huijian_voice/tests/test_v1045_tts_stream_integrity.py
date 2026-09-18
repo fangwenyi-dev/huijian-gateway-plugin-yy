@@ -178,7 +178,7 @@ def test_announcement_log_reports_engine(caplog):
 
         async def tagged(text, engine_out=None):
             if engine_out is not None:
-                engine_out["engine"] = "local:sid18(云回落)"
+                engine_out["engine"] = "local:sid28(云回落)"
             for i in range(3):
                 yield b"\xf0" + bytes([i])
         ctx.tts.stream_opus = tagged
@@ -189,7 +189,7 @@ def test_announcement_log_reports_engine(caplog):
         await s._task
     caplog.set_level(logging.INFO, logger="huijian.session")
     asyncio.run(scenario())
-    assert "播报下发：local:sid18(云回落) / 3 帧" in caplog.text
+    assert "播报下发：local:sid28(云回落) / 3 帧" in caplog.text
 
 
 # ── 集成侧行为钉（真 anyio）：收口/隔离/排残料/串行 ──────────────
@@ -475,12 +475,12 @@ def _run_stream(eng):
 
 
 def test_cloud_fallback_forces_default_sid_not_web():
-    """条款③：云失败切回本地=固定默认音色 18，web 设定（81）不参与回落。"""
+    """条款③：云失败切回本地=固定默认音色 28（2026-09-19 定案；原 18），web 设定（81）不参与回落。"""
     eng, seen = _fb_engine("cloud_openai_compat", 81)
     eng.settings._d["_boom"] = True
     eo = _run_stream(eng)
-    assert seen and all(s == 18 for s in seen), seen
-    assert eo["engine"] == "local:sid18(云回落)"
+    assert seen and all(s == 28 for s in seen), seen
+    assert eo["engine"] == "local:sid28(云回落)"
 
 
 def test_cloud_success_uses_cloud_voice():

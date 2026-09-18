@@ -51,10 +51,10 @@ def test_fingerprint_cloud_follows_voice_with_alloy_default():
 
 def test_fingerprint_custom_injection_count_and_fallback_sid():
     eng = _engine({"tts.provider": "local_kokoro", "tts.sid": "不存在的名"})
-    base = eng.voice_fingerprint()          # 非法名回落 18
-    assert base == "local:sid18+c0h0+s1+mu"
+    base = eng.voice_fingerprint()          # 非法名回落默认 28
+    assert base == "local:sid28+c0h0+s1+mu"
     eng._custom_sids = {"mei": 103}
-    assert eng.voice_fingerprint() == "local:sid18+c1h0+s1+mu"   # 注入表变化也换键
+    assert eng.voice_fingerprint() == "local:sid28+c1h0+s1+mu"   # 注入表变化也换键
 
 
 def test_fingerprint_speed_rotates_local_and_cloud():

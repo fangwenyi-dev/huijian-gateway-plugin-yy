@@ -40,8 +40,8 @@ DEFAULTS: dict[str, Any] = {
         # v1.0.65（深审 F11 定案）："cloud" 为正统拼法（Web UI 唯一写入值）；
         # "cloud_openai_compat" 为历史别名（存量 settings.json 与测试仍用，
         # 引擎读侧 startswith("cloud") 双吃，UI 显示已放宽——不再静默翻转）。
-        "sid": 18,                             # v1.1 定案默认：zf_026（女，声纹最似晓晓；用户知情拍板 2026-09-13）。103 音色 web 全可选
-        "speed": 1.0,                          # 0.8–1.2
+        "sid": 28,                             # 定案默认：zf_044（女声；用户拍板 2026-09-19，取代 2026-09-13 的 sid18 zf_026 定案）。103 音色 web 全可选
+        "speed": 1.25,                         # 用户拍板 2026-09-19（旧默认 1.0）。服务端钳位 0.5–2.0（tts._SPEED_MIN/_SPEED_MAX），Web 滑条 0.6–2.0
         "cache_enabled": True,                 # 体验批 P0-4：句级 opus LRU 缓存（本地档）
         "cloud": {"provider": "", "base_url": "", "api_key": "", "model": "", "voice": "",
                   "response_format": "", "sample_rate": 0,   # 预设透传项（空/0=pcm@24k）

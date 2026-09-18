@@ -491,7 +491,7 @@ class TtsSession(BaseSession):
                 # （加载项下发 → 集成收帧 → 卫星推流 → 设备出声），此前成功全静默。
                 if sent_any:
                     # 引擎名必上日志：云⇄本地回落=换嗓（云端可配男声、本地
-                    # sid18 女声），"第一句男声第二句女声"要一眼可辨。
+                    # 默认 sid28 女声），"第一句男声第二句女声"要一眼可辨。
                     logger.info("[TTS] 播报下发：%s / %d 帧 / %d 字节 / %r",
                                 engine.get("engine", "?"),
                                 n_frames, n_bytes, text[:30])

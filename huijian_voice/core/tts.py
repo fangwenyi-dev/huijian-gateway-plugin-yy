@@ -1,6 +1,6 @@
 """TTS 引擎（本地 Kokoro-82M multi-lang **v1.1 fp32 包 kokoro-multi-lang-v1_1**
-——103 音色 web 全可选，默认 sid=18 zf_026 女声（声纹最似晓晓），用户知情拍板
-2026-09-13；云可配回落本地）。
+——103 音色 web 全可选，默认 sid=28 zf_044 女声、默认语速 1.25（用户拍板
+2026-09-19，取代 2026-09-13 的 sid18 zf_026 定案；云可配回落本地）。
 
 体验批 P0-4：句级 opus 缓存。控制类回复高度模板化（"好的，X打开了"），
 按 (句, sid, speed) 缓存编码完成的裸 opus 帧——命中即首包归零、4C8G 卸载
@@ -180,7 +180,7 @@ _DROP_TOLERANCE = 16384         # 绝对底线（保持旧名兼容测试引用�
 _DROP_TOLERANCE_RATIO = 0.2     # 相对项：多付/实付 超此比按撒谎处理
 
 
-_DEFAULT_SID = 18   # 本地定案默认音色 zf_026（云失败回落唯一用嗓，音色归属条款③）
+_DEFAULT_SID = 28   # 本地定案默认音色 zf_044（用户拍板 2026-09-19；云失败回落唯一用嗓，音色归属条款③）
 
 # ── v1.0.55 云失败钉扎（现场 2026-09-12「还是有两个 tts 音色」主修）──────
 # 旧形态：每一轮都先试云、失败再本地——云持续不可用时 = **逐句换嗓**（男⇄女
@@ -775,8 +775,9 @@ class TtsEngine:
 
     def resolve_sid(self) -> int:
         """tts.sid = 整数（官方 0..102 / 自定义 103+）**或自定义音色主名**。
-        非法/越界一律回落默认 18 并 WARN——配置写坏绝不让播报哑掉。"""
-        raw = self.settings.get("tts.sid", 18)
+        非法/越界一律回落默认音色 _DEFAULT_SID（现 sid28 zf_044）并 WARN——
+        配置写坏绝不让播报哑掉。"""
+        raw = self.settings.get("tts.sid", _DEFAULT_SID)
         sid = None
         try:
             sid = int(str(raw).strip())
@@ -784,12 +785,14 @@ class TtsEngine:
             sid = self._custom_sids.get(str(raw).strip().lower())
             if sid is None:
                 logger.warning("[TTS] tts.sid=%r 既非数字也不是已注入的自定义音色，"
-                               "回落默认 18（可先「重新扫描」或检查投递目录）", raw)
+                               "回落默认 %d（可先「重新扫描」或检查投递目录）",
+                               raw, _DEFAULT_SID)
         n = int(getattr(self._tts, "num_speakers", 0) or 0)
         if sid is None or sid < 0 or (n and sid >= n):
             if sid is not None:
-                logger.warning("[TTS] tts.sid=%s 越界（本机共 %d 音色），回落 18", raw, n)
-            sid = 18
+                logger.warning("[TTS] tts.sid=%s 越界（本机共 %d 音色），回落 %d",
+                               raw, n, _DEFAULT_SID)
+            sid = _DEFAULT_SID
         return sid
 
     def _speed(self) -> float:
@@ -884,7 +887,7 @@ class TtsEngine:
                   f":{speed_s}"
                   f":sr{sr or 0}")
             # 深审 R2 #2（P5 的运行时维度缺口）：钉扎窗口内各轮**实际产出是
-            # 本地 sid18 兜底嗓**，但指纹纯配置推导=还是云键——干净 stop 的
+            # 本地默认 sid28 兜底嗓**，但指纹纯配置推导=还是云键——干净 stop 的
             # 兜底音频被 HA 按云嗓键写进无 TTL 消息哈希盘缓存，解钉后模板句
             # 永久播兜底嗓（现场"两个音色"以缓存形态复发，仅 clear_cache 可
             # 解）。钉扎期键加 :fb 后缀隔离兜底音频；置位/解除经 on_fp_change
@@ -974,7 +977,7 @@ class TtsEngine:
                 self._loading = False
         if ok:
             # 深审 R2 #7：加载态是指纹的隐性输入（自定义表注入/复核改 sid），
-            # 首载完成若不重算推送，welcome 的冷值（c0h0/sid 回落 18）会一直
+            # 首载完成若不重算推送，welcome 的冷值（c0h0/sid 回落 28）会一直
             # 骑到下一次 save/重连——同键先后两种嗓=缓存在嗓上漂移。
             self._notify_fp_change()
         return ok
@@ -1080,7 +1083,7 @@ class TtsEngine:
                 self._loaded_gen_key = _gk
                 self.last_used = time.time()
                 logger.warning("[TTS] Kokoro multi-lang 已加载（%d 音色），sid=%s",
-                               tts.num_speakers, self.settings.get("tts.sid", 18))
+                               tts.num_speakers, self.settings.get("tts.sid", _DEFAULT_SID))
                 # v1.0.52：加载耗时独立成行（现场"首句慢"是加载还是合成，一眼可辨）
                 logger.info("[TTS] Kokoro 引擎就绪，耗时 %dms",
                             int((time.perf_counter() - t_load) * 1000))
@@ -1123,7 +1126,7 @@ class TtsEngine:
 
         engine_out：可选出参 dict——本轮实际由哪个引擎发声写回
         engine_out["engine"]（"cloud:voice名" / "local:sid N"）。云⇄本地
-        回落是**换嗓**的（云端可配男声、本地默认 sid18 女声），现场"第一句
+        回落是**换嗓**的（云端可配男声、本地默认 sid28 女声），现场"第一句
         男声第二句女声"必须由日志一眼可辨，不再靠猜。
         """
         self.last_used = time.time()
@@ -1200,8 +1203,9 @@ class TtsEngine:
                         engine_out["engine"] = "local:fallback"
         loop = asyncio.get_running_loop()
         # 音色归属定案（用户 2026-09-18）：本地档=web 设定音色（数字或自定义主名）；
-        # 云档=云端对应音色（可选）；**云失败回落=固定默认本地音色 sid18**——回落是
+        # 云档=云端对应音色（可选）；**云失败回落=固定默认本地音色 sid28**——回落是
         # 应急通道，取最保守单音色，不跟 web 配置（可能是自定义名/云专属号）漂移。
+        # （默认音色身份自 2026-09-19 拍板起=zf_044/sid28，见 _DEFAULT_SID。）
         sid = _DEFAULT_SID if fell_back else self.resolve_sid()
         speed = self._speed()
         if engine_out is not None:
