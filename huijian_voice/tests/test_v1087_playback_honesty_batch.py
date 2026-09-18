@@ -189,10 +189,12 @@ class _St:
 
 
 class _Reg:
+    """真 HA 的 EntityRegistry 对象**没有** async_entries_for_config_entry 方法
+    （它是 homeassistant.helpers.entity_registry 的模块级函数，签名
+    `(registry, config_entry_id)`）。桩必须与真表面同形——此前桩照着错误的
+    方法形状定义，把 `reg.async_entries_for_config_entry(entry_id)` 一路放到生产 500。"""
     def __init__(self, ents):
         self._e = ents
-    def async_entries_for_config_entry(self, _entry_id):
-        return list(self._e)
 
 
 class _States:
@@ -213,7 +215,9 @@ class _Hass:
 def _run_cont(ents, states):
     ns = _cont_ns()
     import types
-    ns["er"] = types.SimpleNamespace(async_get=lambda h: _Reg(ents))
+    ns["er"] = types.SimpleNamespace(
+        async_get=lambda h: _Reg(ents),
+        async_entries_for_config_entry=lambda reg, _eid: list(reg._e))
 
     class E:
         entry_id = "x"
@@ -241,7 +245,9 @@ def test_continuous_diag_four_states():
         return h
 
     def call(ents, states):
-        ns["er"] = types.SimpleNamespace(async_get=lambda h: _Reg(ents))
+        ns["er"] = types.SimpleNamespace(
+            async_get=lambda h: _Reg(ents),
+            async_entries_for_config_entry=lambda reg, _eid: list(reg._e))
         e = types.SimpleNamespace(entry_id="x")
         return (ns["_continuous_diag"](hass(ents, states), e),
                 ns["_continuous_state"](hass(ents, states), e))

@@ -381,7 +381,7 @@ def _continuous_entity(hass, entry):
     """
     reg = er.async_get(hass)
     disabled = None
-    for ent in reg.async_entries_for_config_entry(entry.entry_id):
+    for ent in er.async_entries_for_config_entry(reg, entry.entry_id):
         if not (ent.entity_id.startswith("switch.")
                 and str(ent.unique_id or "").endswith(_CONT_SUFFIX)):
             continue

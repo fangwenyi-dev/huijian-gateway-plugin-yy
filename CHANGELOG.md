@@ -1,4 +1,16 @@
 # 变更日志
+## [1.0.94] - 2026-09-18 面板卫星接口 500 根修 + 测试替身与真 HA 表面同形
+
+修复
+
+- **慧尖面板「卫星列表」接口 /api/huijian-ai/satellites 返回 500**（真机 HA 2026.9.2 实锤）：`huijian/http.py` 把 helper 的**模块级函数** `er.async_entries_for_config_entry(registry, entry_id)` 当成 `EntityRegistry` 对象的**方法**来调（`reg.async_entries_for_config_entry(entry.entry_id)`），真机必 `AttributeError: 'EntityRegistry' object has no attribute ...`，连带面板取不到「连续对话」状态与四态诊断码、整卡降级。现按本仓既有正确用法改回模块函数形式（同 `manager.py:1738`、`huijian/__init__.py:74`）。
+
+加固
+
+- **该缺陷此前一路全绿穿过测试发到生产，根因在测试替身**：`tests/test_v1087_playback_honesty_batch.py` 的假注册表照着**错误形状**定义了同名方法（"替身恒成功"）。已把桩改为与 HA 真实表面同形——对象上没有的方法，桩上也不许有；并在 `tests/test_ha_api_contract.py` 新增按**调用形状**判定的 AST 守卫（不以字符串断言替代）。
+- **守卫自身的盲区一并修掉**：既有 `_files()` 只 `glob` 集成顶层 `*.py`，`huijian/` 等子目录从来不受检，而出事那行恰在盲区；新守卫改用 `rglob` 全量扫描。
+
+说明：本批为集成侧修复，不含固件。3.49 寸屏幕版 V2 硬件台架批（屏移植、AEC 参考通道、内部 RAM 收口）在固件仓，另行发布。
 
 ## [1.0.93] - 2026-09-18 连续对话语音退出「退下」+ 播报静音根修 + 误伤/饿死收口
 
