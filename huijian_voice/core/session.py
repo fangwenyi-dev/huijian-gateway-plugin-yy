@@ -17,7 +17,9 @@
          不变量（锁内归属守卫保证）：stream_start(N) 之后不可能再有旧流帧上栈。
   llm  : 收 listen detect(mode=prompt,text) ⇒ {"type":"text","state":"start"} →
          逐句 {"type":"text","state":"sentence_end","data":…} →
-         终帧 {"type":"text","state":"end"}（客户端 end 判定先于 type，且 end 必发）。
+         终帧 {"type":"text","state":"end"}（客户端 end 判定先于 type，且 end 必发；
+         v1.0.93：退下轮终帧可带 end_dialogue:1——正向专用键，只表达"停"；
+         旧客户端按键名读取、未知键忽略=逐字节旧行为）。
 通用：ping→pong；不主动 close；预算：stt 结果 52s / tts 逐帧间隙 52s+整轮总闸
 660s（v1.0.83，见 const ⑧块）/ llm 回合 50s；
 JSON 宽容解析（未知键忽略）；token 校验在 HTTP 握手层（401 不升级）。
@@ -540,6 +542,7 @@ class LlmSession(BaseSession):
         await self.send_json({"type": "text", "state": "start"})
         reply_text = const.FALLBACK_TEXT
         streamed = False
+        end_dlg = False
 
         async def _on_sentence(sent: str) -> None:
             # P2-15：LLM 流式逐句下传（start 已发；end 帧永远由本协程收束）
@@ -558,6 +561,7 @@ class LlmSession(BaseSession):
             reply_text = reply.text or const.FALLBACK_TEXT
             if getattr(reply, "streamed", False):
                 streamed = True
+            end_dlg = bool(getattr(reply, "end_dialogue", False))
         except asyncio.TimeoutError:
             logger.warning("[LLM] 回合超预算 %ss", const.LLM_TURN_BUDGET_S)
         except asyncio.CancelledError:
@@ -584,7 +588,13 @@ class LlmSession(BaseSession):
                     break
                 if not await self.send_json({"type": "text", "state": "sentence_end", "data": sent}):
                     break
-        await self.send_json({"type": "text", "state": "end"})
+        # v1.0.93 退下旗：只挂 end 帧、只在 True 时加键（False/缺席=逐字节旧
+        # 帧形，旧集成 Dict(dict) 读不到该键即维持现状）。契约链：加载项 end
+        # 帧 → 集成 conversation/assist_satellite → INTENT_END kv → 固件。
+        end_msg: dict = {"type": "text", "state": "end"}
+        if end_dlg:
+            end_msg["end_dialogue"] = 1
+        await self.send_json(end_msg)
 
     async def on_close(self) -> None:
         if self._task:

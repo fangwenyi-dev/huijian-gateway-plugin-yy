@@ -102,6 +102,26 @@ _ACTION_PATTERNS: list[tuple[re.Pattern, str, Any]] = [
     (re.compile(r"^(播放|放|来一首|唱)"), "PlayMusic", None),
 ]
 
+# ── v1.0.93 「退下」字面表（2026-09-18 用户批准收词表）───────────────────
+# 连续对话语音退出：**整句精确匹配**，绝不做子串——「安静一点」（调亮度）、
+# 「再见面」「不用了谢谢」类误杀案由负例钉守。容忍句首"好的，"承接与句尾
+# 单个语气字（吧/啦/呀/啊/哦/嘛）；STT 尾标点归一由 is_end_dialogue 兜。
+# 裁决位：场景契约等值之后、一切动作表/闸之前（见 FastPath.match 注）。
+END_DIALOGUE_INTENT = "HuijianEndConversation"
+_END_DIALOGUE_RE = re.compile(
+    r"^(?:好的[，,]?\s*)?(?:退下|结束对话|不聊了|不说(?:了)?|再见|拜拜|停止聆听|"
+    r"退出对话|安静|别念了|不用了)[吧啦呀啊哦嘛]?$")
+
+
+def is_end_dialogue(text: str) -> bool:
+    """收词表谓词（级联与 nlu-off 支共用）。永不抛；先去尾标点再等值。"""
+    try:
+        t = re.sub(r"[\s。，,！!？?~～.]+$", "", (text or "").strip())
+        return bool(_END_DIALOGUE_RE.match(t))
+    except Exception:  # noqa: BLE001 谓词故障=不退出（fail-open 到旧行为）
+        return False
+
+
 # T1 类 → (intent, 附加 extra_args 种子)
 _T1_MAP: dict[str, tuple[str, dict]] = {
     "TurnDeviceOn": ("TurnDeviceOn", {}),
@@ -735,6 +755,15 @@ class FastPath:
         phrase = self.scenes.check(text)
         if phrase and phrase == text:
             return await self._scene_plan(phrase, text, trace)
+
+        # v1.0.93 「退下」字面表：仅次于场景契约的最高优先——在并列宾语闸/
+        # 全屋分支/动作表扫描之前。此前"退下"走 T0 落兜底「我还不会」且照常
+        # 续轮（2026-09-18 用户点名）；等值命中直接产出会话控制 Plan，不进
+        # executor、不发设备指令（裁决在 pipeline._cascade 收口）。
+        if _END_DIALOGUE_RE.match(text):
+            trace.append("退下字面表")
+            return Plan(intent=END_DIALOGUE_INTENT, args={}, source="t0_end",
+                        utterance=text, trace=trace)
 
         # 并列宾语「打开A和B」单发禁执行闸（2026-09-21 用户令第③点）：该形态
         # 由 pipeline._try_compound 链发处理；链拒（某分句不认）回落到这里时，

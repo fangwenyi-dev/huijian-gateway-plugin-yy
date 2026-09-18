@@ -95,7 +95,8 @@ def test_tts_uses_dedicated_executor():
     p = e._pool()
     assert isinstance(p, ThreadPoolExecutor)
     assert p is e._pool(), "池必须懒建后复用（每引擎一份，不随调用漂移）"
-    assert getattr(p, "_max_workers", 99) <= 2, "专用池 2 工位封顶（1 合成 + 1 编码重叠）"
+    assert getattr(p, "_max_workers", 99) <= 4, \
+        "专用池 4 工位封顶（v1.0.93 D3 由 2→4：残局 1+双活轮 2+余量 1；仍不得回潮挤默认池）"
 
     src = (ROOT / "core" / "tts.py").read_text(encoding="utf-8")
     code = "\n".join(ln.split("#", 1)[0] for ln in src.splitlines())

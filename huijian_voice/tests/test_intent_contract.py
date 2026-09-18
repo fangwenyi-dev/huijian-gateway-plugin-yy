@@ -27,7 +27,12 @@ HA_CORE_INTENTS = {
 
 # 词表命中但**永不派发到执行面**的名字（fast_path 显式丢弃落上层）——
 # PlayMusic：模式 B 无小智播放面，:815 `return self._miss(...)`，设计豁免。
-LOCAL_ONLY_INTENTS = {"PlayMusic"}
+# HuijianEndConversation（v1.0.93 退下词表）：纯会话控制意图，裁决命中即在
+# pipeline._cascade **当场收口**（固定话术 + Reply.end_dialogue 旗），链式句
+# 的分句也在 _try_compound 滤除——设计上永不到 /api/intent/handle。豁免有据：
+# 行为钉 tests/test_v1093_end_dialogue.py 以 executor 桩「一碰即红」+链中
+# extra_steps 不含本名双证，不是靠注释自证。
+LOCAL_ONLY_INTENTS = {"PlayMusic", "HuijianEndConversation"}
 
 
 def _registered_intents() -> set[str]:

@@ -37,10 +37,18 @@ class LlmTransport(WsTransport):
     async def await_message(self, timeout: int = 180):
         """Wait response message"""
         content = ""
+        # v1.0.93 退下旗：加载项 end 帧只在 True 时带 end_dialogue 键；
+        # 这里透传到聚合 Delta 上（conversation 实体消费时记账）。False/缺席
+        # =逐字节旧帧形，旧加载项零暴露。
+        end_dialogue = False
         try:
             with anyio.fail_after(timeout):
                 async for data in self._recv_reader:
                     if data.state == "end":
+                        try:
+                            end_dialogue = bool(data.get("end_dialogue"))
+                        except Exception:
+                            end_dialogue = False
                         break
                     if data.type != "text":
                         continue
@@ -48,7 +56,11 @@ class LlmTransport(WsTransport):
                         content = ""
                     if data.state == "sentence_end" and isinstance(data.data, str):
                         content += data.data
-                yield Dict(role="assistant", content=content)
+                if end_dialogue:
+                    yield Dict(role="assistant", content=content,
+                               end_dialogue=1)
+                else:
+                    yield Dict(role="assistant", content=content)
         except TimeoutError:
             _LOGGER.error("response timeout")
             yield Dict(error="Response timeout")

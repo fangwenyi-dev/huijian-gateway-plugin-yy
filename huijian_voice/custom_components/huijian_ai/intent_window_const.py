@@ -408,6 +408,9 @@ def find_window_buttons(
     # action → (tier, entity_id)：区域证据越强 tier 越小，同 action 只许被
     # 更强证据顶掉（旧「先到先得」=async_all 注册序掷硬币，开错房间元凶）。
     best: dict[str, tuple[int, str]] = {}
+    # v1.0.93 D2 证据闸记账：action → 进过场的 tier2 候选全集（并列判定用，
+    # 与被顶掉与否无关——三个无区候选掷硬币选谁都算误伤）。
+    t2_seen: dict[str, set[str]] = {}
     _LOGGER.info(
         "Searching buttons: window_name='%s', area_name='%s', target_area_id='%s', original_name='%s'",
         window_name, area_name, target_area_id, original_name,
@@ -480,6 +483,8 @@ def find_window_buttons(
             for keyword in keywords:
                 keyword_lower = keyword.lower()
                 if _find_standalone_keyword(name_lower, keyword_lower) is not None:
+                    if tier == 2:
+                        t2_seen.setdefault(action, set()).add(entity_id)
                     cur = best.get(action)
                     if cur is None or tier < cur[0]:
                         best[action] = (tier, entity_id)
@@ -487,6 +492,25 @@ def find_window_buttons(
                             "Found %s button: %s (name: %s, area tier: %s)",
                             action, entity_id, name, tier)
                     break
+
+    # v1.0.93（D2 逻辑半，2026-09-18 真机误伤实锤）：「打开办公室射灯、空调、
+    # 平开窗」把三扇**与办公室无归属登记**的开窗器真开了还播「都办妥了」——
+    # 病灶=用户点名区域时多个 tier2（区域证据全无）并列，旧裁决同 tier 先到
+    # 先得=async_all 注册序掷硬币。收紧为**并列拒**：该动作出局（如实报
+    # 「没找到」；恢复路径=HA 补区域登记（D4 数据半）→重扫即 tier0）；tier2
+    # 全屋唯一仍兜底放行（v1.0.71 契约④「小家庭不许把功能闸死」不回退）。
+    # 未点名区域（area_norm 空，tier 恒 0）与 tier0/1 命中路径零影响。
+    if area_norm:
+        for action in list(best.keys()):
+            _tier, _eid = best[action]
+            _rivals = t2_seen.get(action, ())
+            if _tier == 2 and len(_rivals) > 1:
+                _LOGGER.warning(
+                    "D2 证据闸：%s 动作在 %s 个无区域证据候选中并列"
+                    "（点名区域='%s'）——拒绝掷硬币，本动作如实失败",
+                    action, len(_rivals), area_name)
+                del best[action]
+                skip_area_count += len(_rivals)
 
     result = {action: eid for action, (_t, eid) in best.items()}
     _LOGGER.info(
@@ -518,9 +542,14 @@ def find_window_buttons_by_area_id(hass, area_id: str | None) -> dict[str, str]:
         if area_id and eff_area and eff_area != area_id:
             continue
         if area_id and not eff_area:
+            # v1.0.93（D2 逻辑半）：本函数语义=「该区域里的窗钮」，区域挂不
+            # 出的按钮**不配在里**——旧 debug 放行与 find_window_buttons 的
+            # tier2 拒绝同族（2026-09-18 误伤案的另一半），一并关死。
             _LOGGER.debug(
-                "find_window_buttons_by_area_id: including button without area_id: %s", state.entity_id
+                "find_window_buttons_by_area_id: refusing button without "
+                "area_id (D2 证据闸): %s", state.entity_id
             )
+            continue
         name = getattr(state, "name", "") or ""
         name_lower = name.lower()
         if is_remove_button(state):
@@ -565,6 +594,9 @@ def find_all_window_buttons_by_action(
     # （共享去重会让先入表的区域未知候选把同窗型的实锤候选挤掉——方向反了）
     hard: list[str] = []      # tier0/1：区域实锤或名字回声明
     loose: list[str] = []     # tier2：无任何区域证据（兜底）
+    # v1.0.93 D2 证据闸记账：loose 里同窗型的**真实候选数**（去重 append 只
+    # 留一枚，并列判定必须数进过场的全部——三个无区平开窗掷硬币选谁都算误伤）
+    loose_type_hits: dict[str, int] = {}
 
     for state in hass.states.async_all():
         if state.domain not in (BUTTON_DOMAIN, INPUT_BUTTON_DOMAIN):
@@ -598,6 +630,9 @@ def find_all_window_buttons_by_action(
             if match_idx is not None:
                 window_type = name_lower[:match_idx].strip()
                 bucket = loose if tier >= 2 else hard
+                if bucket is loose:
+                    loose_type_hits[window_type] = \
+                        loose_type_hits.get(window_type, 0) + 1
                 seen = seen_by_bucket[bucket is loose]
                 if window_type not in seen:
                     seen.add(window_type)
@@ -606,6 +641,16 @@ def find_all_window_buttons_by_action(
                         "Found all-window button: %s (name: %s, tier %s)",
                         state.entity_id, name, tier)
                 break
+
+    # v1.0.93（D2 逻辑半，与 find_window_buttons 同闸同判据）：点名区域时
+    # loose 兜底里同窗型并列多候选=注册序掷硬币（2026-09-18「无区域开窗器
+    # 被点名别区句误开」同族，泛称句一次开全屋更烈）——**整批拒**，如实
+    # 失败；各窗型唯一仍放行（契约④）。
+    if not hard and area_norm and any(n > 1 for n in loose_type_hits.values()):
+        _LOGGER.warning(
+            "D2 证据闸(all-window)：点名区域='%s' 但 %s 个无区域证据候选并列"
+            "——拒绝掷硬币，如实失败", area_name, sum(loose_type_hits.values()))
+        return []
 
     result = hard if hard else loose
     if hard and loose:

@@ -7,7 +7,7 @@ from pathlib import Path
 APP_NAME = "huijian_voice"
 # 裸 docker build 会把 ENV 烘成占位值 0.0.0：毒值不得穿透成对外版本
 _env_ver = os.environ.get("HUIJIAN_VERSION", "")
-APP_VERSION = _env_ver if _env_ver and _env_ver != "0.0.0" else "1.0.92"
+APP_VERSION = _env_ver if _env_ver and _env_ver != "0.0.0" else "1.0.93"
 
 
 def addon_version() -> str:
@@ -103,6 +103,11 @@ CONNECT_GATE_S = 14.0         # 客户端 ensure_connected 15s 上限——upgra
 
 # 兜底话术（LLM 关且级联全 miss；可在 settings.dialog.fallback_text 覆盖）
 FALLBACK_TEXT = "这句话我还不会，可以说「打开客厅的灯」或「客厅多少度」试试。"
+
+# ── v1.0.93 连续对话语音退出（2026-09-18 用户批准收词表）──────────────────
+# 收词只进 fast_path 字面表且**整句精确**；本常量=执行话术，退出旗经 LLM end
+# 帧 end_dialogue 键透传（三端契约：加载项→集成 INTENT_END kv→固件单轮旗）。
+END_DIALOGUE_SAY = "好的，我先退下了，随时再叫我。"
 
 # 事件旁路（v4 §2 旁路：每回合 trace 供自动化与排障）
 EVENT_NAME = "huijian_voice_utterance"

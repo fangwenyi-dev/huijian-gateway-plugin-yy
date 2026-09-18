@@ -16,6 +16,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 
 from .const import DOMAIN
+from . import end_dialogue
 from .huijian import get_entry_data, llm_transport
 
 _LOGGER = logging.getLogger(__name__)
@@ -99,7 +100,19 @@ class HuijianConversationEntity(BaseEntity):
                 }
             )
         )
+
+        # v1.0.93 退下旗（信号线第一段）：应答流里出现 end_dialogue → 按
+        # chat_log.conversation_id 记账。键必须**剥掉再交给 chat_log**：
+        # core 的 delta 消费面按已知字段 .get()，多键今天无害，但那是 core 的
+        # 自由裁量面——不赌它，原样只传它认识的 role/content。
+        async def _capturing():
+            async for msg in self._await_message_with_timeout(transport):
+                if isinstance(msg, dict) and msg.get("end_dialogue"):
+                    end_dialogue.mark(chat_log.conversation_id)
+                    msg = {k: v for k, v in msg.items() if k != "end_dialogue"}
+                yield msg
+
         async for content in chat_log.async_add_delta_content_stream(
-            self.entity_id, self._await_message_with_timeout(transport)
+            self.entity_id, _capturing()
         ):
             _LOGGER.info("LLM response: %s", content)

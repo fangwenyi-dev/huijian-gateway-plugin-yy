@@ -159,10 +159,12 @@ _SPEED_MAX = 2.0                # v1.0.65 F10：与 Web 滑条上限对齐的服
 # Web 滑条 0.6 的服务端对应物（留半档容差取 0.5）。
 _SPEED_MIN = 0.5
 # 2026-09-27 深审 R2 #1b：排队等 _gen_lock 必须有界——前手是"坏 speed 的
-# 小时级 generate"或冷下载时，后来者无限排队=同一条漏线程路径。50s < session
-# 整流预算（现 52s，见 const ⑧算术）：超时按本句合成失败收（truncated 语义
-# 由既有路径承接），不陪葬。
-_GEN_WAIT_S = 50.0
+# 小时级 generate"或冷下载时，后来者无限排队=同一条漏线程路径。
+# v1.0.93（D3 按轮次恶化根修）：50s→30s，对齐整流 52s 帧间隙窗。旧值下本句
+# 白等 50s 再合成，句间合计必然穿破 52s 窗（设备 T_DL_STALL=48s 先手拆流），
+# 等待本身成为"第 4/5 轮播报不完整"的放大器（2026-09-18 真机签名）。30s 是
+# 折中：合法突发（长句排队尾）仍放行，真堵死时早 20s 认输、余句还有救。
+_GEN_WAIT_S = 30.0
 # 2026-09-27 深审 R2 #4：采样率合理域单点闸。fmt rate 是外部字节（F13 同一
 # 威胁模型：坏端点/中间盒），rate=1 → ratio=16000 → 单块 8KB 触发 6.5×10⁷ 点
 # np.arange ≈1.5GB 峰值分配 = 一条响应打死容器。8k–192k 覆盖全部现实 TTS 输出。
@@ -692,10 +694,16 @@ class TtsEngine:
         # v1.0.70（深审⑤）：合成/编码专用线程池——懒建（纯测试/云档引擎零线程）。
         # 旧形态全部 run_in_executor(None,…) 挤 asyncio 默认 8 线程池（4C 机），
         # 播报风暴期与 ASR 转写/TextCNN 预估/模型加载同池排队：识别一起停摆
-        # （"看得见连接听不见回答"的服务器版）。2 worker=合成与编码各占一位
-        # 可重叠；generate 真身仍由 _gen_lock 峰值=1 串行，多出的工位只给
-        # 编码/解码。卸载不 shutdown：常驻 2 条停泊线程，换取重载即时可用，
-        # 也免掉 shutdown/重建竞态。ASR 侧继续用默认池=天然隔离。
+        # （"看得见连接听不见回答"的服务器版）。
+        # v1.0.93（D3）：2→4 工位。2 工位=单轮严丝合缝（1 合成+1 编码），但
+        # generate **不可取消**——被打断轮的在飞句连线程带 _gen_lock 一起拖到
+        # 自然跑完，此后任何"第二位"任务（他轮 _synth/_encode/ensure）即排队；
+        # 连续对话里每打断一次就多压一层尸体工时，轮次越后句间越迟——真机
+        # 2026-09-18 签名"第 1/2 轮完整、第 4/5 轮不完整"的池侧放大器。4 工位
+        # =打断残局 1 + 双活轮合成/编码 2 + 余量 1；generate 真身仍由
+        # _gen_lock 峰值=1 串行（多工位不抬并发 CPU 占用），配合本轮 abort
+        # 闸（未起跑句锁口即死）与 _GEN_WAIT_S=30 收口。卸载不 shutdown：
+        # 常驻停泊线程，换取重载即时可用，也免掉 shutdown/重建竞态。
         self._exec: Optional[ThreadPoolExecutor] = None
         self._exec_lock = threading.Lock()
         # 深审 R2 #2/#7：指纹变更通知钩子（Service 布线；任何线程可调，
@@ -940,7 +948,7 @@ class TtsEngine:
             with self._exec_lock:
                 if self._exec is None:
                     self._exec = ThreadPoolExecutor(
-                        max_workers=2, thread_name_prefix="huijian-tts")
+                        max_workers=4, thread_name_prefix="huijian-tts")
         return self._exec
 
     def ensure_loaded(self) -> bool:

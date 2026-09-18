@@ -42,6 +42,7 @@ from homeassistant.util.hass_dict import HassKey
 from voluptuous.humanize import humanize_error
 
 from .const import DOMAIN, WAKE_WORDS_API_PATH, WAKE_WORDS_DIR_NAME
+from . import end_dialogue
 from .entity import EsphomeAssistEntity, convert_api_error_ha_error
 from .entry_data import ESPHomeConfigEntry
 from .enum_mapper import EsphomeEnumMapper
@@ -660,6 +661,13 @@ class EsphomeAssistSatellite(
                     int(event.data["intent_output"]["continue_conversation"])
                 ),
             }
+            # v1.0.93 退下旗（信号线末段）：conversation 实体按同一
+            # conversation_id 记账 → 此处弹取转 kv。正向专用旗，绝不复用
+            # continue_conversation 孤旗（v2.1.47 教训）；旧固件按名扫 kv、
+            # 未知键天然忽略（fail-open），无能力协商。
+            if end_dialogue.consume(
+                    event.data["intent_output"].get("conversation_id")):
+                data_to_send["end_dialogue"] = "1"
         elif event_type == VoiceAssistantEventType.VOICE_ASSISTANT_TTS_START:
             assert event.data is not None
             data_to_send = {"text": event.data["tts_input"]}
@@ -828,6 +836,79 @@ class EsphomeAssistSatellite(
                     preannounce_media_id = async_process_play_media_url(
                         self.hass, make_proxy_url(media_url=preannounce_media_id)
                     )
+
+        # ── v1.0.93 announce 静音根修（2026-09-18 真机实锤：Announce finished
+        #    (0 bytes)，REST 干等到超时）────────────────────────────────────
+        # API 音频卫星（慧尖板 v2.1.11 起只宣告 API_AUDIO，无 media_player、
+        # 无 URL 自取能力）吃到 core 预合成的 tts_proxy media_id = 永远零包。
+        # 修：有 message 文本时**本包自行合成**，复用 pipeline 应答那条已实战
+        # 下行通路（_stream_tts_audio：归属闸/背压/饥饿遥测全套同享，真机
+        # gapmax 110ms 健康）。三条护栏：
+        #   ① 只收 API_AUDIO 且非 SPEAKER 的形态——真喇叭设备自播 URL 旧路不变；
+        #   ② 活跃 pipeline 轮（assist_pipeline_state=True）不接管下行——此时
+        #      固件本就拒播报（on_announce busy refuse），抢代次反杀在播应答；
+        #   ③ 合成建流失败不拦请求——设备按旧首包超时收口（WARN 点名），
+        #      行为不劣于修前。
+        # media_id 原样随请求发出（本板 on_announce 只记日志不抓取）。
+        api_audio_only = False
+        with contextlib.suppress(Exception):
+            assert self._entry_data.device_info is not None
+            _flags = (
+                self._entry_data.device_info.voice_assistant_feature_flags_compat(
+                    self._entry_data.api_version
+                )
+            )
+            api_audio_only = bool(
+                (_flags & VoiceAssistantFeature.API_AUDIO)
+                and not (_flags & VoiceAssistantFeature.SPEAKER)
+            )
+        if (api_audio_only and announcement.message
+                and not preannounce_media_id
+                and not self._entry_data.assist_pipeline_state):
+            engine_id = None
+            ent_reg = er.async_get(self.hass)
+            for eid in self.hass.states.async_entity_ids(Platform.TTS):
+                ent = ent_reg.async_get(eid)
+                if ent is not None and not ent.disabled_by \
+                        and ent.platform == DOMAIN:
+                    engine_id = eid
+                    break
+            if engine_id is not None:
+                try:
+                    lang = getattr(announcement, "language", None)
+                    if lang not in ("en", "zh", "zh-Hans"):
+                        lang = None          # 实体白名单外语种→用引擎默认
+                    tts_stream = tts.async_create_stream(
+                        hass=self.hass,
+                        engine=engine_id,
+                        language=lang,
+                        options={
+                            tts.ATTR_PREFERRED_FORMAT: "wav",
+                            tts.ATTR_PREFERRED_SAMPLE_RATE: 16000,
+                            tts.ATTR_PREFERRED_SAMPLE_CHANNELS: 1,
+                            tts.ATTR_PREFERRED_SAMPLE_BYTES: 2,
+                        },
+                    )
+                    tts_stream.async_set_message(announcement.message)
+                    dl_seq = self._dl_takeover()
+                    self.config_entry.async_create_background_task(
+                        self.hass,
+                        self._stream_tts_audio(tts_stream, dl_seq,
+                                               announce=True),
+                        "huijian_announce_tts",
+                    )
+                    _LOGGER.info(
+                        "[Announce] API 音频卫星：文本已转合成推流（engine=%s，"
+                        "%d 字，seq=%s）", engine_id,
+                        len(announcement.message), dl_seq)
+                except Exception:  # noqa: BLE001 ③ fail-open 见上
+                    _LOGGER.warning(
+                        "[Announce] API 音频播报合成建流失败，回旧形态"
+                        "（设备将静默至首包超时收口）", exc_info=True)
+            else:
+                _LOGGER.warning(
+                    "[Announce] 域内无 %s 的 TTS 引擎（加载项未运行/条目未启用"
+                    "）——API 音频播报无源可推，回旧形态", DOMAIN)
 
         await self.cli.send_voice_assistant_announcement_await_response(
             media_id,
@@ -1217,6 +1298,7 @@ class EsphomeAssistSatellite(
         sample_width: int = 2,
         sample_channels: int = 1,
         samples_per_chunk: int = 512,
+        announce: bool = False,
     ) -> None:
         """Stream TTS audio chunks to device via API or UDP.
 
@@ -1229,6 +1311,12 @@ class EsphomeAssistSatellite(
         `_dl_takeover()` 在建流前发下；生产路径必须传（`None` 只留给直接调用/
         夹具，表示"不判归属"）。三处受它管辖：每帧 enqueue 前的归属闸、
         TTS_STREAM_END 是否由本流发（I-2）、本轮状态收口是否由本流落（I-3）。
+
+        v1.0.93（announce 推流复用）：`announce=True` 只豁免入口 `_is_running`
+        闸——该位在 pipeline run 期才置真，播报不启 run；其余闸（I-1/I-2/I-3
+        归属）全数照管，被新轮接管即静默退场。设备侧收束：音频帧在 ANNOUNCING
+        态照进播放队列；STREAM_START/END 两事件旧固件在 ANNOUNCING 态忽略
+        （无害留痕），流尾收束由 v2.1.55 drain 判定接住。
         """
         self.cli.send_voice_assistant_event(
             VoiceAssistantEventType.VOICE_ASSISTANT_TTS_STREAM_START, {}
@@ -1273,7 +1361,7 @@ class EsphomeAssistSatellite(
             self._entry_data.async_set_assist_pipeline_state(False)
 
         try:
-            if not self._is_running:
+            if not announce and not self._is_running:
                 return
 
             if tts_result.extension != "wav":

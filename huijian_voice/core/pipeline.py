@@ -36,7 +36,9 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Coroutine, Optional
 
 from . import const
-from .nlu.fast_path import FastPath, Plan, is_pronoun, is_whole_house, split_compound
+from .nlu.fast_path import (END_DIALOGUE_INTENT, FastPath, Plan,
+                            is_end_dialogue, is_pronoun, is_whole_house,
+                            split_compound)
 from .nlu import targets as T
 from .nlu.canonical import canonical
 from .nlu import music
@@ -58,6 +60,9 @@ HUIJIAN_ONLY_INTENTS = frozenset({
     "HassTriggerVoiceScene", "HassCreateVoiceScene", "HassDeleteVoiceScene",
     "HassListVoiceScenes", "HassCreateAutomation", "HassDeleteAutomation",
     "HassListAutomations", "HassUpdateAutomation", "HuijianGetLiveContext",
+    # v1.0.93 会话控制意图：字面表等值命中，恒胜 klar（draft 回放曾把闲聊句
+    # grounded 成调光——"退下"绝不许再被任何引擎抓去动设备）。
+    END_DIALOGUE_INTENT,
 })
 
 # 空间化兜底域（无目标位时补 target 用；绝不发 area-only——集成端
@@ -299,10 +304,14 @@ def select_fallback_plan(primary: Optional[Plan], fp: Optional[Plan],
 @dataclass
 class Reply:
     text: str
-    source: str = ""                 # t0|t0_strip|t0_prefix|scene|t1|query|llm|fallback|dedup|confirm*|chain
+    source: str = ""                 # t0|t0_strip|t0_prefix|t0_end|scene|t1|query|llm|fallback|dedup|confirm*|chain
     ok: bool = True
     trace: list[str] = field(default_factory=list)
     streamed: bool = False           # P2-15：on_sentence 已逐句送达，调用方勿重播
+    # v1.0.93：退下旗。True=LlmSession 在 end 帧带 end_dialogue:1，
+    # 集成透传进 INTENT_END kv，固件置单轮 stop_after_tts_（正向专用旗——
+    # 只用来"停"，绝不复用 continue_conversation 孤旗，三端契约同批钉）。
+    end_dialogue: bool = False
 
 
 # ── 体验批常量 ──────────────────────────────────────────────────
@@ -498,12 +507,13 @@ class Pipeline:
         if e is not None and now - e["first"] < win:
             if e.get("reply") is not None:
                 logger.info("[级联] 去重命中(%0.1fs 内重复): %s", now - e["first"], text)
-                return Reply(e["reply"].text, "dedup", e["reply"].ok)
+                r0 = e["reply"]
+                return Reply(r0.text, "dedup", r0.ok, end_dialogue=r0.end_dialogue)
             # 在飞：等它的结果（封顶等待，超时报"正在处理"，绝不重复执行）
             try:
                 r = await asyncio.wait_for(asyncio.shield(e["fut"]), timeout=min(10.0, win * 5))
                 logger.info("[级联] 去重共享在飞结果: %s", text)
-                return Reply(r.text, "dedup", r.ok)
+                return Reply(r.text, "dedup", r.ok, end_dialogue=r.end_dialogue)
             except asyncio.TimeoutError:
                 logger.info("[级联] 去重在飞等待超时: %s", text)
                 return Reply("这条指令我正在处理，请稍候", "dedup")
@@ -577,7 +587,13 @@ class Pipeline:
         # nlu.enabled=false：本地理解全线让位（快速通道/场景契约/查询族/场景与
         # 自动化本地承接一律不参与），只剩 LLM 兜底——开关必须说到做到，否则
         # 用户"关了 NLU 却还被本地拦截"就是配置与行为打架（本次修订核心之一）。
+        # v1.0.93 例外一条：退下收词表=**会话控制**不是本地理解，不受 nlu 开关
+        # 管辖——关了 NLU 也必须有办法用语音停掉麦克风（否则开关语义反而把人
+        # 永久锁在聆听态）。判据仍走同一等值谓词，与 fast_path 单点词表。
         if not self.settings.get("nlu.enabled", True):
+            if is_end_dialogue(text):
+                return Reply(const.END_DIALOGUE_SAY, "t0_end", True,
+                             ["退下字面表(NLU已关)"], end_dialogue=True)
             if self.agent and self.agent.enabled:
                 llm = await self._llm(text, origin, on_sentence)
                 if llm:
@@ -598,6 +614,12 @@ class Pipeline:
         # ⓪①②③④ klar 引擎与 T0/T1/场景并行判定，三层裁决（见模块头）
         fp_plan, kl_plan = await self._match_pair(text)
         plan = select_primary_plan(fp_plan, kl_plan, self._known_areas())
+        # v1.0.93 「退下」句：纯会话控制，零设备执行——在上下文注入**之前**
+        # 收口（_apply_context 会给空 args 继承上一轮目标，退出句绝不吃到）。
+        # 旗随 Reply 走：LlmSession 挂进 end 帧 → 集成 INTENT_END → 固件闸。
+        if plan is not None and plan.intent == END_DIALOGUE_INTENT:
+            return Reply(const.END_DIALOGUE_SAY, "t0_end", True,
+                         list(plan.trace), end_dialogue=True)
         plan = self._apply_context(plan, text, origin)
         if plan:
             ob = self._overbroad_area_target(plan)
@@ -1408,6 +1430,14 @@ class Pipeline:
             if s is not None:
                 chain_spec = s                       # 本句最新明示目标滚入下一分句
             plans.append(p)
+        # v1.0.93 链中退下分句（"关灯然后退下"）：HuijianEndConversation 是
+        # 纯会话控制，绝不进 executor（HA 无此注册意图）；执行其余分句后把
+        # 退出旗挂到链应答上。若整链只剩退下，回退单发通路（等值表在那收口）。
+        end_in_chain = any(p.intent == END_DIALOGUE_INTENT for p in plans)
+        if end_in_chain:
+            plans = [p for p in plans if p.intent != END_DIALOGUE_INTENT]
+            if not plans:
+                return None
         first = plans[0]
         chain_notes = [t for p in plans[1:] for t in p.trace if "链内回指" in t]
         merged = Plan(intent=first.intent, args=first.args, source=first.source,
@@ -1419,7 +1449,16 @@ class Pipeline:
             for p in plans:
                 self._note_target(origin, p)         # 末个具名目标定格为跨轮上下文
         self._remember_turn(origin, text, speech)
-        return Reply(speech, merged.source if not ok else "chain", ok, merged.trace)
+        reply = Reply(speech, merged.source if not ok else "chain", ok, merged.trace)
+        if end_in_chain:
+            reply.end_dialogue = True
+            # 分句真执行了才补退下话术；链失败（ok=False）如实报失败原因，
+            # 退出旗照发——失败一句不该把人锁在聆听态。
+            if speech:
+                reply.text = speech.rstrip("。") + "。" + const.END_DIALOGUE_SAY
+            else:
+                reply.text = const.END_DIALOGUE_SAY
+        return reply
 
     # ── P2-10/11 上下文与空间注入 ──────────────────────────────
     def _apply_context(self, plan: Optional[Plan], text: str,
