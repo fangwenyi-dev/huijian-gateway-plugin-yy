@@ -16,6 +16,19 @@
 - 测试：`test_v1098_text_announce_route.py` 4 钉——`_find_satellite` 真函数（命中/禁用/
   异设备/无 device_entry）+ 路由次序（先查卫星→announce→失败才回退）+ 普通 text 实体
   early-return 不被改道 + 派发面计数钉（双发播报=红）。
+- **播报推流形态判定根修（三日 0 字节案真凶，VM+COM27 七轮实锤）**：core
+  `assist_satellite.announce` 直调 A/B（现役 1.0.97）复现 Announce 送达设备、下行
+  0 bytes、90s 拆流、HA 侧 WARN/ERROR 零条。定罪：固件 **v2.1.12 起能力宣告并报
+  SPEAKER|API_AUDIO**（为对话腿放行），而 v1.0.93 announce 腿判据
+  `API_AUDIO and not SPEAKER` 恰将并存形态排除 → `_announce_gate` 按设计静默
+  (False,"") → `_do_announce` 一字不动作——设备端 on_announce「只记日志不抓取」，
+  两端互等、日志面互相甩锅、三日查空。判据收进纯函数 `_api_audio_form`：**API_AUDIO
+  位即接管**（与对话腿 `SPEAKER|API_AUDIO 任一` 及固件 v2.1.12 注释「并存时 HA 仍走
+  API 推」口径对齐）；SPEAKER-only 真喇叭（无 API_AUDIO 位）恒 False，URL 自取路
+  一字不动。
+- 测试：`test_v1098_announce_form_flags.py` 8 钉——并存形态接管（案核钉：改回旧判据
+  当场红）/API_AUDIO-only 接管/SPEAKER-only 永不接管/无音频位不接管/0 flags/旧互斥
+  判据禁回潮（源码正则）/调用接线（compat flags→form→gate 计数）/gate 合取端到端。
 
 ## [1.0.97] - 2026-09-19 意图 REST 面 500 崩全量收口（裸「关闭」误诊"集成没生效"悬案根修）
 

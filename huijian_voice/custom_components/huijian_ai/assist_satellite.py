@@ -236,6 +236,26 @@ def _announce_gate(*, api_audio: bool, has_message: bool, preannounce: bool,
         return False, "撞活跃轮(护栏②不抢下行)"
     return True, ""
 
+
+def _api_audio_form(flags: int) -> bool:
+    """设备形态判定：本卫星是否属「API 音频推流」形态（announce 接管闸的输入）。
+
+    v1.0.98 根修（2026-09-19 VM+COM27 实锤链，播报三日 0 字节案真凶）：旧判据
+    `API_AUDIO and not SPEAKER` 假设慧尖板恒只报 API_AUDIO——但固件 **v2.1.12
+    起能力宣告补了 FEATURE_SPEAKER**（voice_assistant.h get_feature_flags()，
+    当日为给对话应答那条 `SPEAKER|API_AUDIO` 任一即推流的门控放行）。并存形态
+    下旧判据=False → `_announce_gate` 返回 (False, "") 具名分因为空串=**按设计
+    静默** → `_do_announce` 一字不动作，设备端 on_announce 又"只记日志不抓取"
+    ——两端互等对方干活=Announce 送达、下行 0 bytes、90s 拆流、全程零日志。
+    判据改为 **API_AUDIO 位即接管**：
+      · 慧尖板（2.1.11 起，2.1.12 后双标并存）→ True，推流自合成接管；
+      · SPEAKER-only 真喇叭（官方 media_player 自取 URL 形态，无 API_AUDIO）
+        → False，旧 URL 自取路一字不动；
+      · 无任何音频位 → False（同上不接管）。
+    与对话腿（:713 任一即推流）和固件 v2.1.12 注释「SPEAKER&&API_AUDIO 并存时
+    HA 仍走 API 推」口径对齐——announce 腿此前独走相反假设。"""
+    return bool(flags & VoiceAssistantFeature.API_AUDIO)
+
 #: WAV 头最大攒量：坏流兜底（超过即判协议异常，绝不无限攒内存）
 _MAX_WAV_HEADER_BYTES = 64 * 1024
 
@@ -859,12 +879,14 @@ class EsphomeAssistSatellite(
 
         # ── v1.0.93 announce 静音根修（2026-09-18 真机实锤：Announce finished
         #    (0 bytes)，REST 干等到超时）────────────────────────────────────
-        # API 音频卫星（慧尖板 v2.1.11 起只宣告 API_AUDIO，无 media_player、
-        # 无 URL 自取能力）吃到 core 预合成的 tts_proxy media_id = 永远零包。
+        # API 音频卫星（慧尖板无 URL 自取能力；2.1.11 起报 API_AUDIO，2.1.12 起
+        # SPEAKER 并存申报——形态判定见 _api_audio_form）吃到 core 预合成的
+        # tts_proxy media_id = 永远零包。
         # 修：有 message 文本时**本包自行合成**，复用 pipeline 应答那条已实战
         # 下行通路（_stream_tts_audio：归属闸/背压/饥饿遥测全套同享，真机
         # gapmax 110ms 健康）。三条护栏：
-        #   ① 只收 API_AUDIO 且非 SPEAKER 的形态——真喇叭设备自播 URL 旧路不变；
+        #   ① API_AUDIO 位即接管（v1.0.98 判据修正，见 _api_audio_form）——
+        #      SPEAKER-only 真喇叭设备自播 URL 旧路不变；
         #   ② 活跃 pipeline 轮（assist_pipeline_state=True）不接管下行——此时
         #      固件本就拒播报（on_announce busy refuse），抢代次反杀在播应答；
         #   ③ 合成建流失败不拦请求——设备按旧首包超时收口（WARN 点名），
@@ -879,14 +901,12 @@ class EsphomeAssistSatellite(
                     self._entry_data.api_version
                 )
             )
-            api_audio_only = bool(
-                (_flags & VoiceAssistantFeature.API_AUDIO)
-                and not (_flags & VoiceAssistantFeature.SPEAKER)
-            )
+            api_audio_only = _api_audio_form(_flags)
         # v1.0.96：device_info 竞态缺失（reload/重连窗——VM 案形态）不再一票否决：
         # 本实体无 UDP 通道且 API 版本已协商 ⇒ 慧尖客户群唯一形态=API 音频板
-        # （交付约束：只装本加载项，官方 esphome 集成不装）。真喇叭设备 device_info
-        # 必在且 flags 含 SPEAKER，永不走本支——旧 URL 自取路一字不动。
+        # （交付约束：只装本加载项，官方 esphome 集成不装）。SPEAKER-only 真喇叭
+        # 设备 device_info 必在且 flags 无 API_AUDIO，永不走本支——旧 URL 自取路
+        # 一字不动。
         if (not api_audio_only and self._entry_data.device_info is None
                 and self._udp_server is None and self._entry_data.api_version):
             api_audio_only = True
