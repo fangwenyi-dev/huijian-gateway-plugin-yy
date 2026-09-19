@@ -39,6 +39,36 @@ DOMAIN_ALIASES: dict[str, str | list[str]] = {
 }
 
 
+def validate_slots_safely(
+    handler: "intent.IntentHandler",
+    intent_obj: "intent.Intent",
+    feature: str,
+) -> "tuple[dict | None, dict | None]":
+    """HA core `async_validate_slots` 的唯一安全入口（v1.0.97，VM HAOS 2026.9.2 实锤）。
+
+    core 在该函数里有两种裸抛形态，经 REST /api/intent/handle 直接炸成 HTTP 500
+    纯文本（2026-09-19 全量枚举 11 面复现）：
+    ① slot_schema=None → 对 None 迭代抛 AttributeError（HuijianGetLiveContext）；
+    ② Required 键缺失/值不合型 → 抛 vol.Invalid（"required key not provided"，
+       TurnDeviceOn/Off、PauseDevice、SetDeviceMode、AdjustDeviceAttribute、
+       场景 create/trigger/delete、自动化 create/delete/update）。
+    500 被 ha_client 洗成「HA 内部错误(500)」→ zh_error 指路"重启/确认安装"——
+    裸「关闭」误诊"集成没生效"三日悬案即此链（本函数收口）。同 intent_turn
+    「永不抛」铁律：失败折叠为可复述的结构化 dict。
+    IntentHandleError 是 HA 正规失败通道，透传不二次折叠（M5 窗控同口径）。
+
+    Returns:
+        (slots, None) 校验通过；(None, error_dict) 校验炸出未捕获异常。
+    """
+    try:
+        return handler.async_validate_slots(intent_obj.slots), None
+    except intent.IntentHandleError:
+        raise
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.exception("%s 槽位校验未捕获异常，如实失败: %s", feature, err)
+        return None, {"success": False, "error": f"{feature} 参数校验未通过: {err}"}
+
+
 def normalize_targets_device_names(targets: list[dict]) -> list[dict]:
     """归一化 targets 中所有设备名称里的中文数字。
 

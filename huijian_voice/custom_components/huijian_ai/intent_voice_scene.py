@@ -13,6 +13,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util.json import JsonObjectType
 
 from .intent_device_shared import WINDOW_KEYWORDS, split_actions_by_device
+from .intent_helper import validate_slots_safely
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -311,7 +312,10 @@ class HassCreateVoiceSceneIntent(intent.IntentHandler):
         return new_actions
 
     async def async_handle(self, intent_obj: intent.Intent) -> JsonObjectType:
-        slots = self.async_validate_slots(intent_obj.slots)
+        slots, fail = validate_slots_safely(
+            self, intent_obj, "HassCreateVoiceScene")
+        if fail is not None:
+            return fail
         _LOGGER.info("HassCreateVoiceScene slots=%s", slots)
 
         trigger_phrase = slots.get("trigger_phrase", {}).get("value", "")
@@ -363,7 +367,10 @@ class HassTriggerVoiceSceneIntent(intent.IntentHandler):
 
     async def async_handle(self, intent_obj: intent.Intent) -> JsonObjectType:
         """Handle voice scene trigger - execute stored actions."""
-        slots = self.async_validate_slots(intent_obj.slots)
+        slots, fail = validate_slots_safely(
+            self, intent_obj, "HassTriggerVoiceScene")
+        if fail is not None:
+            return fail
         _LOGGER.info("HassTriggerVoiceScene slots=%s", slots)
 
         trigger_phrase = slots.get("trigger_phrase", {}).get("value", "")
@@ -519,7 +526,10 @@ class HassDeleteVoiceSceneIntent(intent.IntentHandler):
         }
 
     async def async_handle(self, intent_obj: intent.Intent) -> JsonObjectType:
-        slots = self.async_validate_slots(intent_obj.slots)
+        slots, fail = validate_slots_safely(
+            self, intent_obj, "HassDeleteVoiceScene")
+        if fail is not None:
+            return fail
         _LOGGER.info("HassDeleteVoiceScene slots=%s", slots)
 
         trigger_phrase = slots.get("trigger_phrase", {}).get("value")

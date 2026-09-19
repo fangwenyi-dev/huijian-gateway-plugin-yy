@@ -1,4 +1,11 @@
 # 变更日志
+## [1.0.97] - 2026-09-19 意图 REST 面 500 崩全量收口（裸「关闭」误诊"集成没生效"悬案根修）
+
+修复
+
+- **`/api/intent/handle` 11 个注册面缺 target 即 500**（VM HAOS 2026.9.2 全量枚举实锤）：HA core `async_validate_slots` 对 `slot_schema=None` 迭代裸抛 AttributeError（HuijianGetLiveContext）、对 Required 键缺失裸抛 vol.Invalid（TurnDeviceOn/Off、PauseDevice、SetDeviceMode、AdjustDeviceAttribute、场景 create/trigger、自动化 create/delete/update）。500 纯文本被 ha_client 洗成「HA 内部错误(500)」→ zh_error 指路"重启/确认安装"——加载项开关族空 args 裸透传（test_executor_turn_gate 钉的通道设计）撞上即误诊"集成还没生效"。现新增 `intent_helper.validate_slots_safely` 唯一安全入口，11 站点全改：崩→结构化 `success:False` 具名分因（话术层可复述），IntentHandleError 透传不二次折叠（M5 窗控同口径），正常流零触碰。
+- 测试：`test_v1097_intent_500_guard.py` 12 钉——三 handler 行为面（崩形态返结构化、零服务副作用、透传、正常流不误伤）+ helper 真值表 + AST 全量防回退（任何 `self.async_validate_slots(` 直调必须位于 try 内、站点计数漂移当场红）。
+
 ## [1.0.96] - 2026-09-19 播报门控全因日志 + device_info 竞态回退（VM 案根修第一步）
 
 修复

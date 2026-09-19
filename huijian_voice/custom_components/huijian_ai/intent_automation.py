@@ -18,6 +18,7 @@ from .entity_resolve_cn import cn_classes as _cn_classes
 from .entity_resolve_cn import norm as _cn_norm
 from .entity_resolve_cn import pick as _cn_pick
 from .intent_device_shared import split_actions_by_device
+from .intent_helper import validate_slots_safely
 from .trigger_eval import state_trigger_met, time_trigger_due
 
 _LOGGER = logging.getLogger(__name__)
@@ -757,7 +758,10 @@ class HassCreateAutomationIntent(ha_intent.IntentHandler):
         }
 
     async def async_handle(self, intent_obj: ha_intent.Intent) -> JsonObjectType:
-        slots = self.async_validate_slots(intent_obj.slots)
+        slots, fail = validate_slots_safely(
+            self, intent_obj, "HassCreateAutomation")
+        if fail is not None:
+            return fail
         _LOGGER.info("HassCreateAutomation slots=%s", slots)
 
         trigger = slots.get("trigger", {}).get("value", {})
@@ -856,7 +860,10 @@ class HassDeleteAutomationIntent(ha_intent.IntentHandler):
         }
 
     async def async_handle(self, intent_obj: ha_intent.Intent) -> JsonObjectType:
-        slots = self.async_validate_slots(intent_obj.slots)
+        slots, fail = validate_slots_safely(
+            self, intent_obj, "HassDeleteAutomation")
+        if fail is not None:
+            return fail
         _LOGGER.info("HassDeleteAutomation slots=%s", slots)
 
         automation_id = slots.get("automation_id", {}).get("value", "")
@@ -929,7 +936,10 @@ class HassUpdateAutomationIntent(ha_intent.IntentHandler):
         }
 
     async def async_handle(self, intent_obj: ha_intent.Intent) -> JsonObjectType:
-        slots = self.async_validate_slots(intent_obj.slots)
+        slots, fail = validate_slots_safely(
+            self, intent_obj, "HassUpdateAutomation")
+        if fail is not None:
+            return fail
         _LOGGER.info("HassUpdateAutomation slots=%s", slots)
 
         automation_id = slots.get("automation_id", {}).get("value", "")

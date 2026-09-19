@@ -16,6 +16,7 @@ from homeassistant.util import yaml as yaml_util
 from homeassistant.util.json import JsonObjectType
 
 from .huijian import get_entities
+from .intent_helper import validate_slots_safely
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -171,7 +172,10 @@ class HuijianGetLiveContextIntent(intent.IntentHandler):
 
     async def async_handle(self, intent_obj: intent.Intent) -> JsonObjectType:  # type: ignore
         """Get the current state of exposed entities."""
-        slots = self.async_validate_slots(intent_obj.slots)
+        slots, fail = validate_slots_safely(
+            self, intent_obj, "HuijianGetLiveContext")
+        if fail is not None:
+            return fail
         _LOGGER.info("huijianGetLiveContext: slots=%s", slots)
 
         speaker_id: str = slots.get("_speaker_id", {}).get("value")

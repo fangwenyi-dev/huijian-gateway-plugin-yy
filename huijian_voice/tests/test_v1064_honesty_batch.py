@@ -40,6 +40,9 @@ class _Log:
     def warning(self, *a, **k):
         pass
 
+    def exception(self, *a, **k):
+        pass  # v1.0.97 validate_slots_safely 失败分因走 _LOGGER.exception
+
 
 # ── H3 场景侧：折叠失败必须判 success ───────────────────────────────
 def _scene_ns(result_factory):
@@ -78,7 +81,13 @@ def _scene_ns(result_factory):
                     target = f
     assert target is not None
     code = textwrap.dedent(ast.get_source_segment(src, target))
-    ns["intent"] = types.SimpleNamespace(Intent=object)
+    ns["intent"] = types.SimpleNamespace(
+        Intent=object, IntentHandleError=type("IntentHandleError", (Exception,), {}))
+    # v1.0.97：async_handle 体改经 validate_slots_safely 入口——AST 抽真函数
+    # 注入（拒绝替身恒成功：helper 语义漂移/被绕回裸调用时此处当场红）。
+    exec(compile(_extract_func_src(CC / "intent_helper.py",  # noqa: S102
+                                   "validate_slots_safely"),
+                 "<intent_helper.extract>", "exec"), ns)
     exec(compile(code, "<extract>", "exec"), ns)  # noqa: S102
     ns["get_voice_scene_store"] = lambda hass: Store()
     intent_obj = types.SimpleNamespace(hass=None, slots={}, context=None)

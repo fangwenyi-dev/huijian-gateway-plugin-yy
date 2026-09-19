@@ -22,7 +22,8 @@ from homeassistant.helpers import intent
 from homeassistant.util.json import JsonObjectType
 
 from .intent_helper import (EntityInfo, HaDeviceItem, HaTargetItem,
-                            match_intent_entities, target_parameter_type)
+                            match_intent_entities, target_parameter_type,
+                            validate_slots_safely)
 from .intent_window_const import normalize_chinese_numbers
 
 _LOGGER = logging.getLogger(__name__)
@@ -744,7 +745,9 @@ class TurnDeviceOnIntent(TurnDeviceIntentBase):
 
     async def async_handle(self, intent_obj: intent.Intent) -> JsonObjectType:  # type: ignore
         """Get the current state of exposed entities."""
-        slots = self.async_validate_slots(intent_obj.slots)
+        slots, fail = validate_slots_safely(self, intent_obj, "TurnDeviceOn")
+        if fail is not None:
+            return fail
         _LOGGER.info("TurnDeviceOn slots=%s", slots)
         # 归一化中文数字（如"五号"->"5号"），提高实体匹配成功率
         slots = self._normalize_slots_device_names(slots)
@@ -791,7 +794,9 @@ class TurnDeviceOffIntent(TurnDeviceIntentBase):
 
     async def async_handle(self, intent_obj: intent.Intent) -> JsonObjectType:  # type: ignore
         """Get the current state of exposed entities."""
-        slots = self.async_validate_slots(intent_obj.slots)
+        slots, fail = validate_slots_safely(self, intent_obj, "TurnDeviceOff")
+        if fail is not None:
+            return fail
         _LOGGER.info("TurnDeviceOff slots=%s", slots)
         slots = TurnDeviceOnIntent._normalize_slots_device_names(slots)
         return await super()._async_handle(intent_obj, slots, "turn_off")
@@ -820,7 +825,9 @@ class PauseDeviceIntent(TurnDeviceIntentBase):
 
     async def async_handle(self, intent_obj: intent.Intent) -> JsonObjectType:  # type: ignore
         """Pause a running device (vacuum/media_player/cover)."""
-        slots = self.async_validate_slots(intent_obj.slots)
+        slots, fail = validate_slots_safely(self, intent_obj, "PauseDevice")
+        if fail is not None:
+            return fail
         _LOGGER.info("PauseDevice slots=%s", slots)
         slots = TurnDeviceOnIntent._normalize_slots_device_names(slots)
         return await super()._async_handle(intent_obj, slots, "huijian_pause")

@@ -12,7 +12,8 @@ from homeassistant.helpers import intent
 from homeassistant.util.json import JsonObjectType
 
 from .intent_helper import (HaTargetItem, match_intent_entities,
-                            normalize_targets_device_names, target_parameter_type)
+                            normalize_targets_device_names, target_parameter_type,
+                            validate_slots_safely)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -147,7 +148,9 @@ class SetDeviceModeIntent(intent.IntentHandler):
     async def async_handle(self, intent_obj: intent.Intent) -> JsonObjectType:  # type: ignore
         """Handle the intent."""
         hass = intent_obj.hass
-        slots = self.async_validate_slots(intent_obj.slots)
+        slots, fail = validate_slots_safely(self, intent_obj, "SetDeviceMode")
+        if fail is not None:
+            return fail
 
         mode: str = slots.get("mode", {}).get("value")
         targets: list[HaTargetItem] = slots.get("target", {}).get("value", [])

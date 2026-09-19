@@ -18,7 +18,8 @@ from homeassistant.util.color import RGBColor
 from homeassistant.util.json import JsonObjectType, JsonValueType
 
 from .intent_helper import (EntityInfo, HaTargetItem, match_intent_entities,
-                            normalize_targets_device_names, target_parameter_type)
+                            normalize_targets_device_names, target_parameter_type,
+                            validate_slots_safely)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -632,7 +633,9 @@ class AdjustDeviceAttributeIntent(intent.IntentHandler):
     async def async_handle(self, intent_obj: intent.Intent) -> JsonObjectType:  # type: ignore
         """Handle the intent."""
         hass = intent_obj.hass
-        slots = self.async_validate_slots(intent_obj.slots)
+        slots, fail = validate_slots_safely(self, intent_obj, "AdjustDeviceAttribute")
+        if fail is not None:
+            return fail
         _LOGGER.info("AdjustDeviceAttribute slots: %s", slots)
 
         attribute: str = slots.get("attribute", {}).get("value")
