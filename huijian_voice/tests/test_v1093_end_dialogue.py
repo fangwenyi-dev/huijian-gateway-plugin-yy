@@ -337,10 +337,13 @@ def test_announce_streaming_wiring():
         "豁免只此一处，pipeline 路 _is_running 闸不回退"
     assert "announce=True)" in src, "播报调用点必须显式豁免"
     assert "VoiceAssistantFeature.SPEAKER" in src
-    # 护栏②：活跃轮不抢下行
-    i = src.index("api_audio_only and announcement.message")
+    # 护栏②：活跃轮不抢下行（v1.0.96 起门控收进纯函数 _announce_gate，
+    # pipeline_busy 必须作为参数入账——分因真值表钉在 test_v1096_announce_gate）
+    i = src.index("taken, skip = _announce_gate(")
     seg = src[i:i + 400]
-    assert "assist_pipeline_state" in seg
+    assert "pipeline_busy=bool(" in seg
+    assert '"[Announce] 播报未走文本自合成推流' in src, \
+        "不走自合成的每个分因必须具名 WARN——静默跳过是 VM 案三日无日志的根因"
 
 
 def test_tts_d3_constants():

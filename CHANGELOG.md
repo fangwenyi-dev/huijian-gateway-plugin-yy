@@ -1,4 +1,18 @@
 # 变更日志
+## [1.0.96] - 2026-09-19 播报门控全因日志 + device_info 竞态回退（VM 案根修第一步）
+
+修复
+
+- **API 音频播报「0 字节」查因无门**（VM 台架案：对话应答正常、播报整段哑，设备 90s 首包超时拆流；集成侧**零日志**，三日无法定位卡在哪道门）：`_do_announce` 的自合成门控原是一条内联布尔链——任一条件不满足就**静默**走旧 URL 形态，而 API 音频设备无自取 media URL 能力，旧形态必然=静默超时。现将链收进纯函数 `_announce_gate`，**不走自合成的每条路带回具名分因**（无 message / preannounce 前置音 / 撞活跃轮），调用方一律 WARN。升级后若播报仍哑，日志一行直接点名，不再需要猜。
+- **device_info 竞态一票否决**：reload/重连窗口 `entry_data.device_info` 暂不可得时，旧代码 assert→suppress→api_audio_only=False→静默走死路（VM 案复现形态）。现以「本实体无 UDP 通道 + API 版本已协商」作次级判据接管为 API 音频形态（慧尖客户群唯一形态=API 音频板；真喇叭设备 device_info 必在且 flags 含 SPEAKER，永不走此支——URL 自取路一字不变），接管时 WARN 点名。
+
+测试
+
+- 新增 `test_v1096_announce_gate.py`：exec 提真身跑**真值表**（5 门全组合 + keyword-only 签名钉 + 分因 WARN/竞态回退接线钉），做过反向验证（把活跃轮分因改回静默真值表当场红）；`test_v1093` 的 announce 布线钉同步改形（`taken, skip = _announce_gate(` + pipeline_busy 参数入账 + 分因 WARN 存在性）。
+- 全量回归：红集仍=基线 30 条环境红逐 ID 一致（libopus/SIGALRM/NTFS/css 母本），零新增；六源 1.0.96 一致性钉绿。
+
+说明：本批是「播报断续/哑」的**可观测性+竞态根修**；若升级后 VM 现场播报仍哑，WARN 将点名真因（下一步据此做行为面修复）。VM 侧安装受商店节奏控制，装载后复验=下一个工作窗。
+
 ## [1.0.95] - 2026-09-19 默认音色改 zf_044、语速 1.25（用户拍板）
 
 变更

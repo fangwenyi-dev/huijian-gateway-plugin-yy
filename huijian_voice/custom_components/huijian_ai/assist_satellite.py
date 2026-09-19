@@ -216,6 +216,26 @@ def _prebuf_target_for_version(raw: object) -> float:
         return _DEVICE_BUFFER_TARGET_S_V2151
     return _DEVICE_BUFFER_TARGET_S
 
+
+def _announce_gate(*, api_audio: bool, has_message: bool, preannounce: bool,
+                   pipeline_busy: bool) -> tuple[bool, str]:
+    """v1.0.96（播报 0 字节案）：播报是否走「文本自合成推流」的纯决策函数。
+
+    旧形态是一串布尔条件——任一不满足就**静默**走旧 URL 形态，而 API 音频卫星的
+    旧形态＝设备干等首包到 90s 封顶拆流，全程没有一行日志说卡在哪道门（VM 台架
+    案查因三日取不到日志）。现：每道门具名，不走必返 skip 理由由调用方 WARN 打出；
+    真喇叭设备（api_audio=False）返回 ("",) 不产日志噪音，旧路行为一字不变。
+    纯函数=可钉可测（tests/test_v1096_announce_gate.py exec 真值表）。"""
+    if not api_audio:
+        return False, ""
+    if not has_message:
+        return False, "无message(API音频设备无自取media URL能力)"
+    if preannounce:
+        return False, "preannounce前置音"
+    if pipeline_busy:
+        return False, "撞活跃轮(护栏②不抢下行)"
+    return True, ""
+
 #: WAV 头最大攒量：坏流兜底（超过即判协议异常，绝不无限攒内存）
 _MAX_WAV_HEADER_BYTES = 64 * 1024
 
@@ -851,6 +871,7 @@ class EsphomeAssistSatellite(
         #      行为不劣于修前。
         # media_id 原样随请求发出（本板 on_announce 只记日志不抓取）。
         api_audio_only = False
+        form_note = ""
         with contextlib.suppress(Exception):
             assert self._entry_data.device_info is not None
             _flags = (
@@ -862,9 +883,27 @@ class EsphomeAssistSatellite(
                 (_flags & VoiceAssistantFeature.API_AUDIO)
                 and not (_flags & VoiceAssistantFeature.SPEAKER)
             )
-        if (api_audio_only and announcement.message
-                and not preannounce_media_id
-                and not self._entry_data.assist_pipeline_state):
+        # v1.0.96：device_info 竞态缺失（reload/重连窗——VM 案形态）不再一票否决：
+        # 本实体无 UDP 通道且 API 版本已协商 ⇒ 慧尖客户群唯一形态=API 音频板
+        # （交付约束：只装本加载项，官方 esphome 集成不装）。真喇叭设备 device_info
+        # 必在且 flags 含 SPEAKER，永不走本支——旧 URL 自取路一字不动。
+        if (not api_audio_only and self._entry_data.device_info is None
+                and self._udp_server is None and self._entry_data.api_version):
+            api_audio_only = True
+            form_note = "；device_info 不可得(重连竞态)，按无 UDP 通道的 API 音频形态接管"
+        taken, skip = _announce_gate(api_audio=api_audio_only,
+                                     has_message=bool(announcement.message),
+                                     preannounce=bool(preannounce_media_id),
+                                     pipeline_busy=bool(
+                                         self._entry_data.assist_pipeline_state))
+        if skip:
+            _LOGGER.warning(
+                "[Announce] 播报未走文本自合成推流：%s（message=%d字, preannounce=%s, "
+                "pipeline_state=%s%s）→ 旧 URL 形态，API 音频设备将静默至首包超时",
+                skip, len(announcement.message or ""), bool(preannounce_media_id),
+                self._entry_data.assist_pipeline_state,
+                ("，" + form_note) if form_note else "")
+        elif taken:
             engine_id = None
             ent_reg = er.async_get(self.hass)
             for eid in self.hass.states.async_entity_ids(Platform.TTS):
