@@ -109,7 +109,13 @@ class EsphomeText(EsphomeEntity[TextInfo, TextState], TextEntity):
                 await self.hass.services.async_call(
                     "assist_satellite",
                     "announce",
-                    {"entity_id": satellite_id, "message": value},
+                    # v1.0.99：core 2026.9 services.py 里 preannounce **默认 True**——
+                    # 有 message 即注入 PREANNOUNCE_URL 提示音，而本集成 _do_announce
+                    # 护栏③曾把带前置音的 announce 整体拒接管（API 音频板无 URL
+                    # 自取能力，拒=正文也陪葬 90s 0 字节，2026-09-19 部署实锤）。
+                    # 主通道显式关前置音：无「叮~」，正文合成推流直达。
+                    {"entity_id": satellite_id, "message": value,
+                     "preannounce": False},
                     blocking=False,
                 )
                 return

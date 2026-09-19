@@ -256,6 +256,21 @@ def _api_audio_form(flags: int) -> bool:
     HA 仍走 API 推」口径对齐——announce 腿此前独走相反假设。"""
     return bool(flags & VoiceAssistantFeature.API_AUDIO)
 
+
+def _preannounce_rescued(*, api_audio: bool, has_message: bool, skip: str) -> bool:
+    """v1.0.99（0 字节案第二层，2026-09-19 部署后 WARN 点名）：前置音不得拖死正文。
+
+    core 2026.9 `assist_satellite/services.py`：announce 的 `preannounce` **默认
+    True**——凡带 message 的 announce，core handler 一律注入 PREANNOUNCE_URL
+    提示音 → `_announce_gate` 护栏③整单拒接管。对真喇叭设备这只是回退 URL 自取
+    （正常）；对 API 音频板（慧尖板，无 media 自取能力）= 正文明明能走已实战的
+    自合成推流，却被一声放不出来的「叮~」陪葬 90s 0 字节（v1.0.98 部署当晚
+    WARN「preannounce前置音」当场抓获——api_audio 判据修通后露出的下一道门）。
+    判据：**API 音频形态 + 分因正是 preannounce + 有正文** ⇒ 救援=弃前置音、
+    正文照常接管。其余分因（无 message/撞活跃轮）与 SPEAKER-only 形态一概不救，
+    v1.0.96 语义不动。"""
+    return bool(api_audio and has_message and skip.startswith("preannounce"))
+
 #: WAV 头最大攒量：坏流兜底（超过即判协议异常，绝不无限攒内存）
 _MAX_WAV_HEADER_BYTES = 64 * 1024
 
@@ -916,6 +931,19 @@ class EsphomeAssistSatellite(
                                      preannounce=bool(preannounce_media_id),
                                      pipeline_busy=bool(
                                          self._entry_data.assist_pipeline_state))
+        # v1.0.99：preannounce 救援（判据与留痕见 _preannounce_rescued）——core 的
+        # announce 默认给 message 注入「叮~」前置音，API 音频板放不出来；旧行为=
+        # 整单回退 URL 形态=正文也陪葬 90s 0 字节。救援弃前置音（请求里不带、
+        # 不合成），正文照常走自合成推流。
+        if _preannounce_rescued(api_audio=api_audio_only,
+                                has_message=bool(announcement.message),
+                                skip=skip):
+            taken, skip = True, ""
+            preannounce_media_id = ""
+            _LOGGER.warning(
+                "[Announce] API 音频卫星：弃 core 默认前置音（本板无 URL 自取能力，"
+                "放不出来），正文继续自合成推流接管（message=%d字）",
+                len(announcement.message or ""))
         if skip:
             _LOGGER.warning(
                 "[Announce] 播报未走文本自合成推流：%s（message=%d字, preannounce=%s, "

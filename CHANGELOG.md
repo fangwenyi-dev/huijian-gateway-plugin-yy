@@ -1,4 +1,24 @@
 # 变更日志
+## [1.0.99] - 2026-09-19 播报推流第二道门：core 默认 preannounce 救援（0 字节案收口）
+
+修复
+
+- **API 音频板播报仍 0 字节（v1.0.98 部署当晚 WARN 点名）**：1.0.98 装至 VM 后
+  `assist_satellite.announce` 直调仍下行 0 bytes——v1.0.96 分因 WARN 首战抓获真因：
+  `[Announce] 播报未走文本自合成推流：preannounce前置音（message=19字, preannounce=True）`。
+  core 2026.9 `assist_satellite/services.py` 的 announce schema `preannounce` **默认
+  True**：凡带 message 的 announce，core handler 一律注入 PREANNOUNCE_URL 提示音；
+  慧尖 API 音频板无 URL 自取能力、这声「叮~」放不出来，而 v1.0.93 护栏③把带前置音的
+  announce **整单**回退旧 URL 形态=正文也陪葬 90s 0 字节（text 实体主通道、自动化
+  直调全中招）。双保险：① `text.play_voice_text` 派发**显式 `preannounce: False`**
+  （源头关断）；② `_do_announce` 消费面新增纯函数 `_preannounce_rescued`——API 音频
+  形态+分因正是 preannounce+有正文 ⇒ **弃前置音、正文照常自合成推流**（WARN 留痕），
+  无 message/撞活跃轮等其余分因与 SPEAKER-only 真喇叭形态 v1.0.96 语义一字不动。
+- 测试：`test_v1099_preannounce_rescue.py` 8 钉——救援真值表（案核组合必救/
+  SPEAKER-only 不救/他因不救/无正文不救/keyword-only 签名）+ 接线（救援夹在 gate 与
+  分因 WARN 之间、清 preannounce_media_id、send 落点同变量）+ text.py 源头显式关断钉。
+  六源 1.0.99 一致性钉；`test_v1096` 接线钉窗口同步改形（900→1400 字符）。
+
 ## [1.0.98] - 2026-09-19 播报语音根修：text 实体转推流通道（VM 真机联测定罪）
 
 修复

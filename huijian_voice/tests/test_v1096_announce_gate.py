@@ -75,7 +75,9 @@ def test_keyword_only_signature_pinned():
 def test_caller_warns_every_skip():
     src = SRC.read_text(encoding="utf-8")
     i = src.index("taken, skip = _announce_gate(")
-    seg = src[i:i + 900]
+    # v1.0.99：gate 与 if skip 之间多了 preannounce 救援块（窗口 900→1400）；
+    # 救援自身语义由 tests/test_v1099_preannounce_rescue.py 钉，本钉只守分因必 WARN。
+    seg = src[i:i + 1400]
     assert "if skip:" in seg, "分因必须进 WARN——静默跳过回潮"
     assert '"[Announce] 播报未走文本自合成推流' in seg
     assert "elif taken:" in seg, "命中门→引擎块"
