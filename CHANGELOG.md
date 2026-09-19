@@ -1,4 +1,22 @@
 # 变更日志
+## [1.0.98] - 2026-09-19 播报语音根修：text 实体转推流通道（VM 真机联测定罪）
+
+修复
+
+- **「播放语音」文本实体播报恒哑（设备侧三座山）**：旧路=edge-tts 云合成 mp3→写 www→
+  `media_player.play_media(URL)`→设备 http 自取。真机实锤三处独立缺陷叠加：
+  ① `/local` 静态路由在 www 首建前不注册——全新环境首播报必 404，anon/auth HEAD 均
+  404(len=14) 逐字复现，重启 HA 才自愈；② edge-tts 依赖微软云+证书栈（backlog
+  NoAudioReceived 同源，运行期不应有云依赖）；③ API 音频板吃 URL 自取本就形态错配
+  （设备 url_play 内部 RAM spawn 失败=固件 v2.1.57 侧根修，但 URL 路对慧尖板是绕远）。
+  主通道改走 core `assist_satellite.announce` → 本集成 `async_announce` → `_do_announce`：
+  有 message 即自合成推流（huijian_speech 本地引擎，与对话应答同音色 zf_044/语速 1.25），
+  复用实战下行链，/local、云、url_play 三座山一并绕开；v1.0.96 门控 WARN 分因全程有效。
+  找不到同设备 assist_satellite 实体（或极老 core 无该服务）→ 回退旧 URL 路，行为不倒退。
+- 测试：`test_v1098_text_announce_route.py` 4 钉——`_find_satellite` 真函数（命中/禁用/
+  异设备/无 device_entry）+ 路由次序（先查卫星→announce→失败才回退）+ 普通 text 实体
+  early-return 不被改道 + 派发面计数钉（双发播报=红）。
+
 ## [1.0.97] - 2026-09-19 意图 REST 面 500 崩全量收口（裸「关闭」误诊"集成没生效"悬案根修）
 
 修复

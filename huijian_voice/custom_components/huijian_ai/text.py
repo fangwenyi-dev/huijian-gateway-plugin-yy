@@ -90,10 +90,50 @@ class EsphomeText(EsphomeEntity[TextInfo, TextState], TextEntity):
             self._client.text_command(self._key, value, device_id=static_info.device_id)
             return
 
+        # v1.0.98（VM 真机联测 2026-09-19 定罪）：旧路=edge-tts 云合成 mp3 →
+        # 写 www → media_player.play_media(URL) → 设备 http 自取。三处实锤：
+        #   ① /local 静态路由在 www 首建前不注册——全新环境首播报必 404，
+        #      重启 HA 才自愈（VM 台架逐字复现：anon/auth HEAD 均 404 len=14）；
+        #   ② edge-tts 依赖微软云+证书栈（backlog NoAudioReceived 同源）；
+        #   ③ 设备侧 url_play 24KB 内部栈 spawn 失败（V2 内部 RAM 7680B，
+        #      固件 v2.1.57 已改 PSRAM 栈根治——但 URL 路对 API 音频板本就是
+        #      形态错配）。
+        # 主通道改走 core assist_satellite.announce → 本集成 async_announce →
+        # _do_announce：有 message 即自合成推流（huijian_speech 本地引擎，
+        # 与对话应答同音色 zf_044/1.25），复用实战下行链，/local、云、
+        # url_play 三座山一并绕开；v1.0.96 门控 WARN 对撞活跃轮等分因全程有效。
+        # 找不到同设备卫星（或极老 core 无该服务）→ 回退旧 URL 路，行为不倒退。
+        satellite_id = self._find_satellite()
+        if satellite_id is not None:
+            try:
+                await self.hass.services.async_call(
+                    "assist_satellite",
+                    "announce",
+                    {"entity_id": satellite_id, "message": value},
+                    blocking=False,
+                )
+                return
+            except Exception:  # noqa: BLE001
+                _LOGGER.warning(
+                    "播报语音走 assist_satellite.announce 失败，回退 edge-tts URL 路",
+                    exc_info=True,
+                )
         try:
             await self._play_tts(value)
         except Exception:
             _LOGGER.warning("TTS 播放失败", exc_info=True)
+
+    def _find_satellite(self) -> str | None:
+        """查同设备 assist_satellite 实体（播报语音推流主通道入口）。"""
+        from homeassistant.helpers import entity_registry as er
+
+        if self.device_entry is None or not self.device_entry.id:
+            return None
+        entity_reg = er.async_get(self.hass)
+        for entry in er.async_entries_for_device(entity_reg, self.device_entry.id):
+            if entry.domain == "assist_satellite" and not entry.disabled_by:
+                return entry.entity_id
+        return None
 
     async def _play_tts(self, text: str) -> None:
         """使用 edge-tts 生成 MP3 音频，通过 media_player 播放。"""
