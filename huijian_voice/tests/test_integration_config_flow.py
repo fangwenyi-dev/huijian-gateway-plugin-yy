@@ -7,6 +7,7 @@
 “配置类型未知”，排障无从下手。本测试钉三条修复不回退。
 """
 
+import ast
 import re
 from pathlib import Path
 
@@ -398,4 +399,230 @@ def test_integration_module_names_all_resolvable():
         src = (base / fname).read_text(encoding="utf-8")
         problems = _unresolved_names(src)
         assert not problems, f"{fname} 存在运行时必 NameError 的名字: {problems}"
+
+
+# ── 2026-10-01 自动发现卡片不得要求手输密钥（改道扫码配对通道）────────
+# 用户实机主诉：「设备与服务」里弹出的自动发现语音设备卡片，点配置后要输入
+# 加密密钥。本产品的 NoisePSK 由小程序每次配对现生成（ha-connect.js:439
+# generateHexPsk）且刻意不展示给用户（固件 v2.1.27 连串口明文都改成只留长度）
+# ——那个输入框**没人能填对**，填了必 invalid_psk，是死胡同。唯一持有密钥的
+# 一方是设备自己：CMD20 配对后它把 noise_psk POST 回 /api/huijian-ai/setup/
+# qrcode（huijian/http.py:93 → config_flow setup_data 消费）。故发现类流程取
+# 不到密钥时改道 async_step_qrcode（与本仓 async_step_reconfigure 需要凭据时
+# 走扫码同一先例）；reauth/reconfigure/用户自建（ESPHome yaml 写过
+# encryption.key，操作者确实知情）保留手输表单不动。
+def _fn(name):
+    tree = ast.parse(_src())
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name:
+            return n
+    raise AssertionError(f"config_flow 里没有函数 {name}")
+
+
+def _final_key_branch_body():
+    """_async_try_fetch_device_info 中「仍需加密密钥」最终裁决分支的 AST 源码。
+
+    走 AST 不用文本：ast.unparse 天然剥注释（本仓方法学铁规则——结构钉必须在
+    不含注释的代码上判，否则注释里出现的字面量会把钉桩骗过去）。"""
+    fn = _fn("_async_try_fetch_device_info")
+    hit = None
+    for n in ast.walk(fn):
+        if not isinstance(n, ast.If):
+            continue
+        if "ERROR_REQUIRES_ENCRYPTION_KEY" not in ast.unparse(n.test):
+            continue
+        body = "\n".join(ast.unparse(s) for s in n.body)
+        if "async_step_encryption_key()" in body:
+            hit = body                       # 取最后一个（=最终裁决，前面的在密钥族内层）
+    assert hit, "找不到『仍需加密密钥』的最终裁决分支（结构被改动，本钉需同步）"
+    return hit
+
+
+def test_discovery_flow_routes_to_qrcode_not_key_input():
+    body = _final_key_branch_body()
+    lines = body.splitlines()
+    strip = [ln.strip() for ln in lines]
+    gi = next((i for i, ln in enumerate(strip) if ln == "if self._from_discovery:"), None)
+    assert gi is not None, "最终密钥分支缺 self._from_discovery 判据（会复发手输密钥死胡同）"
+    ind = lambda s: len(s) - len(s.lstrip())
+    qr = next((i for i, ln in enumerate(strip[gi:], start=gi)
+               if "return await self.async_step_qrcode()" in ln), None)
+    assert qr is not None, "发现类流程未改道扫码配对通道"
+    assert ind(lines[qr]) > ind(lines[gi]), "async_step_qrcode 必须在 _from_discovery 保护之内"
+    ke = next((i for i, ln in enumerate(strip)
+               if "return await self.async_step_encryption_key()" in ln), None)
+    assert ke is not None and ke > gi, "手输密钥回退被删（reauth/自建场景需要它）"
+    assert ind(lines[ke]) == ind(lines[gi]), "密钥表单必须留在守卫之外的兜底位"
+
+
+def _assigns_flag_true_or_false(node, want):
+    """函数体内是否把 self._from_discovery 赋成 want（True/False）。
+    同时接受 `x: bool = v`（AnnAssign，__init__ 里带类型注解的写法）与
+    普通 Assign——只判 Assign 会漏掉注解式初始化（本钉第一版即栽在此）。"""
+    for n in ast.walk(node):
+        if isinstance(n, ast.Assign):
+            targets, value = n.targets, n.value
+        elif isinstance(n, ast.AnnAssign) and n.value is not None:
+            targets, value = [n.target], n.value
+        else:
+            continue
+        if any(isinstance(t, ast.Attribute) and t.attr == "_from_discovery"
+               for t in targets) \
+                and isinstance(value, ast.Constant) and value.value is want:
+            return True
+    return False
+
+
+def test_discovery_entries_mark_the_flow():
+    """zeroconf/mqtt 两个发现入口必须置位 _from_discovery（改道判据的来源）。"""
+    for fname in ("async_step_zeroconf", "async_step_mqtt"):
+        assert _assigns_flag_true_or_false(_fn(fname), True), \
+            f"{fname} 未置位 _from_discovery（自动发现卡片会再次要求输密钥）"
+
+
+def test_flag_defaults_false_for_non_discovery():
+    """__init__ 必须显式 False：reauth/reconfigure/用户添加走原路，不受本改影响。"""
+    assert _assigns_flag_true_or_false(_fn("__init__"), False), \
+        "_from_discovery 未在 __init__ 初始化为 False（非发现流程会 AttributeError）"
+
+
+
+def _form_step_ids(fn_node):
+    """函数体内所有 async_show_form(step_id=...) 的字面量（走 AST 关键字，
+    不比对字符串——ast.unparse 会把双引号归一成单引号，字面比对比这更脆）。"""
+    out = []
+    for n in ast.walk(fn_node):
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) \
+                and n.func.attr == "async_show_form":
+            for kw in n.keywords:
+                if kw.arg == "step_id" and isinstance(kw.value, ast.Constant):
+                    out.append(kw.value.value)
+    return out
+
+
+def _try_fetch_device_info_fn():
+    """AST 抠出 _async_try_fetch_device_info 真实函数体并 exec（同 _ensure_lan_port_fn
+    姿势：执行的是将随加载项出厂的同一份代码，而不是文本存在性检查）。"""
+    import logging
+
+    src = _src()
+    tree = ast.parse(src)
+    cls = next(n for n in tree.body
+               if isinstance(n, ast.ClassDef) and n.name == "ConfigFlowHandler")
+    fn = next(n for n in cls.body if isinstance(n, ast.AsyncFunctionDef)
+              and n.name == "_async_try_fetch_device_info")
+    ns = {
+        "ERROR_REQUIRES_ENCRYPTION_KEY": "requires_encryption_key",
+        "ERROR_INVALID_ENCRYPTION_KEY": "invalid_psk",
+        "ZERO_NOISE_PSK": "ZERO",
+        "_LOGGER": logging.getLogger("test.config_flow"),
+        # 返回注解 `-> ConfigFlowResult` 在 def 求值期就要绑定：exec 用独立命名空间，
+        # 没有模块作用域兜底，漏了它整函数定义即 NameError。
+        "ConfigFlowResult": object,
+    }
+    exec(compile(ast.get_source_segment(src, fn), "<cf_fetch>", "exec"), ns)  # noqa: S102
+    return ns["_async_try_fetch_device_info"]
+
+
+class _FetchStepStub:
+    """最小 flow 替身：只实现该函数用到的面，返回值即「走到了哪一步」。"""
+
+    def __init__(self, *, discovery, noise_required, mac="AA:BB:CC:DD:EE:FF",
+                 dashboard_key=False, storage_key=False, fetch_ok=False,
+                 first_fetch_error=None):
+        self._from_discovery = discovery
+        self.source = "zeroconf" if discovery else "user"   # 改道日志要读它
+        self._noise_required = noise_required
+        self._device_name = "语音卫星"
+        self._device_mac = mac
+        self._noise_psk = None
+        self._host = "192.168.1.55"
+        self._source_steps = []
+        self._dashboard_key = dashboard_key
+        self._storage_key = storage_key
+        self._fetch_calls = 0
+        self._fetch_ok = fetch_ok
+        self._first_fetch_error = first_fetch_error
+
+    async def fetch_device_info(self):
+        self._fetch_calls += 1
+        if self._fetch_ok or (self._first_fetch_error is None
+                              and self._noise_psk is not None):
+            return None
+        return self._first_fetch_error or "requires_encryption_key"
+
+    async def _retrieve_encryption_key_from_dashboard(self):
+        return self._dashboard_key
+
+    async def _retrieve_encryption_key_from_storage(self):
+        if self._storage_key:
+            self._noise_psk = "KEY-FROM-STORAGE"
+        return self._storage_key
+
+    async def async_step_qrcode(self):
+        self._source_steps.append("qrcode")
+        return "STEP-QRCODE"
+
+    async def async_step_encryption_key(self):
+        self._source_steps.append("encryption_key")
+        return "STEP-KEY"
+
+    async def _async_step_user_base(self, error=None):
+        return f"STEP-BASE:{error}"
+
+    async def _async_authenticate_or_add(self):
+        return "STEP-ADDED"
+
+
+def test_discovery_without_key_behaviourally_routes_to_qrcode():
+    """行为实证：发现类流程拿不到密钥→进扫码通道（不再是要密钥的死胡同）；
+    非发现流程同条件→仍是密钥表单。"""
+    import asyncio
+
+    fn = _try_fetch_device_info_fn()
+
+    disc = _FetchStepStub(discovery=True, noise_required=True)
+    assert asyncio.run(fn(disc)) == "STEP-QRCODE", disc._source_steps
+
+    manual = _FetchStepStub(discovery=False, noise_required=True)
+    assert asyncio.run(fn(manual)) == "STEP-KEY", manual._source_steps
+
+    # 能自动取到密钥时，发现流程必须**静默连上**（本改只替换"取不到"的出口）
+    stored = _FetchStepStub(discovery=True, noise_required=True, storage_key=True)
+    assert asyncio.run(fn(stored)) == "STEP-ADDED", stored._source_steps
+    assert stored._noise_psk == "KEY-FROM-STORAGE"
+
+    # 不需要加密的设备：同旧行为，直接进建条目
+    plain = _FetchStepStub(discovery=True, noise_required=False, fetch_ok=True)
+    assert asyncio.run(fn(plain)) == "STEP-ADDED"
+
+    # 改道不得吞掉别的错误形态（如连接失败仍回基础报错步）
+    other = _FetchStepStub(discovery=True, noise_required=False, first_fetch_error="connection_error")
+    assert asyncio.run(fn(other)) == "STEP-BASE:connection_error"
+
+
+def test_manual_key_form_still_functional():
+    """改道不得顺手削掉密钥表单本身——reauth（设备换过密钥）与 ESPHome yaml
+    自建场景仍需可输入；step_id、密钥字段、错误回显三者必须都在（step_id 是
+    与 translations 的契约，换成别的 id 表单就没标题了）。"""
+    fn = _fn("async_step_encryption_key")
+    assert "encryption_key" in _form_step_ids(fn), \
+        f"密钥表单 step_id 丢失/改名（translations 契约断裂）: {_form_step_ids(fn)}"
+    body = ast.unparse(fn)
+    assert "CONF_NOISE_PSK" in body and "errors" in body, \
+        "密钥表单丢了字段或错误回显（填错只能盲重试）"
+
+
+def test_discovery_route_does_not_import_unverified_source_constants():
+    """判据用流程标记，**不是** self.source == SOURCE_ZEROCONF：本集成顶层急切
+    import HA 符号，而 SOURCE_ZEROCONF/SOURCE_MQTT/SOURCE_DHCP 在不同 HA 版本
+    config_entries 的导出情况未在本仓实证过——猜错即整个集成加载失败
+    （三端契约铁律①同型事故）。此钉防后人"顺手改回"常量比较。"""
+    tree = ast.parse(_src())
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom) and n.module == "homeassistant.config_entries":
+            names = {a.name for a in n.names}
+            bad = names & {"SOURCE_ZEROCONF", "SOURCE_MQTT", "SOURCE_DHCP"}
+            assert not bad, f"发现判据不应依赖未实证的 SOURCE_* 导入: {bad}"
+
 

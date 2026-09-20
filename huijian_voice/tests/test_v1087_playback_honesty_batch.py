@@ -334,10 +334,47 @@ def test_indeterminate_failure_does_not_replay_fallback():
     assert ex2.calls == ["klar", "t0"], "明确失败时降级照旧（本钉要会咬人）"
 
 
+def _changelog_chain_problems(vers):
+    """CHANGELOG 版本链体检（纯函数，便于反向验证）。
+
+    规则：① 自上而下必须严格递减；② **同一条 (major,minor) 线内** patch 必须连续
+    （+1）——这正是"插新段时吃掉上一段标题"的侦测面（1.0.87 实发形：段没了、
+    CI 提取正文越界把上一版一起塞进 release）；③ 允许 minor/major 进位
+    （1.0.99 → 1.1.0），但新线首段 patch 必须为 0，否则该线更早的段位缺失，同属
+    吃标题形态。旧实现只按 patch 数值连续判，遇到正常的 minor 进位会误报缺档。"""
+    def tup(v):
+        a, b, c = v.split(".")
+        return int(a), int(b), int(c)
+
+    bad = []
+    for i in range(1, len(vers)):
+        newer, older = tup(vers[i - 1]), tup(vers[i])
+        if newer <= older:
+            bad.append(f"{vers[i]}（相对 {vers[i - 1]} 重复或倒挂）")
+        elif newer[:2] == older[:2]:
+            if older[2] + 1 != newer[2]:
+                bad.append(vers[i])
+        elif newer[2] != 0:
+            bad.append(f"{vers[i - 1]}（新开版本线却非 x.y.0，该线更早段位缺失）")
+    return bad
+
+
+def test_changelog_chain_guard_catches_swallowed_head():
+    """守卫本身的守卫：必须仍能抓住它当初要抓的事故形态。"""
+    assert _changelog_chain_problems(["1.0.99", "1.0.97", "1.0.96"]) != []   # 1.0.98 被吃
+    assert _changelog_chain_problems(["1.0.99", "1.0.99"]) != []             # 重复段
+    assert _changelog_chain_problems(["1.0.99", "1.1.0"]) != []              # 倒挂
+    assert _changelog_chain_problems(["1.1.3", "1.0.99"]) != []              # 新线未从 .0 起
+    assert _changelog_chain_problems(["1.1.0", "1.0.99", "1.0.98"]) == []    # minor 进位合法
+    assert _changelog_chain_problems(["1.1.2", "1.1.1", "1.1.0", "1.0.99"]) == []
+    assert _changelog_chain_problems(["1.0.99"]) == []
+
+
 def test_changelog_sections_wellformed_and_within_ci_cap():
     """CHANGELOG 结构钉（本批实发教训：插 1.0.87 段时把 1.0.86 的标题整行吃掉，
     结果 CI 提取 1.0.87 正文越界把上一版记录一起塞进 release）。三条：
-    ① 每个版本段标题格式合法且**版本连续不缺档**（从当前版往下 6 档）；
+    ① 每个版本段标题格式合法且**版本链连续不缺档**（从当前版往下 6 档，
+       minor/major 进位合法，判据见 _changelog_chain_problems）；
     ② 当前版本段必须能被 CI 的同形 awk 干净切出（下一段标题即边界）；
     ③ 当前版本段 ≤80 行——CI 用 `head -80` 截正文，超了就把段尾（含诚实账）
        静默丢掉，客户看到的 release 比仓库记录少一截。"""
@@ -350,9 +387,7 @@ def test_changelog_sections_wellformed_and_within_ci_cap():
     ver = (ROOT / "config.yaml").read_text(encoding="utf-8")
     ver = re.search(r'(?m)^version:\s*"([\d.]+)"', ver).group(1)
     assert heads[0][0] == ver, "CHANGELOG 首段不是当前版本 %s" % ver
-    缺 = [heads[i][0] for i in range(1, min(6, len(heads)))
-          if int(heads[i][0].rsplit(".", 1)[1]) + 1
-          != int(heads[i - 1][0].rsplit(".", 1)[1])]
+    缺 = _changelog_chain_problems([h[0] for h in heads[:6]])
     assert not 缺, "版本段缺档（上一版标题被吃掉？）：" + ", ".join(缺)
     lines = src.split("\n")
     start = next(i for i, l in enumerate(lines) if l.startswith("## [" + ver + "]"))

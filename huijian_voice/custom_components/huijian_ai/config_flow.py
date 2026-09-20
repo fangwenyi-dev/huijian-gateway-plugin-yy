@@ -208,6 +208,13 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
         # The ESPHome name as per its config
         self._device_name: str | None = None
         self._device_mac: str | None = None
+        # 2026-10-01：本流程是否由**自动发现**（zeroconf/mqtt/dhcp）发起的标记。
+        # 用途见 _async_try_fetch_device_info 的取不到密钥分支。刻意不用
+        # self.source in (SOURCE_ZEROCONF, ...) 判据：HA 各版本 config_entries
+        # 是否导出这批 SOURCE_* 常量不一（本仓只用过 ESPHONE/IGNORE/IMPORT/
+        # REAUTH/RECONFIGURE），而集成顶层急切 import 不存在的符号 = 整个集成
+        # 加载失败（三端契约铁律①同型事故）。在三个发现入口里就地置位，零新符号。
+        self._from_discovery: bool = False
         self._entry_with_name_conflict: ConfigEntry | None = None
         self.init()
 
@@ -693,6 +700,24 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
                 response = ERROR_REQUIRES_ENCRYPTION_KEY
 
         if response == ERROR_REQUIRES_ENCRYPTION_KEY:
+            # 2026-10-01 用户实机主诉（设备与服务里自动发现的语音设备卡片要求
+            # 「输入加密密钥」）：**发现类流程的密钥输入框是死胡同**——本产品的
+            # NoisePSK 由小程序每次配对现生成（ha-connect.js:439 generateHexPsk），
+            # 且刻意不向用户展示（v2.1.27 连串口明文都改成只留长度），用户手上根本
+            # 没有可抄的字符串，手输必然 invalid_psk，卡片配不上还留个错误现场。
+            # 唯一持有密钥的一方是设备自己：它在 CMD20 配对后把 noise_psk POST 回
+            # /api/huijian-ai/setup/qrcode（huijian/http.py:93 入库 →
+            # config_flow:365 消费）。故拿不到密钥时**改道回扫码通道**，与本仓
+            # async_step_reconfigure 需要凭据时走 async_step_qrcode（:601）同一先例。
+            # 手输表单对 reauth/reconfigure/用户自建（ESPHome yaml 里写过
+            # encryption.key，操作者确实知情）保留原路，不削既有恢复能力。
+            if self._from_discovery:
+                _LOGGER.info(
+                    "发现类流程(source=%s)未取到加密密钥→改道扫码配对通道，不再要求手输"
+                    "密钥（设备 POST 自带 noise_psk）: host=%s name=%s",
+                    self.source, self._host, self._device_name,
+                )
+                return await self.async_step_qrcode()
             return await self.async_step_encryption_key()
         if response is not None:
             return await self._async_step_user_base(error=response)
@@ -740,6 +765,7 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
         self._host = discovery_info.host
         self._port = discovery_info.port
         self._device_mac = mac_address
+        self._from_discovery = True        # 「设备与服务」里那张自动发现卡片
         self._noise_required = bool(discovery_info.properties.get("api_encryption"))
 
         # Check if already configured
@@ -853,6 +879,7 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
         self._host = cast(str, device_info["ip"])
         self._port = cast(int, device_info["port"])
 
+        self._from_discovery = True
         self._noise_required = "api_encryption" in device_info
 
         # Check if already configured

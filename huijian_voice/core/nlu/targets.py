@@ -17,6 +17,15 @@ logger = logging.getLogger("huijian.targets")
 CN_MAP = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10, "百": 100}
 DEVICE_SUFFIX = ["室", "厅", "房", "间", "楼", "区", "馆", "灯", "扇", "机", "窗", "调", "备"]
 AREA_SUFFIX = ["室", "厅", "房", "间", "楼", "区", "馆"]
+# ── 2026-09-30 静态基准区表（用户令：数据集「我经常用到的窗型和区域」优化进加载项）──
+# 数据集 payload area 实测频次里，不带 AREA_SUFFIX 尾字的通用区名：主卧x38/次卧x27/
+# 阳台x20/玄关x8/车库x4/露台x4/走廊x2——冷启动（HA 区域注册表未同步）与注册表缺位时
+# 这些区段整段丢失（「主卧灯打开」= 全屋灯；「次卧窗开到30」= 无区域泛窗扇出）。
+# 它们是中文住宅通用空间词而非客户专属专名，固化零风险；客户自定义区名（如「影音室」
+# 本来就带尾字/或走注册表）仍由 sync_areas 动态通道叠加承接，两层判据在 _area_like 汇合。
+# 其余高频区（客厅/卧室/书房/厨房/办公室/老人房/儿童房/车间/浴室/卫生间/餐厅/展厅/
+# 储物间/地下室/健身房/保姆房）全部以 AREA_SUFFIX 尾字收尾，静态后缀已覆盖，不重复入表。
+BASE_AREAS = frozenset({"主卧", "次卧", "阳台", "玄关", "车库", "露台", "走廊"})
 
 _KNOWN_DEVICES_TAIL = ["提升窗", "平开窗", "推拉窗", "平推窗", "天窗", "飘窗", "百叶窗", "筒灯", "灯泡",
                        # 2026-09-16 内倒语序洞：窗型词补全（fast_path 窗型纠正/集成侧
@@ -32,6 +41,25 @@ _KNOWN_DEVICES_TAIL = ["提升窗", "平开窗", "推拉窗", "平推窗", "天�
                        # 客厅的上悬窗/下悬窗/悬窗/提升窗）。提升窗 原只在本表，
                        # 缺窗型纠正→「客厅提升窗关闭」错走 Turn*——一并入三处同步。
                        "下悬窗", "上悬窗", "悬窗",
+                       # 2026-09-30 数据集对账补口（意图数据集窗型实测有词、全仓
+                       # 六处窗表却从未收）：电动窗 x10。**电动窗帘必须同批入表**
+                       # ——KNOWN_DEVICES 长词优先扫描，缺它则「电动窗帘」被 3 字
+                       # 「电动窗」截胡成窗族（开帘变按窗钮=假动作）。
+                       "电动窗", "电动窗帘",
+                       # 2026-10-01 数据集对账二期（两份慧尖数据集 payload name 实测
+                       # 有词、仓内从未收；折成泛称=过宽扇出，缺域提示=全实体面找名）：
+                       # 具名灯具族 主灯x4/吊灯x3/阅读灯x2/镜前灯x2/感应灯x2/工业灯x2/
+                       # 大灯x1——旧逻辑一律折成泛称「灯」，无区域时=整屋灯扇出；
+                       # 帘族 卷帘x2/百叶帘x2——旧逻辑 parse score=0（硬失败）；
+                       # 扇族 落地扇x1；空调机型族 中央/挂机/柜机 各x2——折成裸「空调」
+                       # 后被「空调缺区域」守卫整句拦死（实测 打开中央空调=MISS）；
+                       # 电风扇/投影仪/空气净化器 整词（子串折走连带同族其它实体，如
+                       # 风扇 同时命中 排风扇+循环扇）。帘族/机型**不进 _WINDOW_TYPES
+                       # 与集成窗表**（cover/climate 域，隔离有钉）。
+                       "主灯", "大灯", "吊灯", "阅读灯", "镜前灯", "感应灯", "工业灯",
+                       "卷帘", "百叶帘", "落地扇",
+                       "中央空调", "挂机空调", "柜机空调",
+                       "电风扇", "投影仪", "空气净化器",
                        "空调", "风扇", "窗户", "窗帘", "加湿器", "热水器", "净化器", "灯", "窗", "幕布",
                        "门", "电视", "投影", "音箱",
                        # v1.0.42 家电族：冷启动（registry 动态词表未同步时）也能
@@ -68,6 +96,23 @@ KNOWN_DEVICES_PREFIX = ["空调", "风扇", "加湿器", "净化器", "热水器
                         "开窗器", "开合器", "推窗器",
                         # 悬窗族/提升窗（与 _WINDOW_TYPES/集成映射三方同步，守卫钉）。
                         "下悬窗", "上悬窗", "提升窗", "悬窗",
+                        # 电动窗（与 _WINDOW_TYPES/集成两表三方同步，守卫钉）；
+                        # 电动窗帘=cover 设备词同入前缀表（SOV「电动窗帘拉上」②
+                        # 剥离回捞），**不进 _WINDOW_TYPES**（帘族，见 fast_path
+                        # _window_type 短路闸）。
+                        "电动窗", "电动窗帘",
+                        # 2026-10-01 二期具名设备词同批入前缀表（SOV「主灯打开」
+                        # 「卷帘拉上」「中央空调关闭」④ 前缀剥离要认；与表一同源，
+                        # 守卫钉 test 表间一致）。
+                        "主灯", "大灯", "吊灯", "阅读灯", "镜前灯", "感应灯", "工业灯",
+                        "卷帘", "百叶帘", "落地扇",
+                        "中央空调", "挂机空调", "柜机空调",
+                        "电风扇", "投影仪", "空气净化器",
+                        # 同批表间一致补口：百叶窗 原只在表一（同 2026-09「提升窗 原
+                        # 只在本表」同型）——「客厅百叶窗关闭」④ 前缀剥不出尾动词，
+                        # 整句 MISS；且它是 cover（_window_type 帘族闸返 None），只走
+                        # Turn*，故仅入前缀表、**不进 _WINDOW_TYPES/集成窗表**。
+                        "百叶窗",
                         "扫地机器人", "扫拖机器人", "吸尘器", "拖地机",
                         # 2026-09 通用智能家居产品词（与表一同步，SOV「X关闭」回捞）
                         "洗地机", "除螨仪", "擦窗机器人", "新风机", "新风", "除湿机",
@@ -82,9 +127,137 @@ KNOWN_DEVICES_PREFIX = ["空调", "风扇", "加湿器", "净化器", "热水器
 # 与设备词加分只认表一——「办公室射灯」找不到 len≥2 设备词退单字「灯」(4+1=5)，
 # ⑤区域候选("办公室","射灯",3+1=4)反而落败，区域整个丢失。
 # 设备词全集并为一张表（③⑥⑦与加分共用）；表二保持原样（fast_path 前缀剥离/候选④依赖）。
-KNOWN_DEVICES = sorted(set(_KNOWN_DEVICES_TAIL) | set(KNOWN_DEVICES_PREFIX), key=len, reverse=True)
+def _dedup_keep_order(words):
+    """按**书写序**去重（dict.fromkeys 保序）。设备表里等长词的先后必须是作者写下
+    的顺序——本仓多处依赖这条纪律（「电动窗 排在泛称 窗 前」、悬窗族长词顶前、
+    「本表 order=正确性」）。"""
+    return list(dict.fromkeys(words))
+
+
+# 静态表书写序（表一 先于 表二），KNOWN_DEVICES 与动态合并的唯一顺序来源。
+_STATIC_ORDER: list[str] = _dedup_keep_order(_KNOWN_DEVICES_TAIL + KNOWN_DEVICES_PREFIX)
+# ⚠ 2026-10-01 根修「同一句话时灵时不灵」：原实现 sorted(set(表一) | set(表二),
+# key=len, reverse=True)——sorted 虽稳定，但 set 的迭代序随 PYTHONHASHSEED 变化，
+# **等长词**的先后因此逐进程随机。实锤：「投影幕布」在多数进程命中 投影
+# (media_player)、个别进程才命中 幕布(cover)（seed=42 才正确），现场即"有时能开
+# 有时开错设备"。喂确定输入序后，等长平局恒落在书写序上。
+KNOWN_DEVICES = sorted(_STATIC_ORDER, key=len, reverse=True)
 EN_DEVICES = ["light", "lamp", "fan", "ac", "airconditioner", "switch", "outlet", "window",
               "curtain", "blind", "tv", "speaker", "heater", "humidifier", "downlight"]
+
+# ── v1.0.99+ 英文目标桥（2026-09-30 用户现场主诉）──────────────────────
+# 病灶：SenseVoice 听得出英文（'turn on the office light' 整句转写正确），t0 也
+# 拆得出 area=office/name=light，但客户 HA 的区域与实体全是中文命名 →
+# async_match_targets 必 miss →「没找到符合条件的设备」。LLM 复议档对无 LLM
+# 配置的用户不存在，**离线确定性**是唯一通路。
+# 路线：英文设备/区域词 → 中文规范词表；_build_plan 末端 bilingual_targets
+# **追加**等价中文目标（英文原形保留：英文命名 HA 今日通路零回归；中文命名
+# HA 接住新通路；Turn lane 集成逐目标并集匹配，互不干扰）。
+EN_DEVICE_ZH: dict[str, str] = {
+    "light": "灯", "lamp": "灯", "downlight": "筒灯", "ceiling light": "吸顶灯",
+    "desk lamp": "台灯", "bedside lamp": "床头灯", "strip light": "灯带",
+    "spotlight": "射灯", "bulb": "灯泡",
+    "window": "窗", "door": "门", "curtain": "窗帘", "blind": "百叶",
+    "fan": "风扇", "ac": "空调", "air conditioner": "空调",
+    "air conditioning": "空调", "airconditioner": "空调",
+    "tv": "电视", "television": "电视", "speaker": "音响",
+    "switch": "开关", "outlet": "插座", "plug": "插座",
+    "humidifier": "加湿器", "dehumidifier": "除湿机",
+    "purifier": "净化器", "air purifier": "净化器",
+    "heater": "取暖器", "camera": "摄像头",
+    "vacuum": "扫地机器人", "robot vacuum": "扫地机器人",
+    "lock": "门锁", "door lock": "门锁", "smart lock": "智能门锁",
+    "projector": "投影", "screen": "幕布",
+}
+EN_AREA_ZH: dict[str, str] = {
+    "office": "办公室", "living room": "客厅", "lounge": "客厅",
+    "bedroom": "卧室", "master bedroom": "主卧", "second bedroom": "次卧",
+    "guest room": "客房", "kitchen": "厨房", "bathroom": "卫生间",
+    "toilet": "卫生间", "washroom": "卫生间", "restroom": "卫生间",
+    "dining room": "餐厅", "study": "书房", "study room": "书房",
+    "balcony": "阳台", "hallway": "走廊", "corridor": "走廊",
+    "garage": "车库", "garden": "花园", "showroom": "展厅",
+    "kids room": "儿童房", "children room": "儿童房",
+    # 2026-09-30 数据集对账补齐（area 词频实测用户高频区）：
+    "entrance": "玄关", "foyer": "玄关", "workshop": "车间",
+    "basement": "地下室", "cellar": "地下室",
+    "storage room": "储物间", "storage": "储物间",
+    "gym": "健身房", "terrace": "露台",
+}
+
+
+def _en_singular(w: str) -> str:
+    """英文词形归一：小写、剥句读、去冠词、规则复数（仅当剥 s 后是表内词才剥，
+    防 status→statu 胡剥；windows→window、lights→light 皆中）。永不抛。"""
+    s = (w or "").lower().strip().strip(".,;:!?")
+    s = re.sub(r"^(?:the|a|an)\s+", "", s).strip()
+    if s.endswith("s") and not s.endswith("ss"):
+        base = s[:-1]
+        if base in EN_DEVICE_ZH or base in EN_AREA_ZH or base in EN_DEVICES:
+            return base
+    return s
+
+
+def en_device_zh(word: str):
+    """英文设备词 → 中文规范词；非英文/无表项 → None（中文句零扰动）。"""
+    return _en_lookup(EN_DEVICE_ZH, word)
+
+
+def en_area_zh(word: str):
+    """英文区域词 → 中文规范区域词；非英文/无表项 → None。"""
+    return _en_lookup(EN_AREA_ZH, word)
+
+
+def _en_lookup(table: dict, w: str):
+    s = _en_singular(w)
+    if not s or any("\u4e00" <= c <= "\u9fff" for c in s):
+        return None
+    return table.get(s)
+
+
+def bilingual_targets(entries: list) -> list:
+    """英文 area/name → 目标表末端**追加**等价中文目标（原条目不动、原序不动：
+    ① 集成 Turn lane 逐目标并集匹配，中文命名现场自此可执行；② 英文命名现场
+    命中面与改前逐字一致；③ ControlWindow 只读 targets[0]，英文窗类在
+    _build_plan 窗前换形顶前，不经本函数兜尾——两通道各走各的。
+    查无译名/含汉字 → 原样返回入参（非英文句零扰动）。永不抛。"""
+    try:
+        out = list(entries or [])
+        added = False
+        for t in (entries or []):
+            if not isinstance(t, dict):
+                continue
+            area = str(t.get("area") or "").strip()
+            zh_area = _en_lookup(EN_AREA_ZH, area) if area else None
+            devs = [dv for dv in (t.get("devices") or []) if isinstance(dv, dict)]
+            zh_devs, name_hit = [], False
+            for dv in devs:
+                nm = str(dv.get("name") or "").strip()
+                zh = _en_lookup(EN_DEVICE_ZH, nm) if nm else None
+                if zh:
+                    name_hit = True
+                    zh_devs.append({"name": zh,
+                                    "domains": domain_hint(zh)
+                                    or list(dv.get("domains") or [])})
+                else:
+                    item = {"domains": list(dv.get("domains") or [])}
+                    if nm:
+                        item["name"] = nm
+                    zh_devs.append(item)
+            if not (zh_area or name_hit) or not devs:
+                continue
+            # 空 area 是集成端 unset_area_constraint 特殊语义，**绝不**写入克隆
+            nt = {}
+            if zh_area or area:
+                nt["area"] = zh_area or area
+            nt["devices"] = zh_devs
+            if nt not in out:
+                out.append(nt)
+                added = True
+        return out if added else (entries or [])
+    except Exception:
+        logger.exception("[targets] 双语目标追加异常（原样放行）")
+        return entries
 
 # 属性/参数词：句中残留含这些词时禁入拼音模糊档（⑦）——它们是调节参数名，
 # 近音撞进设备表就是"目标幻觉"（亮度→浴霸 事故形）。
@@ -125,19 +298,60 @@ def sync_vocab(states: dict) -> None:
         fn = str(((ent or {}).get("attributes") or {}).get("friendly_name") or "")
         names.update(_name_tokens(fn))
     global _dyn_vocab, ALL_DEVICES, ALL_SET, _ALL_MIN2
-    _dyn_vocab = tuple(sorted(names, key=len, reverse=True))
-    merged = sorted(set(_STATIC_SET) | set(_dyn_vocab), key=len, reverse=True)
-    ALL_DEVICES = tuple(merged)
+    # 动态词之间等长平局给**码点序**次键（注册表派生顺序不代表作者意图，但必须可
+    # 复现）；静态表与动态词合并时**静态在前**，与 KNOWN_DEVICES 同一确定性判据。
+    _dyn_vocab = tuple(sorted(names, key=lambda w: (-len(w), w)))
+    merged = _dedup_keep_order(_STATIC_ORDER + list(_dyn_vocab))
+    ALL_DEVICES = tuple(sorted(merged, key=len, reverse=True))
     ALL_SET = frozenset(merged)
     _ALL_MIN2 = tuple(d for d in ALL_DEVICES if len(d) >= 2)   # 已长→短
 
 
 def clear_vocab() -> None:      # 测试隔离
-    global _dyn_vocab, ALL_DEVICES, ALL_SET, _ALL_MIN2
+    global _dyn_vocab, ALL_DEVICES, ALL_SET, _ALL_MIN2, _dyn_areas
     _dyn_vocab = ()
-    ALL_DEVICES = tuple(sorted(_STATIC_SET, key=len, reverse=True))
-    ALL_SET = frozenset(_STATIC_SET)
+    _dyn_areas = ()
+    ALL_DEVICES = tuple(sorted(_STATIC_ORDER, key=len, reverse=True))
+    ALL_SET = frozenset(_STATIC_ORDER)
     _ALL_MIN2 = tuple(d for d in ALL_DEVICES if len(d) >= 2)
+
+
+# ── 2026-09-30 动态区域表（意图数据集对账引进）────────────────────
+# 病灶：区域判据此前只认「尾字∈室厅房间楼区馆」的静态后缀——数据集高频区域
+# 主卧x38/次卧x27/阳台x20/玄关x8/露台/走廊/车库 全部落不进（「主卧灯打开」
+# 区域整个丢失=全屋灯；「阳台窗开到30」折成无区域泛窗）。两层修复：通用空间词
+# 固化为 BASE_AREAS 静态基准（上方）；客户自定义区名由本动态表承接——HA 区域
+# 注册表是单一事实源（pipeline._sync_vocab 同一节流点喂入）。与 P2-17 设备词表同构。
+_dyn_areas: tuple[str, ...] = ()     # 已排序（长名在前），整体替换赋值（GIL 原子）
+
+
+def sync_areas(names) -> None:
+    """从 HA 区域注册表派生（dict_values/list/set 皆可）。空=回落纯静态后缀。"""
+    global _dyn_areas
+    try:
+        s = {str(n).strip() for n in (names or []) if n and str(n).strip()}
+    except Exception:  # noqa: BLE001 同步器永不冒泡
+        s = set()
+    _dyn_areas = tuple(sorted(s, key=len, reverse=True))
+
+
+def _area_like(s: str) -> bool:
+    """区域判据：静态基准区表（BASE_AREAS，数据集实锤通用空间词）∪ 静态后缀
+    （室厅房间楼区馆）命中，或真实区域表**全等/尾缀**命中（长名在前；'公室'
+    这类残缺前缀不会误配——endswith 要求区域名完整落在尾部）。"""
+    s = (s or "").strip()
+    if not s:
+        return False
+    if any(w in s for w in ("帘", "纱窗", "百叶")):
+        return False                      # 区域尾缀永不吞帘族词根（阳台≠…护栏）
+    if s in BASE_AREAS:
+        return True
+    if any(s.endswith(w) for w in AREA_SUFFIX):
+        return True
+    for a in _dyn_areas:
+        if s == a or s.endswith(a):
+            return True
+    return False
 
 
 _STATIC_DEVICES = tuple(KNOWN_DEVICES)          # 已按长度倒序
@@ -179,13 +393,27 @@ def cn2num(s: str) -> str:
 
 
 _NUM_PAT = re.compile(r"[零一二三四五六七八九十百]+")
+# 2026-10-01 数据集对账二期（慧尖数据集 payload name 实锤）：裸数词替换会咬掉
+# **词汇化数字**——表内既有词「百叶窗」被改成「100叶窗」（实测 客厅百叶窗关闭/
+# 卧室百叶窗关掉 整句失能=MISS，集成按名找实体也必 miss），「百叶帘」→「100叶帘」
+# 连 domains 一起丢。归一的用途从来只有「编号口语化」（一号→1号），故加语境闸：
+# 数词只有在后接索引量词时才转；纯数字名（"二十三"）整体仍转。
+_INDEX_COUNTERS = "号栋楼层单元室区座组排档挡级路期井盏扇"
+_NUM_CTX_PAT = re.compile(
+    r"[零一二三四五六七八九十百千两]+(?=[" + _INDEX_COUNTERS + r"])")
+_PURE_NUM_NAME = re.compile(r"^[零一二三四五六七八九十百千两]+$")
 
 
 def normalize_name(name: str) -> str:
-    """"一号测试窗"→"1号测试窗"（HA 实体名多为阿拉伯数字）。"""
+    """"一号测试窗"→"1号测试窗"（HA 实体名多为阿拉伯数字）。
+    只在该数词是**编号**时转（后接 号/栋/楼…）；"百叶窗/百叶帘/千叶灯" 这类
+    词汇化首字一律原样保留（见 _NUM_CTX_PAT 头注）。"""
     if not name:
         return name
-    return _NUM_PAT.sub(lambda m: cn2num(m.group(0)), name)
+    if name in ALL_SET:
+        return name                      # 表内词恒等（第二道闸，防长词表内藏数字）
+    out = _NUM_CTX_PAT.sub(lambda m: cn2num(m.group(0)), name)
+    return cn2num(out) if _PURE_NUM_NAME.fullmatch(out or "") else out
 
 
 def levenshtein(s1: str, s2: str) -> int:
@@ -217,11 +445,13 @@ def extract_prefix(text: str, start: int = 2, end: int = 10) -> tuple:
 def _area_of_prefix(pre: str) -> str | None:
     """目标词前缀→区域名（修A）：尾字区域词命中（"办公室"）→ 剥属格「的/里/得」重试
     （"办公室的"）→ 二次前缀扫描回捞（未知复合词 "办公室吊灯" 的单字残段→"办公室"）。
-    只回区域不拼设备名，避免拿未知残字重构出臆造名词。"""
+    只回区域不拼设备名，避免拿未知残字重构出臆造名词。
+    2026-09-30：判据并 HA 真实区域表（sync_areas）——主卧/次卧/阳台/玄关 等
+    不带区域尾字的高频区名自此可析出（数据集实锤丢失面）。"""
     pre = re.sub(r"[的里得]+$", "", (pre or "").strip())
     if not pre:
         return None
-    if any(pre.endswith(w) for w in AREA_SUFFIX):
+    if _area_like(pre):
         return pre
     return extract_prefix(pre)[0]
 
@@ -257,9 +487,15 @@ def domain_hint(name: str) -> list[str]:
         return ["climate"]
     if "灯" in n or "照明" in n:
         return ["light"]
-    if "窗帘" in n or "百叶" in n:
+    if "窗帘" in n or "百叶" in n or n.endswith("帘") or "幕布" in n:
+        # 2026-10-01 数据集对账二期：卷帘x2/百叶帘x2 此前 domains=[]（集成端只能全
+        # 实体面找名，同名歧义面大）——帘族按词尾收口（纱帘/罗马帘/梦境帘同源）。
+        # 幕布 必须在 投影 规则**之前**判：HA 生态里「投影幕布」是 cover，而
+        # 「投影仪」才是 media_player——顺序错则幕布被划进媒体设备域（实锤错域）。
         return ["cover"]
-    if "风扇" in n:
+    if "风扇" in n or n.endswith("扇"):
+        # 落地扇x1 同型缺陷；扇族词尾一律 fan（吊扇/壁扇/台扇同源）。灯规则在上方，
+        # 「吊扇灯」这类灯扇一体实体仍先判 light（现状不变）。
         return ["fan"]
     # 2026-09 通用智能家居品类扩充（擦窗机器人含窗字但属 vacuum 族——
     # 域提示在窗/帘判定之后、与按压窗控无涉；换气/排气/循环扇生态恒 fan）。
@@ -292,11 +528,89 @@ def domain_hint(name: str) -> list[str]:
     return []
 
 
+# ── 2026-09-30 泛称近音折叠救援（用户日志：「展厅催拉窗开到百分之三十」）──
+# 病灶：STT 把「推拉窗」听成「催拉窗」——⑥ 单字泛称档把整词折成「窗」，区域+
+# 泛称 = 整区窗扇出（现场被过宽闸 clarify 拦成「说具体点」，用户其实说具体了，
+# 是识别歪了字）。逐词加纠错表治不了本（近音变体持续新冒），这里做**音节级**
+# 拼音救援：泛称字前的修饰段+泛称字 与表内同长同尾词比拼音节，**全局唯一且
+# 只差一个音节**才收（催cui/推tui 一音节之差；「宁开窗」对 内开窗/平开窗 各差
+# 一音节成平局 → 不救）。两字词不入救援窗（短窗噪音大：拉窗→天窗 形似实错）。
+# 护栏：修饰段纯汉字、不含属性词/帘族字；pypinyin 缺失/异常 → 一律 None
+# （行为回落到改动前的泛称折叠，fail-open）。
+_RESIVE_NO_GO = ("帘", "纱", "叶")
+
+
+def _generic_rescue(pre: str, generic: str):
+    """泛称字前的残段 pre → 应顶替「pre+泛称」整段的表内标准词；None=不救。"""
+    try:
+        from pypinyin import lazy_pinyin
+        pre = (pre or "").rstrip("的地得")
+        if not (2 <= len(pre) <= 4):
+            return None
+        if not all("\u4e00" <= c <= "\u9fff" for c in pre):
+            return None
+        if any(w in pre for w in _ATTR_NO_PINYIN) or any(c in pre for c in _RESIVE_NO_GO):
+            return None
+        # 剥掉可识别的区域前缀（「展厅催拉」→ 修饰段只剩「催拉」；区域本身
+        # 由调用方 _area_of_prefix 走既有车道回捞）
+        area = _area_of_prefix(pre)
+        junk = pre[len(area):] if area and pre.startswith(area) else pre
+        if not (2 <= len(junk) <= 3):
+            return None
+        word = junk + generic
+        if len(word) < 3 or word in ALL_SET:
+            return None
+        syl = lazy_pinyin(word)
+        scored = []
+        for cand in ALL_DEVICES:
+            if len(cand) != len(word) or not cand.endswith(generic) or cand == word:
+                continue
+            if not all("\u4e00" <= c <= "\u9fff" for c in cand):
+                continue
+            if any(c in cand for c in _RESIVE_NO_GO):
+                continue
+            cs = lazy_pinyin(cand)
+            scored.append((sum(1 for a, b in zip(syl, cs) if a != b), cand))
+        if not scored:
+            return None
+        best_d = min(d for d, _ in scored)
+        if best_d > 1:
+            return None
+        winners = {c for d, c in scored if d == best_d}
+        if len(winners) == 1:
+            return winners.pop()      # 全局唯一最近（同音 d=0 或差一个音节 d=1）
+    except ImportError:
+        return None
+    except Exception:
+        logger.exception("[targets] 泛称近音救援异常（回落原车道）")
+    return None
+
+
+def _area_split_wins(stripped: str, idx: int, dev_len: int) -> bool:
+    """设备词命中起点是否落在**更长区域名内部**（跨词根拼词判据）。
+
+    idx=设备词在句中的起点，dev_len=其长度。若存在前缀长度 L ∈ (idx, idx+dev_len)
+    使 stripped[:L] 命中区域判据（_area_like），说明设备词的头部其实是区域名的
+    尾字——'阳台灯' 区名「阳台」L=2 > idx=1，「台灯」的「台」是区名尾字而非设备
+    词根。零重叠（L==idx，如 '阳台台灯'）不触发，具名设备原样保留。"""
+    for L in range(idx + 1, min(idx + dev_len, len(stripped))):
+        if _area_like(stripped[:L]):
+            return True
+    return False
+
+
 def parse_target(raw: str, action_match=None) -> tuple[str | None, str | None, int]:
     """候选六法 + 质量评分（v1.5 并行提取段移植）。
     action_match: 可选谓词 callable(rest)->bool，命中给 ④ 前缀候选加分（原 4 分档）。
     返回 (area, name, score)；解析失败时 area=None、name=清洗后的 raw。"""
     raw = strip_modal(raw or "")
+    # 2026-09-30 英文 in-后置方位形：'light in the office'/'lights in the living
+    # room' → 设备词挪尾、区域词挪头，喂给 ② 的「区域+设备尾词」结构。
+    # 判据锁死空格分写的 ASCII 词形——中文目标永远没有这种空格，零扰动。
+    m_in = re.match(r"^([A-Za-z][A-Za-z0-9 ]*?)\s+in\s+(?:the\s+)?([A-Za-z][A-Za-z0-9 ]*)$",
+                    raw.strip())
+    if m_in:
+        raw = f"{m_in.group(2).strip()} {m_in.group(1).strip()}"
     if not raw:
         return None, None, 0
     candidates: list[tuple[str, str, int]] = []
@@ -306,11 +620,17 @@ def parse_target(raw: str, action_match=None) -> tuple[str | None, str | None, i
             p = raw.split(sep, 1)
             if len(p[1]) > 0 and len(p[0]) <= 6:
                 candidates.append((p[0].strip(), p[1].strip(), 3))
-    # ② 英文尾词
+    # ② 英文尾词（2026-09-30：复数归一 + 多词设备尾短语「air conditioner」。
+    #    name 存归一后的英文单数原形——英文命名 HA 的既有匹配面零回归；
+    #    中文命名 HA 由 _build_plan 末端 bilingual_targets 并集追加中文目标）
     words = raw.strip().split()
-    if len(words) >= 2:
-        if words[-1].lower() in EN_DEVICES:
-            candidates.append((" ".join(words[:-1]), words[-1], 3))
+    for _k in (3, 2, 1):
+        if len(words) <= _k:
+            continue
+        _tail = _en_singular(" ".join(words[-_k:]))
+        if _tail in EN_DEVICE_ZH:
+            candidates.append((" ".join(words[:-_k]), _tail, 3))
+            break
     # ③ 中文设备尾词
     stripped = raw.strip()
     for d in KNOWN_DEVICES:
@@ -326,10 +646,11 @@ def parse_target(raw: str, action_match=None) -> tuple[str | None, str | None, i
             else:
                 candidates.append((d, rest, 3))
             break
-    # ⑤ 区域前缀扫描
+    # ⑤ 区域前缀扫描（2026-09-30：判据升级为「静态后缀 ∪ HA 真实区域表」，
+    #   主卧/次卧/阳台/玄关 等不带区域后缀的字面自此可析出）
     for i in range(2, min(5, len(stripped))):
         pre, suf = stripped[:i], stripped[i:]
-        if suf and any(pre.endswith(w) for w in AREA_SUFFIX):
+        if suf and _area_like(pre):
             candidates.append((pre, suf, 3))
     # ⑥ 设备词子串优先（"暂停窗户动作"→窗户；移植期新增，堵原表中段词漏提）。
     #    先做 len≥2；无果退单字通用词（灯/窗/门），再往后才轮到拼音档，
@@ -339,6 +660,23 @@ def parse_target(raw: str, action_match=None) -> tuple[str | None, str | None, i
     for d in _ALL_MIN2:
         idx = stripped.find(d)
         if idx >= 0:
+            # 2026-09-30 帘字防吞闸（收 电动窗 同批揪出的存量缺陷）：窗型词根
+            # 后紧跟「帘」是帘设备名——「智能窗帘」曾被 "智能窗" 截胡→窗型纠正
+            # →按窗钮+帘不动（假动作）。跳过该词让长帘词/「窗帘」承接，再不行
+            # 落泛称→⑦ 拼音（'催拉窗帘'→窗帘）。
+            if d.endswith("窗") and stripped[idx + len(d):idx + len(d) + 1] == "帘":
+                continue
+            # 2026-10-01 复核补口（09-30 数据集对账批遗留红）：区域名尾字与设备词
+            # 首字跨词根拼词——「阳台灯/露台灯」内含 台灯（起点落在区名「阳台」
+            # 内部），⑥ 贪心先命中即把「台」吞进设备名、区域整段丢失（现场=阳台灯
+            # 喊成台灯，假动作；同型「南阳台灯」在动态区表下同样塌）。判据与写法
+            # 沿用上闸：命中点落在更长区域名内部 → 拼词假象，continue 让单字泛称
+            # 车道以「整区名+设备字」承接。零重叠不受影响（'阳台台灯'仍出台灯）。
+            # idx==0 一律不裁：设备词整段居首=HA 实体自带区域的注册表全名（「客厅
+            # 空调」由 sync_vocab 入表后长词优先命中），拆成 area+裸空调会让「实体
+            # 名带房间、但没挂 area」的现场 miss（test_nlu_llm_boundary 钉）。
+            if idx and _area_split_wins(stripped, idx, len(d)):
+                continue
             candidates.append((_area_of_prefix(stripped[:idx]), d, 5))
             _hit_dev = True
             break
@@ -346,6 +684,15 @@ def parse_target(raw: str, action_match=None) -> tuple[str | None, str | None, i
         for d in _SINGLE_GENERIC:
             idx = stripped.find(d)
             if idx >= 0:
+                if d == "窗" and stripped[idx + 1:idx + 2] == "帘":
+                    continue              # 同上帘字防吞（泛称档）
+                # 泛称折叠救援（见 _generic_rescue 头注）：单字泛称前带 2~3 字
+                # 纯汉字修饰段时先试音节级近音整词；不中才退泛称原车道。
+                wd = _generic_rescue(stripped[:idx], d)
+                if wd is not None:
+                    candidates.append((_area_of_prefix(stripped[:idx]), wd, 5))
+                    _hit_dev = True
+                    break
                 candidates.append((_area_of_prefix(stripped[:idx]), d, 4))
                 _hit_dev = True
                 break
@@ -384,7 +731,7 @@ def parse_target(raw: str, action_match=None) -> tuple[str | None, str | None, i
         score = base
         if n in ALL_SET or any(k in n.lower() for k in EN_DEVICES):
             score += 1
-        if a and any(a.endswith(w) for w in AREA_SUFFIX):
+        if a and _area_like(a):
             score += 1
         if score > best_score:
             best_score, area, name = score, a, n

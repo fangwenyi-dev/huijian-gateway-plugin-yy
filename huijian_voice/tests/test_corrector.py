@@ -1,11 +1,13 @@
-"""68 条 ASR 热词纠错表钉桩（口径裁定：061701 代码版=严格超集，58 条为移植基线；
+"""69 条 ASR 热词纠错表钉桩（口径裁定：061701 代码版=严格超集，58 条为移植基线；
 2026-09-16 现场增补「平×窗」插音族 3 条；2026-09 开窗器名称优化增补 开窗器/开合器
-近音族 5 条；2026-09-27 现场日志（09-14）增补 平盖窗/平改窗 2 条，计数以本钉为准）。"""
+近音族 5 条；2026-09-27 现场日志（09-14）增补 平盖窗/平改窗 2 条；2026-09-30 现场
+日志（展厅「催拉窗」）增补 催拉窗 1 条——根治另见 targets._generic_rescue 音节级
+近音救援，计数以本钉为准）。"""
 from core.nlu import corrector
 
 
-def test_table_has_68_entries():
-    assert len(corrector.BASE_CORRECTIONS) == 68
+def test_table_has_69_entries():
+    assert len(corrector.BASE_CORRECTIONS) == 69
 
 
 def test_opener_near_sound_pairs():

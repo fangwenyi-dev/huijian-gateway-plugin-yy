@@ -33,6 +33,9 @@ WINDOW_NAME_MAPPING = {
     "上悬窗": "上悬窗",
     "提升窗": "提升窗",
     "悬窗": "悬窗",
+    # 2026-09-30 数据集对账补口：电动窗（意图数据集窗型实测词，六表同步纪律）。
+    # 「电动窗帘」不会撞本键：extract_window_name 顶部帘族短路先裁（同批加闸）。
+    "电动窗": "电动窗",
     "窗户": "窗户",
     "窗": "窗户",
 }
@@ -86,6 +89,10 @@ def _parse_chinese_number(s: str) -> str:
     return str(result)
 
 
+_CN_INDEX_COUNTERS = "号栋楼层单元室区座组排档挡级路期井盏扇"
+_CN_PURE_NUM_RE = re.compile(r"^[零一二三四五六七八九十百千两]+$")
+
+
 def normalize_chinese_numbers(text: str) -> str:
     """Convert Chinese numerals in text to Arabic numerals.
 
@@ -96,13 +103,23 @@ def normalize_chinese_numbers(text: str) -> str:
         '二十三号' -> '23号'
         '一百二十号' -> '120号'
         '二百三十号' -> '230号'
-    """
+
+    2026-10-01 数据集对账二期（与加载项 targets.normalize_name 同源同闸）：
+    旧版对**任意位置**的数词裸替换，把词汇化数字咬掉——'百叶帘'→'100叶帘'、
+    '百叶窗'→'100叶窗'，按名匹配实体必 miss（加载项送来的正确名字在本侧被
+    二次腐蚀，intent_helper:95 / intent_turn:773 / 本意图 :395 三处都过这道）。
+    归一的用途只有编号，故加语境闸：数词**后接索引量词**才转；整串是纯数词
+    （'二十三'）仍转成阿拉伯数字。"""
     if not text:
         return text
     global _CN_NUM_PATTERN
     if _CN_NUM_PATTERN is None:
-        _CN_NUM_PATTERN = re.compile(r"[零一二三四五六七八九十百千]+")
-    return _CN_NUM_PATTERN.sub(lambda m: _parse_chinese_number(m.group(0)), text)
+        _CN_NUM_PATTERN = re.compile(
+            r"[零一二三四五六七八九十百千两]+(?=[" + _CN_INDEX_COUNTERS + r"])")
+    out = _CN_NUM_PATTERN.sub(lambda m: _parse_chinese_number(m.group(0)), text)
+    if out and _CN_PURE_NUM_RE.fullmatch(out):
+        return _parse_chinese_number(out)
+    return out
 
 
 # 「全窗」泛称单一事实源：这些名字（或空名）表达"这个区域所有窗户"，允许升级
@@ -141,6 +158,14 @@ def extract_window_name(name: str) -> str | None:
     if not name:
         return None
     name_lower = name.lower()
+    # 2026-09-30 帘族短路闸：帘/纱窗/百叶 设备是 cover，绝不是按压窗控。
+    # 旧扫描键值双向包含——「智能窗帘」曾被 "智能窗" 键截胡归窗族（「电动窗帘」
+    # 自本批收 电动窗 键后同型必炸）；顶层先裁，命中即 None。调用方
+    # （intent_window_control）对「具体名未识别」走如实拒收分支，不会误升级
+    # 全窗（is_generic_window_name('电动窗帘')=False）。
+    if any(k in name_lower for k in ("帘", "纱窗", "百叶")):
+        _LOGGER.info("Curtain-family name '%s' is not a window, refusing", name)
+        return None
     # 通用名称（"所有窗户"、"全部窗"等）不匹配具体窗户类型，返回None触发全窗查找
     if any(gn in name_lower for gn in GENERIC_WINDOW_NAMES):
         _LOGGER.info("Detected generic window name '%s', will use fallback mode", name)

@@ -83,8 +83,24 @@ def test_raw_field_utterance_end_to_end(fp):
 
 
 def test_cover_family_untouched(fp):
-    """窗帘/百叶窗不走窗型剥离（cover 域语义，误入即事故）。"""
+    """窗帘/百叶窗不走窗型剥离（cover 域语义，误入即事故）。
+
+    2026-10-01 二期按证据加固。原判据 `is None` 之下其实叠着**两个**根因：
+    ① 数词裸替换把表内词「百叶窗」腐蚀成「100叶窗」（换任何动词都救不回）；
+    ② 「放下」从未进过本道 SOV/SVO 动词表 `_COVER_V_CLOSE`，而同文件的方向表
+    `_COVER_CLOSE_WORDS` 早把它列为关闭向——两表漂移（同型：「客厅窗帘拉上」可用、
+    「放下窗帘」落空）。本批两处同修（数词加索引语境闸 + 动词表补 放下/名词表补
+    帘族与幕布），修好后本句出 **TurnDeviceOff+cover**，正是本钉要的保护语义。
+    证据链三条同向：集成 extract_window_name 帘族闸注释「帘/纱窗/百叶 绝不是按压
+    窗控」；插件 _window_type('百叶窗')=None 且 domain_hint=cover；数据集只用
+    「百叶帘」（百叶窗 无一例，属仓内既有词自查）。加固后比 None 更严：绝不允许
+    落 ControlWindow（窗型剥离=事故），且必须带 cover 域。"""
     p = _run(fp, "拉上客厅窗帘")
     assert p is not None and p.intent == "TurnDeviceOff"
     assert "cover" in p.args["target"][0]["devices"][0]["domains"]
-    assert _run(fp, "卧室百叶窗放下") is None
+    q = _run(fp, "卧室百叶窗放下")
+    assert q is not None and q.intent != "ControlWindow", q
+    assert q.intent == "TurnDeviceOff", q
+    dev = q.args["target"][0]["devices"][0]
+    assert dev["name"] == "百叶窗" and dev["domains"] == ["cover"], q.args
+

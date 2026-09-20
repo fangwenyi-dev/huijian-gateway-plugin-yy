@@ -189,6 +189,7 @@ class Service:
                     "ha_error": self.ha.last_error,
                     "sessions": len(self.ctx.sessions),
                     "stt_loaded": self.asr.ready(), "tts_loaded": self.tts.ready(),
+                    "stt_kind": self.asr.loaded_kind(),   # 在载引擎名（UI 状态卡显示）
                     "textcnn": self.textcnn.available,
                     "llm_enabled": bool(self.settings.get("llm.enabled")),
                     "nlu_enabled": bool(self.settings.get("nlu.enabled", True)),

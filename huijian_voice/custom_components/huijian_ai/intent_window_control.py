@@ -341,7 +341,7 @@ class ControlWindowIntent(intent.IntentHandler):
         "Examples: '内岛展厅窗户' -> action=A, area=展厅, name=窗户. "
         "'打开平推窗' -> action=open, name=平推窗. "
         "Valid window names: 平推窗,平开窗,推拉窗,内开窗,外开窗,天窗,飘窗,推拉门,"
-        "内开内倒窗,单内倒窗,外装平开窗,智能窗,下悬窗,上悬窗,提升窗,悬窗,窗户. "
+        "内开内倒窗,单内倒窗,外装平开窗,智能窗,下悬窗,上悬窗,提升窗,悬窗,电动窗,窗户. "
         "开窗器/开合器/推窗器 是窗控机型设备名，同走本意图（extract_window_name 归窗族）."
     )
 

@@ -73,11 +73,16 @@ _ACTION_PATTERNS: list[tuple[re.Pattern, str, Any]] = [
     (re.compile(r"^(除湿模式|除湿|抽湿)"), "SetDeviceMode", {"mode": "dry"}),
     (re.compile(r"^(送风模式|送风|通风)"), "SetDeviceMode", {"mode": "fan_only"}),
     (re.compile(r"^(自动模式|自动)"), "SetDeviceMode", {"mode": "auto"}),
-    (re.compile(r"^(调到|调为|调成|设为|改成|改|切换为|换为)\s*(制热|制热模式|加热|加热模式)"), "SetDeviceMode", {"mode": "heat"}),
-    (re.compile(r"^(调到|调为|调成|设为|改成|改|切换为|换为)\s*(制冷|制冷模式|冷却|冷却模式)"), "SetDeviceMode", {"mode": "cool"}),
-    (re.compile(r"^(调到|调为|调成|设为|改成|改|切换为|换为)\s*(除湿|除湿模式|抽湿)"), "SetDeviceMode", {"mode": "dry"}),
-    (re.compile(r"^(调到|调为|调成|设为|改成|改|切换为|换为)\s*(送风|送风模式|通风)"), "SetDeviceMode", {"mode": "fan_only"}),
-    (re.compile(r"^(调到|调为|调成|设为|改成|改|切换为|换为)\s*(自动|自动模式)"), "SetDeviceMode", {"mode": "auto"}),
+    # 2026-10-01 数据集对账二期：模式族动词条与下方 preset 族（睡眠/节能…）拉齐。
+    # 原五条只认「调到/调为/调成/设为/改成/改/切换为/换为」，实测「空调设成送风」
+    # 「客厅空调换成制冷」落 MISS，而同一句换成「设为睡眠模式」却能出档——同源话术
+    # 两套动词表=口径漂移，按 preset 族的长表统一（保留裸「改」在最后，交替序优先
+    # 长动词，防「改成」被「改」截成残段）。
+    (re.compile(r"^(调到|调为|调成|设为|设成|改成|换成|切换为|切换到|切到|切为|换到|变为|进入|改)\s*(制热|制热模式|加热|加热模式)"), "SetDeviceMode", {"mode": "heat"}),
+    (re.compile(r"^(调到|调为|调成|设为|设成|改成|换成|切换为|切换到|切到|切为|换到|变为|进入|改)\s*(制冷|制冷模式|冷却|冷却模式)"), "SetDeviceMode", {"mode": "cool"}),
+    (re.compile(r"^(调到|调为|调成|设为|设成|改成|换成|切换为|切换到|切到|切为|换到|变为|进入|改)\s*(除湿|除湿模式|抽湿)"), "SetDeviceMode", {"mode": "dry"}),
+    (re.compile(r"^(调到|调为|调成|设为|设成|改成|换成|切换为|切换到|切到|切为|换到|变为|进入|改)\s*(送风|送风模式|通风)"), "SetDeviceMode", {"mode": "fan_only"}),
+    (re.compile(r"^(调到|调为|调成|设为|设成|改成|换成|切换为|切换到|切到|切为|换到|变为|进入|改)\s*(自动|自动模式)"), "SetDeviceMode", {"mode": "auto"}),
     # ── 场景模式（v1.0.30 收编 060401/061701 语料：五拆之外的 HA preset 档；
     #    mode 直发英文规范名，集成端 set_preset_mode 通道按实体能力校验）──
     (re.compile(r"^(调到|调为|调成|设为|设成|改成|换成|切换为|切换到|切到|切为|换到|变为|进入)\s*(?:的)?(睡眠|睡觉|夜间)(?:模式|档位|挡位|档)?$"), "SetDeviceMode", {"mode": "sleep"}),
@@ -294,6 +299,12 @@ def _parse_position(num: str, had_verb: bool) -> Optional[int]:
             pos = int(n)
             explicit = False
         else:
+            # 2026-09-30 谎报闸（v1.0.69「宁如实失败」纪律）：cn2num 对非纯数词
+            # 是**静默返 0**（'最大'/'全部'/'顶' → position 0 = 完全关窗还播
+            # 「已开到 X%」）。裸中文 token 必须逐字全是数词才可信；未来谁给
+            # _POS_TAIL_RE 加新档位，这里都拦得住。
+            if not n or not re.fullmatch(r"[零一二三四五六七八九十百两]+", n):
+                return None
             pos = int(T.cn2num(n))
             explicit = False
         if not 0 <= pos <= 100:
@@ -536,9 +547,18 @@ def _cover_intent(text: str, intent: str) -> str:
 # cover 域推断：窗帘/纱帘→Turn*+domains=[cover]；窗户→「关闭卧室窗户」既有
 # 链路→窗型纠正 ControlWindow。**不收裸 关/开**（「关一下客厅窗帘」的裸关会与
 # 后续杂字误拼）；等值判定前置，场景触发词不受改写影响。
-_COVER_V_CLOSE = "拉上|合上|闭合|收起|收拢|拉下来|拉下|降下|关上|关闭|关了"
+_COVER_V_CLOSE = "拉上|合上|闭合|收起|收拢|拉下来|拉下|降下|放下|关上|关闭|关了"
 _COVER_V_OPEN = "拉开|打开|开了"
-_COVER_HEAD = r"[\u4e00-\u9fff]{0,6}?(?:窗帘|纱帘|窗户)"
+# 2026-10-01 二期两处收口（同「模式动词条三缺一」型漂移）：
+# ① 放下——_COVER_CLOSE_WORDS(:524) 早认它为关闭向，本道动词表却漏，致「放下窗帘」
+#    「百叶窗放下」整句落空（数据集原句：帮我关灯并放下投影幕布）；
+# ② 幕布——已在 KNOWN_DEVICES 两表且投影幕布生态=cover，但本道名词表不列 → SOV/SVO
+#    语序归一够不到它。名词仍**具名逐词列举不撒网**（防吞杂串）。
+_COVER_HEAD = r"[\u4e00-\u9fff]{0,6}?(?:窗帘|纱帘|卷帘|百叶帘|帘子|幕布|窗户|窗子|百叶窗)"
+# 2026-10-01 二期：帘族具名词随表补入（卷帘/百叶帘 已入 KNOWN_DEVICES 且 domain_hint
+# 判 cover，但本道只列 窗帘|纱帘|窗户 → 「卷帘拉上」「客厅百叶窗关闭」整句落空）。
+# 与 _CURTAIN_ROOT_WORDS/domain_hint 同口径；**具名逐词列举不撒「帘」网**（防吞
+# 「帘子布」类杂串），窗户/窗子/百叶窗 保持原语义走向（窗族→窗型纠正、帘族→cover）。
 _COVER_SOV_RE = re.compile(
     rf"^(?P<head>{_COVER_HEAD})(?:(?P<close>{_COVER_V_CLOSE})"
     rf"|(?P<open>{_COVER_V_OPEN}))(?:了|啦)?$")
@@ -1113,8 +1133,35 @@ class FastPath:
         # 它把平开窗关了、射灯没关还报"成功"（静默做错远糟于如实拒收）。
         if area and _AREA_VERB_RESIDUE.search(str(area)):
             return self._miss(trace, f"区域残渣(连排未切分):{area}")
+        # 2026-09-30：全局类目标兜底**上移**至窗前（原在窗型纠正之后）——
+        # 英文尾词单字形（'close window'/'turn on the ac' 被 parse_target
+        # 质量门拒出 name=None 后，rest 整段顶名）过去够不到窗纠正与空调
+        # 守卫，裸 "window" 会漏成 TurnDeviceOff(name=窗族) 扇出。中文句
+        # 该分支的产物恒含已知设备词（⑥ 已接），实际行为不变。
+        if name is None:
+            # 全局类："开灯/关灯"（rest 为空但设备词在原文里）
+            if intent in ("TurnDeviceOn", "TurnDeviceOff") and rest_text.strip():
+                area, name = None, T.normalize_name(T.strip_modal(rest_text))
+            elif not rest_text.strip():
+                area, name = None, None          # 无目标=全屋（Turn* / ControlWindow 通用窗）
+            else:
+                return self._miss(trace, f"提取质量低(score={score})")
         # 窗型词落进设备名 → 按钮按压语义，不是开关设备（实机 2026-09-08：
         # 「打开 办公室平开窗」被错产成 TurnDeviceOn，集成按开关找窗必 miss）。
+        # 2026-09-30 英文桥（用户现场：'turn on the office light'/'close the
+        # bedroom window' 转写正确却「没找到设备」——SenseVoice 出英文词，客户
+        # HA 全中文命名）。判窗先试中文等价词：window 类英文窗词换中文形顶前
+        # （ControlWindow 集成端只读 targets[0]，英文形放首位必死）；非窗类
+        # 英文词不动原形，由末端 bilingual_targets 并集追加中文目标（Turn lane
+        # 逐目标 union——英文命名 HA 的既有通路零回归）。
+        zh_name = T.en_device_zh(name) if isinstance(name, str) and name else None
+        if intent in ("TurnDeviceOn", "TurnDeviceOff") and zh_name \
+                and (_window_type(zh_name) or zh_name in ("窗", "窗户")
+                     or _opener_word(zh_name)):
+            name = zh_name
+            zh_area = T.en_area_zh(area) if area else None
+            if zh_area:
+                area = zh_area
         if intent in ("TurnDeviceOn", "TurnDeviceOff") and name:
             wt = _window_type(name)
             if not wt and _window_type(rest_text):
@@ -1182,14 +1229,6 @@ class FastPath:
                     intent = "ControlWindow"
                     extra = {**extra, "action": extra.get("action") or
                              ("open" if _was_on else "close")}
-        if name is None:
-            # 全局类："开灯/关灯"（rest 为空但设备词在原文里）
-            if intent in ("TurnDeviceOn", "TurnDeviceOff") and rest_text.strip():
-                area, name = None, T.normalize_name(T.strip_modal(rest_text))
-            elif not rest_text.strip():
-                area, name = None, None          # 无目标=全屋（Turn* / ControlWindow 通用窗）
-            else:
-                return self._miss(trace, f"提取质量低(score={score})")
         # 音乐泛词守卫（2026-09-12 零改动过渡带）：Turn* 车道若把泛音乐词
         # ("关掉音乐/关音乐")吃成设备名，会错关同名实体或空转失败。放行 None，
         # 交回级联 ⑤b 音乐带处理（真叫"音乐"的设备请说"关掉音乐开关"消歧）。
@@ -1200,7 +1239,11 @@ class FastPath:
         # 区域吸进设备名——HA 实体常叫「客厅空调」——此时 name 已自带限定，
         # 再按"缺区域"拒执行会让这类设备的**所有**空调指令失效（无 LLM 时
         # 直接不可用）。只有裸"空调"（或纯编号）才算真的缺区域。
-        if name and any(k in name.lower() for k in _AC_KEYWORDS):
+        # 2026-09-30 英文桥：'turn on the ac' 的裸 "ac" 与裸"空调"同权——守卫
+        # 看中文等价词（name 现值现翻：桥前置换形/兜底顶名两条路都盖到），
+        # 否则英文绕闸全屋扇出空调。
+        _ac_probe = (T.en_device_zh(name) or str(name or "")).lower()
+        if name and any(k in _ac_probe for k in _AC_KEYWORDS):
             if not area and not _ac_name_qualified(name):
                 return self._miss(trace, "空调缺区域信息")
         args: dict[str, Any] = {}
@@ -1227,7 +1270,9 @@ class FastPath:
                 entry["area"] = area
             if name:
                 entry["devices"] = [device_item]
-            args["target"] = [entry] if entry else []
+            # 英文目标桥（见 targets.bilingual_targets）：英文 area/name 追加
+            # 中文等价目标并集；纯中文句原样返回（零扰动）。
+            args["target"] = T.bilingual_targets([entry] if entry else [])
         if "action" in extra:
             args["action"] = str(extra["action"]).lower()
         for k in ("attribute", "delta", "mode", "position", "speed", "strength"):
@@ -1252,7 +1297,15 @@ _WINDOW_TYPES = ("内开内倒窗", "外装平开窗", "单内倒窗", "内倒�
                  # 2026-09 悬窗族 + 提升窗（用户点名「区域+窗户」机型）。_window_type
                  # 是**先命中先返回**的子串扫描，下悬窗/上悬窗/提升窗（含悬窗/升窗
                  # 形态）必须排在裸 悬窗 前，否则 "关闭下悬窗" 会被短词 悬窗 截胡。
-                 "下悬窗", "上悬窗", "提升窗", "悬窗")
+                 "下悬窗", "上悬窗", "提升窗", "悬窗",
+                  # 2026-09-30 数据集对账补口：电动窗（意图数据集窗型实测 x10，
+                  # 六表从未收；与 targets 两表/集成两表三方同步，守卫钉）。
+                  "电动窗")
+
+# 帘族字（与 _POS_CURTAIN_WORDS 同集合）：窗型判定短路专用——「电动窗帘」
+# 含窗型词根 电动窗，字面扫描必截胡；帘=cover 设备，误判成窗型即按窗钮
+# （假动作+帘不动）。凡含帘族字的名词一律不进窗型纠正。
+_CURTAIN_ROOT_WORDS = ("帘", "纱窗", "百叶")
 
 
 _AC_KEYWORDS = ("空调", "空調", "aircondition")
@@ -1299,6 +1352,8 @@ def _ac_name_qualified(name: str) -> bool:
 
 def _window_type(name: str) -> Optional[str]:
     n = str(name or "")
+    if any(w in n for w in _CURTAIN_ROOT_WORDS):
+        return None                # 「电动窗帘」≠「电动窗」——帘族短路（09-30 对账批）
     for w in _WINDOW_TYPES:
         if w in n:
             return w

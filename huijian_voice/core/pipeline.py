@@ -549,6 +549,10 @@ class Pipeline:
         try:
             # 直读 ha 状态缓存（私有属性同进程只读；无 await，关键路径零成本）。
             T.sync_vocab(getattr(self.ha, "_states", {}) or {})
+            # 2026-09-30 区域表同步（数据集对账）：真实区域名喂 targets._area_like
+            # ——主卧/阳台/玄关 等不带区域尾字的区名自此可析出（ha_client 已按
+            # WS config/area_registry/list 维护 _areas，与查询族同源）。
+            T.sync_areas((getattr(self.ha, "_areas", {}) or {}).values())
         except Exception:
             logger.debug("[词表] 动态同步异常", exc_info=True)
 
@@ -1640,9 +1644,9 @@ class Pipeline:
         return msgs
 
     def _known_areas(self) -> set:
-        """已知区域名集合（HA 区域注册表缓存 + 卫星区域映射）。取不到=空集，
-        闸门随之失效（宁可不拦，也不误拦）。"""
-        areas: set = set()
+        """已知区域名集合（HA 区域注册表缓存 + 卫星区域映射 + 静态基准通用区名）。
+        取不到注册表=只剩静态基准，闸门随之收窄但不全哑（宁可不拦，也不误拦）。"""
+        areas: set = set(T.BASE_AREAS)
         try:
             areas.update(str(v) for v in (getattr(self.ha, "_areas", {}) or {}).values())
         except Exception:
