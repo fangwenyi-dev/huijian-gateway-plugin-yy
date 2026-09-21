@@ -8,8 +8,11 @@
 - **禁止自动 commit/push**——仅用户明确指令时执行；推送必须**双推**
   （origin=GitHub + gitee=Gitee）。**Gitee 镜像是商店容灾源**：国内客户
   GitHub 被干扰时全靠它看新版本，漏推 Gitee = 一部分客户收不到更新。
-- **改代码必回归**：`cd huijian_voice && python -m pytest tests -q`
+- **改代码必回归**：任何一处代码修改（含小修、单行改动）都必须先跑回归测试
+  再交差，不允许"改动小就不测"。本仓命令：
+  `cd huijian_voice && python -m pytest tests -q`
   （2026-09-11 基线：203 全绿，其中 klar 一级 NLU 35 项）。
+  测试红时先差分确认是否环境原因，不得为过而过、不得跳过用例。
 - **内部文档禁发**（会话纪要、内部工单文案等不随代码外发）。
 
 ## 版本一致性（test_release_consistency 钉死，五源同版本）
