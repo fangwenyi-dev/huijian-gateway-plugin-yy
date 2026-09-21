@@ -56,7 +56,7 @@
 {"text": "客厅多少度", "intent": "_query", "source": "query"}
 {"text": "卧室湿度多少", "intent": "_query", "source": "query"}
 {"text": "现在几点了", "intent": "_query", "source": "query"}
-{"text": "今天星期几", "intent": null, "source": "miss"}
+{"text": "今天星期几", "intent": "_query", "source": "query"}
 {"text": "办公室有没有人", "intent": "_query", "source": "query"}
 {"text": "客厅空调设定温度多少", "intent": "_query", "source": "query"}
 {"text": "灯现在多亮", "intent": "_query", "source": "query"}

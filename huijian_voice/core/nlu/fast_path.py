@@ -24,7 +24,8 @@ from typing import Any, Optional
 from . import corrector, targets as T
 from . import creation
 from .music import GENERIC_WORDS as _MUSIC_WORDS
-from .query import looks_local_query
+from .query import is_state_question, looks_local_query
+from .query import STATE_QUESTION_TAIL      # noqa: F401  变异靶：判据表在 query 单点定义
 
 logger = logging.getLogger("huijian.fastpath")
 
@@ -651,6 +652,14 @@ def _is_complex_query(text: str) -> bool:
     # 粗闸会把它们全部截走，无 LLM 现场即哑。未命中查询族自然回落原链。
     if looks_local_query(t):
         return False
+    # v1.1.2 安全闸（与「内倒→雷达」同 severity 同纪律）：状态疑问句绝不进命令
+    # 档。真机实测「客厅射灯关了吗」被 ^关了 吃成 TurnDeviceOff、「射灯开着吗」
+    # 吃成 TurnDeviceOn、「平开窗关了吗」吃成 ControlWindow close —— **问一句动
+    # 一次设备**，且播报照样谎报"关了"。礼貌请求尾（…打开好吗/可以吗/行吗）在
+    # normalize_polite 与 _ECHO_TONE 里已先剥除，剥后仍留 吗/没 的就是真问句，
+    # 反向钉在 test_v1112 IMPERATIVE_STILL_COMMAND 八句上。
+    if is_state_question(t):
+        return True
     if re.search(r"(状态|情况|哪些|列表)", t):
         return True
     if re.search(r"所有.*(?:灯|设备|开关)", t):
