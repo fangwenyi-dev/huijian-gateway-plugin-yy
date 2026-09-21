@@ -8,6 +8,9 @@ from __future__ import annotations
 import logging
 import re
 
+# 只读域清单与能力裁决共用一份定义（core.capability 不反向依赖本模块，无环）。
+from ..capability import READ_ONLY_DOMAINS
+
 logger = logging.getLogger("huijian.targets")
 
 # v1.0.40：「两」补入表——creation.py 的时间/阈值正则（_AUTO_TIME_RE 的 h、
@@ -303,14 +306,21 @@ def _name_tokens(friendly: str) -> list[str]:
 def sync_vocab(states: dict) -> None:
     """从 ha 状态缓存派生动态词表（O(实体数) 小任务，pipeline 节流调用）。"""
     names: set[str] = set()
+    # v1.1.3 P0-1：域白名单 → **排除表**。原白名单只放 9 个域，其余（valve/
+    # number/select/alarm_control_panel/water_heater/scene/script/dishwasher/
+    # lawn_mower/siren…）连词表都进不去，用户怎么叫都"没找到设备"——这与
+    # "语音控 HA 全设备"的目标正面冲突。反转为排除只读/系统域后可控域自动全覆盖。
+    per_word: dict[str, set[str]] = {}
     for eid, ent in (states or {}).items():
-        if not str(eid).split(".", 1)[0] in (
-                "light", "cover", "climate", "fan", "switch", "humidifier",
-                "lock", "vacuum", "media_player"):
+        dom = str(eid).split(".", 1)[0]
+        if dom in _VOCAB_EXCLUDED_DOMAINS:
             continue
         fn = str(((ent or {}).get("attributes") or {}).get("friendly_name") or "")
-        names.update(_name_tokens(fn))
-    global _dyn_vocab, ALL_DEVICES, ALL_SET, _ALL_MIN2
+        toks = _name_tokens(fn)
+        names.update(toks)
+        for t in toks:
+            per_word.setdefault(t, set()).add(dom)
+    global _dyn_vocab, ALL_DEVICES, ALL_SET, _ALL_MIN2, _dyn_domains, _dyn_lookup
     # 动态词之间等长平局给**码点序**次键（注册表派生顺序不代表作者意图，但必须可
     # 复现）；静态表与动态词合并时**静态在前**，与 KNOWN_DEVICES 同一确定性判据。
     _dyn_vocab = tuple(sorted(names, key=lambda w: (-len(w), w)))
@@ -318,12 +328,38 @@ def sync_vocab(states: dict) -> None:
     ALL_DEVICES = tuple(sorted(merged, key=len, reverse=True))
     ALL_SET = frozenset(merged)
     _ALL_MIN2 = tuple(d for d in ALL_DEVICES if len(d) >= 2)   # 已长→短
+    # 词→域映射：域名按字母序固定（同一份注册表在任何进程/任何时刻得到同一张表），
+    # 查找表按长度倒序（长词优先，与 ALL_DEVICES 同判据）。
+    _dyn_domains = {w: tuple(sorted(ds)) for w, ds in per_word.items()}
+    _dyn_lookup = tuple(sorted(_dyn_domains, key=lambda w: (-len(w), w)))
+
+
+# 语音设备词表的排除域（v1.1.3 P0-1）：只读/系统域**不进设备词表**——
+#   · sensor/binary_sensor/weather/person… 不是"可开关的设备"，收进来只会让
+#     「打开温度计」这类话产出一个注定失败的计划；它们要能被问到，靠的是查询族
+#     直接按实体名读 states（`test_targets_sync_vocab_and_clear` 钉的正是这条，
+#     域白名单时代也在排除，本批不放宽）。
+#   · stt/tts/notify/conversation/config/hassio… 是引擎或系统实体，出现在设备
+#     名里只会造成误命中。
+# 与旧白名单的差别在**反方向**：valve/number/select/alarm_control_panel/
+# water_heater/dishwasher/siren/scene/script… 过去连词表都进不去（语音怎么叫都
+# "没找到设备"），现在按注册表自动全覆盖——这才是"控 HA 全设备"的那一步。
+_VOCAB_EXCLUDED_DOMAINS = frozenset(READ_ONLY_DOMAINS) | {
+    "camera", "scene_config", "config", "hassio", "system_log", "diagnostics",
+    "provisioning", "backup", "analytics", "timer", "wake_word",
+    "homeassistant", "default", "trace",
+}
+_dyn_domains: dict[str, tuple[str, ...]] = {}
+_dyn_lookup: tuple[str, ...] = ()
 
 
 def clear_vocab() -> None:      # 测试隔离
     global _dyn_vocab, ALL_DEVICES, ALL_SET, _ALL_MIN2, _dyn_areas
+    global _dyn_domains, _dyn_lookup
     _dyn_vocab = ()
     _dyn_areas = ()
+    _dyn_domains = {}
+    _dyn_lookup = ()
     ALL_DEVICES = tuple(sorted(_STATIC_ORDER, key=len, reverse=True))
     ALL_SET = frozenset(_STATIC_ORDER)
     _ALL_MIN2 = tuple(d for d in ALL_DEVICES if len(d) >= 2)
@@ -517,9 +553,38 @@ def clean_name(name: str) -> str:
     return name
 
 
+def _dyn_lookup_domain(n: str) -> list[str]:
+    """注册表派生域：整词全等优先，其次长词包含（"办公室射灯"⊃"射灯"）。
+
+    只认 ≥2 字词（单字"灯/窗"参与包含匹配会把"香薰灯"判成灯域以外的东西，
+    静态链对这类泛称判断更稳），且**不做跨词根拼接**——与 parse_target 的
+    「阳台灯≠台灯」护栏同一纪律。
+    """
+    if not n:
+        return []
+    hit = _dyn_domains.get(n)
+    if hit:
+        return list(hit)
+    for w in _dyn_lookup:
+        if len(w) >= 2 and w in n:
+            return list(_dyn_domains[w])
+    return []
+
+
 def domain_hint(name: str) -> list[str]:
-    """设备名词表→HA 域提示（原 fast_path hint_domains 逻辑逐字移植）。"""
-    n = (name or "").lower()
+    """设备名词表→HA 域提示（原 fast_path hint_domains 逻辑逐字移植）。
+
+    v1.1.3 P0-1：先查**注册表派生**的词→域映射（域信息本来就直接写在 entity_id
+    前缀里，由 sync_vocab 建表），命中即真值；静态判据链退为冷启动/无注册表
+    兜底。这一层把「116 静态词里 54 词无域提示」的整类缺陷归零：新设备接进来
+    不需要再往词表里补词，域也不会猜错（例：客户把加湿器命名成"香薰机"，
+    旧逻辑 domains=[]，集成端只能全实体面按名找）。
+    """
+    raw = (name or "").strip()
+    n = raw.lower()
+    dyn = _dyn_lookup_domain(n)
+    if dyn:
+        return dyn
     if "空调" in n or "空調" in n:
         return ["climate"]
     if "灯" in n or "照明" in n:

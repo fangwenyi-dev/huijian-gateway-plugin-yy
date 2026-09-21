@@ -13,14 +13,14 @@ import logging
 import re
 from typing import Optional
 
+from . import capability
+from .nlu.schema import ATTR_CN, ATTR_TO_WIRE
 from .nlu.fast_path import Plan, color_word, is_pronoun, normalize_polite
 
 logger = logging.getLogger("huijian.executor")
 
 ACT_CN = {"open": "打开", "close": "关闭", "pause": "暂停", "a": "内倒", "tilt": "内倒"}
-ATTR_CN = {"brightness": "亮度", "colour_temperature": "色温", "color_temperature": "色温",
-           "temperature": "温度", "fan_speed": "风量", "position": "开合度",
-           "color": "颜色", "humidity": "湿度"}
+# ATTR_CN 已上收到契约单点（core/nlu/schema.py），本模块直接引用。
 
 # 出站属性名映射（v1.1.1 #2）：网关内部属性名 ≠ 集成注册表名。
 # color_temperature / colour_temperature 在集成 register_adjustment 里**从未
@@ -29,8 +29,7 @@ ATTR_CN = {"brightness": "亮度", "colour_temperature": "色温", "color_temper
 # （_T0_ATTR_WORD / H1 改道 / 播报"调到X度"三分支全按 color_temperature 挑
 # 「色温/调冷调暖」），改名即串台。故只在**上 wire 前**单点映射，
 # Plan.args 与话术层一律不动。
-_ATTR_WIRE = {"color_temperature": "temperature",
-              "colour_temperature": "temperature"}
+_ATTR_WIRE = ATTR_TO_WIRE        # 契约单点见 core/nlu/schema.py（v1.1.3 收口）
 
 
 def wire_args(name: str, args: dict) -> dict:
@@ -185,6 +184,46 @@ class Executor:
                              str(result.get("error") or result.get("message") or ""))}
         return ok, result
 
+    async def _capability_refuse(self, name: str, args: dict) -> Optional[str]:
+        """v1.1.3 P0-2 只读预裁：拿本家实体真实能力判这条命令能不能成立。
+
+        只拒不改写；拿不到候选实体（注册表未同步/无匹配）一律放行，让集成端
+        按它自己的口径判——网关不越权凭空拒掉本来能做的动作。永不抛。
+        """
+        try:
+            tgt = (args or {}).get("target")
+            if not isinstance(tgt, list) or not tgt:
+                return None
+            states = await self.ha.states()
+            if not states:
+                return None
+            ent_area = getattr(self.ha, "_entity_area", {}) or {}
+            cands: list[dict] = []
+            for slot in tgt:
+                if not isinstance(slot, dict):
+                    continue
+                area = str(slot.get("area") or "")
+                for dev in (slot.get("devices") or [{}]):
+                    nm = str((dev or {}).get("name") or "")
+                    dds = tuple((dev or {}).get("domains") or ())
+                    for eid, e in states.items():
+                        dom = str(eid).split(".", 1)[0]
+                        if dds and dom not in dds:
+                            continue
+                        fn = str(((e or {}).get("attributes") or {}).get("friendly_name") or "")
+                        if area and ent_area.get(eid) != area and area not in fn:
+                            continue
+                        if nm and nm not in eid and nm not in fn:
+                            continue
+                        # 能力判据按 entity_id 前缀取域；真机 states 自带该键，
+                        # 测试替身/精简快照可能只有 dict 键 → 补一份再交给裁决。
+                        e.setdefault("entity_id", eid)
+                        cands.append(e)
+            return capability.gate(name, args, cands)
+        except Exception:  # noqa: BLE001 裁决故障=放行（宁多发一次，绝不少做）
+            logger.exception("[执行] 能力预裁异常（放行）")
+            return None
+
     async def run(self, plan: Plan) -> tuple[bool, str]:
         """执行 Plan（klar 多分句/复合链逐步顺序执行）。返回 (success, 中文播报)。永不抛。"""
         steps = [(plan.intent, plan.args)] + [
@@ -201,6 +240,14 @@ class Executor:
                 logger.info("[执行] %s %s → 开关族能力闸拦下（防area扇出/假成功）",
                             name, args)
                 return False, "抱歉，" + gate
+            cap = await self._capability_refuse(name, args)
+            if cap is not None:
+                # v1.1.3：网关侧按本家实体真实能力当场如实回话（带可选档位），
+                # 不再白跑一趟 HA 换一个 unsupported 错误码。
+                self.last_run = {"steps": len(steps), "applied": len(results),
+                                 "indeterminate": False}
+                logger.info("[执行] %s %s → 能力预裁拦下 | %s", name, args, cap)
+                return False, "抱歉，" + cap
             direct = self._klar_direct(name, args) if plan.source == "klar" else None
             if direct is not None:
                 domain, service, data = direct
