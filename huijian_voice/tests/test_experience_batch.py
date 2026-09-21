@@ -830,15 +830,15 @@ def test_pipeline_vocab_sync_throttled():
     p = _pipe(ha=HA({"light.a": {"attributes": {"friendly_name": "走道灯"}}}))
     import core.nlu.targets as T
     orig = T.sync_vocab
-    T.sync_vocab = lambda s: calls.append(len(s))
+    T.sync_vocab = lambda s, aliases=None: calls.append((len(s), len(aliases or {})))
     try:
         p._vocab_ts = 0.0
         p._sync_vocab()
         p._sync_vocab()                                      # 30s 内节流
-        assert calls == [1]
+        assert calls == [(1, 0)]
         p._vocab_ts = time.time() - 999
         p._sync_vocab()
-        assert calls == [1, 1]
+        assert calls == [(1, 0), (1, 0)]
     finally:
         T.sync_vocab = orig
         T.clear_vocab()

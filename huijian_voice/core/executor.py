@@ -197,28 +197,9 @@ class Executor:
             states = await self.ha.states()
             if not states:
                 return None
-            ent_area = getattr(self.ha, "_entity_area", {}) or {}
-            cands: list[dict] = []
-            for slot in tgt:
-                if not isinstance(slot, dict):
-                    continue
-                area = str(slot.get("area") or "")
-                for dev in (slot.get("devices") or [{}]):
-                    nm = str((dev or {}).get("name") or "")
-                    dds = tuple((dev or {}).get("domains") or ())
-                    for eid, e in states.items():
-                        dom = str(eid).split(".", 1)[0]
-                        if dds and dom not in dds:
-                            continue
-                        fn = str(((e or {}).get("attributes") or {}).get("friendly_name") or "")
-                        if area and ent_area.get(eid) != area and area not in fn:
-                            continue
-                        if nm and nm not in eid and nm not in fn:
-                            continue
-                        # 能力判据按 entity_id 前缀取域；真机 states 自带该键，
-                        # 测试替身/精简快照可能只有 dict 键 → 补一份再交给裁决。
-                        e.setdefault("entity_id", eid)
-                        cands.append(e)
+            cands = capability.resolve_candidates(
+                states, getattr(self.ha, "_entity_area", {}) or {},
+                (args or {}).get("target"))
             return capability.gate(name, args, cands)
         except Exception:  # noqa: BLE001 裁决故障=放行（宁多发一次，绝不少做）
             logger.exception("[执行] 能力预裁异常（放行）")
@@ -269,6 +250,20 @@ class Executor:
                 logger.info("[执行] %s %s → 失败 | %s", name, args, reply)
                 return False, reply
             results.append(result)
+        # v1.1.4 状态回执：顶层 success / success_count 是**集成自己的口径**，
+        # 真机实锤会骗人——A 组里 `success:true, success_count:1` 却是我们点名的
+        # 那台实体 per-entity 报 `does not support set_cover_position`，用户听到
+        # "开到60%"而窗没动。因此成功与否改按**逐实体回执**判：全失败=如实失败，
+        # 部分失败=播报里点名（不做静默"都办妥了"）。
+        ok_n, bad_n, errs = self._receipt(results)
+        if ok_n == 0 and bad_n > 0:
+            why = errs[0] if errs else "设备没接受这条指令"
+            self.last_run = {"steps": len(steps), "applied": 0, "indeterminate": False}
+            reply = "抱歉，" + zh_error(why, klar=plan.source == "klar")
+            reply = reply if reply.startswith("抱歉") else "抱歉，" + reply
+            logger.info("[执行] %s %s → 逐实体全失败 | %s", plan.intent, plan.args, reply)
+            return False, reply
+        partial = f"（另有 {bad_n} 台没成功）" if bad_n > 0 else ""
         klar_speech = (getattr(plan, "speech", "") or "").strip()
         if plan.source == "klar" and len(results) == 1:
             # 标准开关族：引擎那句缺主语的话术让位给「原话目标词 + 方向动词」
@@ -297,10 +292,39 @@ class Executor:
             except Exception:
                 reply = "好的，都办妥了"
         tag = f"(+%d步)" % (len(steps) - 1) if len(steps) > 1 else ""
+        if partial and not reply.endswith(partial):
+            reply = reply.rstrip("。") + partial      # 部分失败点名，不静默全绿
         self.last_run = {"steps": len(steps), "applied": len(steps),
                          "indeterminate": False}
         logger.info("[执行] %s %s%s → 成功 | %s", plan.intent, plan.args, tag, reply)
         return True, reply
+
+    @staticmethod
+    def _receipt(results: list) -> tuple:
+        """逐实体回执：(成功台数, 失败台数, 去重失败原因)。
+
+        只在 result 真带了 per-entity `states` 时才计数——没有该键（HA 内置意图
+        通道、老返回形态）就退回原有顶层 success 判定，不凭空判失败。永不抛。
+        """
+        ok_n = bad_n = 0
+        errs: list[str] = []
+        for r in results or []:
+            if not isinstance(r, dict):
+                continue
+            rows = r.get("states")
+            if not isinstance(rows, list) or not rows:
+                continue
+            for st in rows:
+                if not isinstance(st, dict):
+                    continue
+                if st.get("success"):
+                    ok_n += 1
+                else:
+                    bad_n += 1
+                    e = str(st.get("error") or "").strip()
+                    if e and e not in errs:
+                        errs.append(e)
+        return ok_n, bad_n, errs
 
     # ── klar grounded 步骤 → 直调服务映射 ────────────────────────
     # 引擎 full 模式已把"办公室射灯"解析成 entity_id；这类步骤绕开 intent

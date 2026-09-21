@@ -239,6 +239,47 @@ class HAClient:
             if time.time() - self._reg_ts > self._REG_TTL or not self._areas:
                 await self._load_registries()
 
+    @staticmethod
+    def _parse_registry(rows, areas: dict) -> tuple[dict, dict, dict]:
+        """实体注册表行 → (entity→区域名, entity→语音别名列表, entity→device_class)。
+
+        别名两形态都认：新版 HA 是字符串列表，老版是 {alias: {...}} dict；
+        `name`（用户改名）本身就是最高优先级的"别名"，一并收。
+        """
+        ent_map: dict[str, str] = {}
+        alias_map: dict[str, list[str]] = {}
+        dc_map: dict[str, str] = {}
+        for e in rows:
+            if not isinstance(e, dict):
+                continue
+            eid = e.get("entity_id")
+            if not eid:
+                continue
+            if e.get("disabled_by") or e.get("hidden_by"):
+                continue            # 停用/隐藏实体不进词表（真机护栏）
+            aid = e.get("area_id")
+            if aid:
+                ent_map[eid] = areas.get(aid, aid)
+            names: list[str] = []
+            for key in ("name", "original_name"):
+                v = e.get(key)
+                if isinstance(v, str) and v.strip():
+                    names.append(v.strip())
+            al = e.get("aliases")
+            if isinstance(al, dict):
+                al = list(al.keys())
+            for v in (al or []):
+                if isinstance(v, str) and v.strip():
+                    names.append(v.strip())
+            seen: set[str] = set()
+            uniq = [x for x in names if not (x in seen or seen.add(x))]
+            if uniq:
+                alias_map[eid] = uniq
+            dcv = e.get("device_class")
+            if isinstance(dcv, str) and dcv:
+                dc_map[eid] = dcv
+        return ent_map, alias_map, dc_map
+
     async def _load_registries(self) -> None:
         # v1.0.44 根治：现代 HA（2024.4 起）已**删除** /api/config/* REST——区域/
         # 实体注册表只剩 WebSocket 通道。旧实现 `if r.status == 200` 静默吞 404，
@@ -248,20 +289,28 @@ class HAClient:
         # auth_required 消息双形态）→ REST 兼容老 HA；双双失败不再静默：
         # WARN + last_error（状态页可见），杜绝"恒空但看似正常"。
         try:
-            areas, ent_map = await self._ws_registries()
-            self._apply_registries(areas, ent_map)
+            areas, ent_map, alias_map, dc_map = await self._ws_registries()
+            self._apply_registries(areas, ent_map, alias_map, dc_map)
             return
         except Exception as e:
             logger.warning("[HA] 注册表 WebSocket 拉取失败，回落 REST（老 HA 形态）: %s", e)
-        areas, ent_map, err = await self._rest_registries()
+        areas, ent_map, alias_map, dc_map, err = await self._rest_registries()
         if areas is None:
             self.last_error = f"registry: ws+rest 均失败（rest: {err}）"
             return
-        self._apply_registries(areas, ent_map)
+        self._apply_registries(areas, ent_map, alias_map, dc_map)
 
-    def _apply_registries(self, areas: dict, ent_map: dict) -> None:
+    def _apply_registries(self, areas: dict, ent_map: dict,
+                          alias_map: dict | None = None,
+                          dc_map: dict | None = None) -> None:
         self._areas = areas
         self._entity_area = ent_map
+        # v1.1.4 第 2 步补口：实体注册表里**已经在 HA 侧填好的语音别名**与
+        # device_class 一并接住。别名是最省钱的覆盖面来源——用户自己在 HA
+        # 「设备与服务→实体→别名」里写的叫法，过去我们完全没读，等于把已经
+        # 拿到的语料丢掉，反过来要求用户按我们的手抄词表说话。
+        self._entity_alias = alias_map or {}
+        self._entity_device_class = dc_map or {}
         self._reg_ts = time.time()
 
     def _ws_endpoints(self) -> list[str]:
@@ -298,7 +347,7 @@ class HAClient:
                 raise RuntimeError(f"{mtype} → {str(m)[:200]}")
             # 其余帧为 event 推送（订阅制下不该出现），忽略继续等本命令结果
 
-    async def _ws_registries(self) -> tuple[dict, dict]:
+    async def _ws_registries(self) -> tuple[dict, dict, dict, dict]:
         """一次连接拉区域+实体注册表。auth 双形态：新版 HA 接受 ws 请求携带
         Authorization header（服务端静默不发首帧）；老式连接首帧 auth_required →
         消息认证。首帧 1s 探测区分两态。
@@ -322,34 +371,27 @@ class HAClient:
                         raise RuntimeError(f"WS 认证被拒: {str(first)[:120]}")
                     areas = {a["area_id"]: (a.get("name") or a["area_id"])
                              for a in (await self._ws_cmd(ws, "config/area_registry/list") or [])}
-                    ent_map = {}
-                    for e in (await self._ws_cmd(ws, "config/entity_registry/list") or []):
-                        aid = e.get("area_id")
-                        if aid:
-                            ent_map[e["entity_id"]] = areas.get(aid, aid)
-                    return areas, ent_map
+                    ent_map, alias_map, dc_map = self._parse_registry(
+                        await self._ws_cmd(ws, "config/entity_registry/list") or [], areas)
+                    return areas, ent_map, alias_map, dc_map
             except Exception as e:  # 端点形态差异：换下一个候选
                 last_err = e
                 continue
         raise last_err or RuntimeError("无可用 WS 端点")
 
-    async def _rest_registries(self) -> tuple[Optional[dict], Optional[dict], str]:
+    async def _rest_registries(self) -> tuple[Optional[dict], Optional[dict], dict, dict, str]:
         """老 HA（<2024.4）REST 兼容通道。非 200 不再静默——回传原因入 last_error。"""
         try:
             async with self._session.get(self._url("/api/config/area_registry/list")) as r:
                 if r.status != 200:
-                    return None, None, f"areas {r.status}"
+                    return None, None, {}, {}, f"areas {r.status}"
                 areas = {a["area_id"]: a.get("name", a["area_id"]) for a in await r.json()}
-            ent_map = {}
             async with self._session.get(self._url("/api/config/entity_registry/list")) as r:
-                if r.status == 200:
-                    for e in await r.json():
-                        aid = e.get("area_id")
-                        if aid:
-                            ent_map[e["entity_id"]] = areas.get(aid, aid)
-            return areas, ent_map, ""
+                rows = await r.json() if r.status == 200 else []
+            ent_map, alias_map, dc_map = self._parse_registry(rows or [], areas)
+            return areas, ent_map, alias_map, dc_map, ""
         except Exception as e:
-            return None, None, str(e)
+            return None, None, {}, {}, str(e)
 
     async def states(self) -> dict[str, dict]:
         await self.refresh_states()

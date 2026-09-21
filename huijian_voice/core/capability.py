@@ -45,6 +45,42 @@ READ_ONLY_DOMAINS = frozenset({
 from .nlu.schema import NEVER_SPECIALS as _NEVER_SPECIALS
 
 
+def resolve_candidates(states: dict, entity_area: dict, target: list) -> list:
+    """把计划里的 target 形（area + devices[{name,domains}]）映射到本家实体快照。
+
+    executor 的能力预裁与 pipeline 的歧义确认共用这一份匹配近似——两处各写一遍
+    就是下一个漂移源。语义刻意保守：name 用**子串**（与集成端 6 级匹配同向），
+    命中不到就返回空表，由调用方按"信息不足=放行"处理。永不抛。
+    """
+    out: list = []
+    try:
+        for slot in (target or []):
+            if not isinstance(slot, dict):
+                continue
+            area = str(slot.get("area") or "")
+            for dev in (slot.get("devices") or [{}]):
+                nm = str((dev or {}).get("name") or "").strip()
+                doms = tuple((dev or {}).get("domains") or ())
+                for eid, e in (states or {}).items():
+                    dom = str(eid).split(".", 1)[0]
+                    if doms and dom not in doms:
+                        continue
+                    if not isinstance(e, dict):
+                        continue
+                    fn = str(((e.get("attributes") or {}).get("friendly_name")) or "")
+                    if area and (entity_area or {}).get(eid) != area and area not in fn:
+                        continue
+                    if nm and nm not in str(eid) and nm not in fn:
+                        continue
+                    e = dict(e)
+                    e.setdefault("entity_id", eid)
+                    if e not in out:
+                        out.append(e)
+    except Exception:  # noqa: BLE001 解析故障=空表（调用方按信息不足放行）
+        return []
+    return out
+
+
 def _feat(ent: dict) -> int:
     try:
         return int(((ent or {}).get("attributes") or {}).get("supported_features") or 0)

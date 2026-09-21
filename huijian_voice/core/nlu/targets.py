@@ -303,8 +303,15 @@ def _name_tokens(friendly: str) -> list[str]:
     return out
 
 
-def sync_vocab(states: dict) -> None:
-    """从 ha 状态缓存派生动态词表（O(实体数) 小任务，pipeline 节流调用）。"""
+def sync_vocab(states: dict, aliases: dict | None = None,
+               device_class: dict | None = None) -> None:
+    """从 ha 状态缓存 + 实体注册表派生动态词表（O(实体数)，pipeline 节流调用）。
+
+    v1.1.4：别名进词表。`aliases[eid]` 是用户在 HA「实体→别名」里亲手写的叫法
+    （外加 name/original_name），过去完全没读——用户已经告诉我们的叫法，比任何
+    手抄词表都准。别名与状态名同表同规则（域取 entity_id 前缀），停用/隐藏实体
+    在 ha_client 侧已剔除。
+    """
     names: set[str] = set()
     # v1.1.3 P0-1：域白名单 → **排除表**。原白名单只放 9 个域，其余（valve/
     # number/select/alarm_control_panel/water_heater/scene/script/dishwasher/
@@ -320,6 +327,19 @@ def sync_vocab(states: dict) -> None:
         names.update(toks)
         for t in toks:
             per_word.setdefault(t, set()).add(dom)
+    for eid, ws in (aliases or {}).items():
+        dom = str(eid).split(".", 1)[0]
+        if dom in _VOCAB_EXCLUDED_DOMAINS:
+            continue
+        for w in (ws or []):
+            w = str(w or "").strip()
+            if not w:
+                continue
+            per_word.setdefault(w, set()).add(dom)   # 别名整串优先（用户亲手写的叫法）
+            names.add(w)
+            for t in _name_tokens(w):
+                per_word.setdefault(t, set()).add(dom)
+                names.add(t)
     global _dyn_vocab, ALL_DEVICES, ALL_SET, _ALL_MIN2, _dyn_domains, _dyn_lookup
     # 动态词之间等长平局给**码点序**次键（注册表派生顺序不代表作者意图，但必须可
     # 复现）；静态表与动态词合并时**静态在前**，与 KNOWN_DEVICES 同一确定性判据。

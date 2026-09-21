@@ -40,6 +40,7 @@ from .nlu.fast_path import (END_DIALOGUE_INTENT, FastPath, Plan,
                             attribute_domain_target, is_end_dialogue, is_pronoun,
                             is_whole_house, split_compound)
 from .nlu import targets as T
+from . import capability
 from .nlu.canonical import canonical
 from .nlu import music
 from .nlu import creation
@@ -548,7 +549,8 @@ class Pipeline:
         self._vocab_ts = now
         try:
             # 直读 ha 状态缓存（私有属性同进程只读；无 await，关键路径零成本）。
-            T.sync_vocab(getattr(self.ha, "_states", {}) or {})
+            T.sync_vocab(getattr(self.ha, "_states", {}) or {},
+                         getattr(self.ha, "_entity_alias", {}) or {})
             # 2026-09-30 区域表同步（数据集对账）：真实区域名喂 targets._area_like
             # ——主卧/阳台/玄关 等不带区域尾字的区名自此可析出（ha_client 已按
             # WS config/area_registry/list 维护 _areas，与查询族同源）。
@@ -632,6 +634,9 @@ class Pipeline:
                 return Reply(self._overbroad_say(ob), "clarify", ok=False,
                              trace=[f"过宽目标拦截:{ob}"])
             ask = self._confirm_ask(plan, origin)
+            if ask is not None:
+                return ask
+            ask = self._ambiguity_ask(plan, origin)   # v1.1.4 多台同名先问
             if ask is not None:
                 return ask
             ok, speech = await self.executor.run(plan)
@@ -1764,6 +1769,85 @@ class Pipeline:
         self._origin_ts[origin] = time.time()
         return Reply(f"接下来要{act}，说「确认」执行，或说「取消」放弃", "confirm",
                      ok=True, trace=list(getattr(plan, "trace", [])) + ["确认环:挂起"])
+
+    # ── v1.1.4 第 3 步：歧义目标确认（复用 P2-13 的 是/否/改口三态）────────
+    _AMB_INTENTS = ("TurnDeviceOn", "TurnDeviceOff", "PauseDevice",
+                    "AdjustDeviceAttribute", "SetDeviceMode")
+
+    def _ambiguity_ask(self, plan, origin):
+        """点了名、却在本家匹配到**多台不同设备**时先问一句再动。
+
+        真机 A 组实锤：指定 name=平开窗，实际命中的是隔壁「测试平开窗」——回执
+        修好了"谎报成功"，但**动错设备**这件事仍然会发生。这里把计划收窄到最优
+        候选（全等名 > 同区域 > 首个）后借现成确认环问一句，不新增答案解析器，也
+        不动集成端。没点名的整区/全屋批量语义**不问**（那是用户明确的批量意图）。
+        """
+        try:
+            if plan is None or plan.intent not in self._AMB_INTENTS:
+                return None
+            if not self.settings.get("dialog.confirm_ambiguous", True):
+                return None
+            origin = origin or "panel"
+            if origin in self._confirm:
+                return None                      # 已有挂起问题（含风险确认）不叠加
+            args = plan.args or {}
+            tgt = args.get("target")
+            if not isinstance(tgt, list) or not tgt:
+                return None
+            if not any(str((d or {}).get("name") or "").strip()
+                       for sl in tgt if isinstance(sl, dict)
+                       for d in (sl.get("devices") or [])):
+                return None
+            cands = capability.resolve_candidates(
+                getattr(self.ha, "_states", {}) or {},
+                getattr(self.ha, "_entity_area", {}) or {}, tgt)
+            names = [str(((c.get("attributes") or {}).get("friendly_name"))
+                         or c.get("entity_id", "")) for c in cands]
+            distinct = list(dict.fromkeys([n for n in names if n]))
+            if len(cands) < 2 or len(distinct) < 2:
+                return None
+            pick = self._best_candidate(cands, tgt)
+            self._narrow_target(args, pick)
+            self._confirm[origin] = {"plan": plan, "ts": time.time()}
+            self._origin_ts[origin] = time.time()
+            others = "、".join(distinct[:3]) + ("…" if len(distinct) > 3 else "")
+            logger.info("[级联] 歧义目标 %d 台（%s）→ 收窄到「%s」并挂确认环",
+                        len(distinct), others, pick)
+            return Reply(
+                f"家里有 {len(distinct)} 台设备名字相近（{others}）。"
+                f"我先对「{pick}」执行，说「确认」就这么办，说「取消」先不动。",
+                "confirm", ok=True,
+                trace=list(getattr(plan, "trace", [])) + [f"确认环:歧义{len(distinct)}"])
+        except Exception:  # noqa: BLE001 判定故障=照旧执行，绝不新增哑口
+            logger.exception("[级联] 歧义确认异常（放行）")
+            return None
+
+    @staticmethod
+    def _best_candidate(cands, tgt) -> str:
+        """全等名 > 同区域（resolve_candidates 已按区域滤过）> 首个。返回实体名。"""
+        want = ""
+        for sl in (tgt or []):
+            for d in ((sl or {}).get("devices") or []):
+                want = str((d or {}).get("name") or "").strip()
+                if want:
+                    break
+            if want:
+                break
+        for c in cands:
+            if str(((c.get("attributes") or {}).get("friendly_name")) or "") == want:
+                return want
+        return str(((cands[0].get("attributes") or {}).get("friendly_name"))
+                   or cands[0].get("entity_id", ""))
+
+    @staticmethod
+    def _narrow_target(args, name) -> None:
+        """把计划目标名换成选中的那台：集成端 6 级匹配第 1 级就是**全等**，
+        因此传精确 friendly_name 即可锁死设备，不需要新槽位形态。"""
+        for sl in (args.get("target") or []):
+            for d in ((sl or {}).get("devices") or []):
+                if isinstance(d, dict) and str(d.get("name") or "").strip():
+                    d["name"] = name
+                    return
 
     async def _confirm_answer(self, text: str, origin: str) -> Optional[Reply]:
         origin = origin or "panel"
