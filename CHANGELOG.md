@@ -1,4 +1,21 @@
 # 变更日志
+
+## [1.1.5] - 2026-09-22 本地 TTS 多引擎档（Matcha/MeloTTS 入可选，台架四引擎横评驱动）
+- 台架横评（bench_tts_20260921，同句集/2线程/x86）：Kokoro v1.1 fp32 RTF 0.264（现役基线）
+  / MeloTTS zh_en 0.197 / **Matcha zh-en 0.022、首包 32ms** / ZipVoice distill 0.902~1.658
+  且回调非增量（首包≈整句合成时长）——**ZipVoice 出局不接入**（CPU 流式预算不可达）。
+- 新增本地引擎档 `tts.provider=local_matcha|local_melo`（均单女声 sid0，模型
+  models.lock 两条目；Matcha 官方包不含声码器，model_store 新增 **extra_files** 二跳
+  下载（sha256/多源/import 逃生门同纪律），vocos 缺失=sherpa C++ 构造终止进程，
+  故入 required_files 硬闸 + 加载前显式存在性检查双保险）。
+- 引擎换绑：web 切档后 models 循环（≤60s）换绑；在飞合成让位（旧嗓干完本轮，
+  不断播报）；句级缓存键加引擎维度；音色指纹非 Kokoro 档前缀带本档名（换引擎=
+  换嗓=HA 盘缓存键轮换），Kokoro 保持 `local:` 前缀存量键不轮换。
+- resolve_sid：默认音色按引擎档取（Kokoro sid28 残留对单音色档=预期态，静默钳 0
+  不逐轮 WARN；其余越界照报）。未知 local_* 值回落 kokoro（与云档双吃同纪律）。
+- Web：引擎下拉新增两档；单音色档禁用音色表+隐藏自定义音色上传行（仅 Kokoro 可用）。
+- 冒烟：matcha/melo 真包真机合成通过（试听样本 zh/mix 双语境），全量回归基线差分零新增。
+
 ## [1.1.4] - 2026-09-21 读回 HA 语音别名 + 逐实体状态回执 + 同名设备先问一句
 
 本版三条都来自 2026-09-21 真机台架实测，不是推测需求。

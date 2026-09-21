@@ -53,5 +53,45 @@
       "https://gh-proxy.com/https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_1.tar.bz2",
       "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_1.tar.bz2"
     ]
+  },
+  "tts_matcha_zh_en": {
+    "display_name": "TTS · Matcha 中英（单女声，台架 RTF 0.022 最快档）",
+    "default_provider": false,
+    "tarball": "matcha-icefall-zh-en.tar.bz2",
+    "sha256": "271b804af570400d3bcdcb53bf6e53cc9f75180ee763b9f13eb5eaf2b0d086ef",
+    "top_dir": "matcha-icefall-zh-en",
+    "required_files": ["model-steps-3.onnx", "tokens.txt", "lexicon.txt", "vocos-16khz-univ.onnx"],
+    "size_mb": 79,
+    "_file_note": "2026-09-21 四引擎台架横评入选（bench_tts_20260921，同句集 2 线程）：中文 RTF 0.022 / 首包 32ms / 加载 0.4s，性能远超现役 Kokoro(0.264)。包内**不含声码器**（README 明示需另取 vocos-16khz-univ.onnx），走 extra_files 二跳下载；缺声码器时 sherpa C++ 构造直接终止进程（非 Python 异常，台架实锤），故 vocos 入 required_files 硬闸。作者 dengcunqin，单说话人 sid0。",
+    "extra_files": [
+      {
+        "file": "vocos-16khz-univ.onnx",
+        "sha256": "b599142a1fb8ff03de3e84ac35ff537c619e56f4267a6fe894851a42844acf9e",
+        "size_mb": 54,
+        "urls": [
+          "https://gh-proxy.com/https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models/vocos-16khz-univ.onnx",
+          "https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models/vocos-16khz-univ.onnx"
+        ]
+      }
+    ],
+    "urls": [
+      "https://gh-proxy.com/https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/matcha-icefall-zh-en.tar.bz2",
+      "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/matcha-icefall-zh-en.tar.bz2"
+    ]
+  },
+  "tts_melo_zh_en": {
+    "display_name": "TTS · MeloTTS 中英（单女声，RTF 0.197）",
+    "default_provider": false,
+    "tarball": "vits-melo-tts-zh_en.tar.bz2",
+    "sha256": "e58351ed7149f290a54534538badd4077cdbe6fddc964b24d0bee870415d1514",
+    "top_dir": "vits-melo-tts-zh_en",
+    "required_files": ["model.onnx", "tokens.txt", "lexicon.txt", "dict/jieba.dict.utf8"],
+    "voices_count": 1,
+    "size_mb": 167,
+    "_file_note": "2026-09-21 横评入选：中文 RTF 0.197 / 首包 103ms，略快于 Kokoro 但同量级，定位=低内存备选（fp32 model.onnx 优先，int8 仅作加载回落）。单说话人 sid0。",
+    "urls": [
+      "https://gh-proxy.com/https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-melo-tts-zh_en.tar.bz2",
+      "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-melo-tts-zh_en.tar.bz2"
+    ]
   }
 }

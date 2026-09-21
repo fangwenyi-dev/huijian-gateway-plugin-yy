@@ -16,8 +16,8 @@
      v1.0.42 的 #1d1750「过紫」与更早 #030712「过黑」均已作废，勿回潮 -->
 <meta name="theme-color" content="#071426">
 <title>慧尖HA语音插件</title>
-<link rel="stylesheet" href="css/huijian.css?v=1.1.4">
-<link rel="stylesheet" href="css/voice.css?v=1.1.4">
+<link rel="stylesheet" href="css/huijian.css?v=1.1.5">
+<link rel="stylesheet" href="css/voice.css?v=1.1.5">
 </head>
 <body>
 <!-- 「星辰大海」背景层（与网关加载项同一设计标准/同一固定种子＝同一片天）：
@@ -101,12 +101,15 @@
       <div><label class="hj-field">引擎</label>
         <select id="tts_provider">
           <option value="local_kokoro">本地 · Kokoro 多语（默认，离线可用）</option>
+          <option value="local_matcha">本地 · Matcha 中英（单女声，最快档，离线可用）</option>
+          <option value="local_melo">本地 · MeloTTS 中英（单女声，离线可用）</option>
           <option value="cloud">云端 · OpenAI 兼容 /audio/speech</option>
         </select></div>
-      <div><label class="hj-field">音色（本地）</label><select id="tts_sid"></select></div>
+      <div><label class="hj-field">音色（本地）</label><select id="tts_sid"></select>
+        <span class="hint" id="tts_single_hint" style="display:none">该引擎单女声（音色表与自定义音色仅 Kokoro 可用）</span></div>
       <div style="flex:0 1 140px"><label class="hj-field">语速 0.6–2.0</label><input id="tts_speed" type="number" step="0.05" min="0.6" max="2"></div>
     </div>
-    <div class="hj-row" style="align-items:flex-end">
+    <div class="hj-row" style="align-items:flex-end" id="tv_row">
       <div style="flex:1 1 240px"><label class="hj-field">自定义音色上传（单路 .bin，尺寸自动校验；v1.1 RAW 音色库直接可用）</label><input id="tv_file" type="file" accept=".bin"></div>
       <div style="flex:0 0 auto"><button type="button" class="act gray" id="tv_upload">上传</button></div>
       <div style="flex:0 0 auto"><button type="button" class="act gray" id="tv_scan">重扫生效</button></div>
@@ -309,7 +312,7 @@
 
 <script>
 "use strict";
-const CURRENT_VERSION = "1.1.4";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
+const CURRENT_VERSION = "1.1.5";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
 // 音色表 = kokoro-multi-lang-v1_1 官方 103 sid 全表（k2-fsa docs sid 表实证；
 // 标注=对用户上传试听样本的 CAM++ 声纹溯源榜：v1_1 不含晓晓/云扬，
 // sid18=zf_026 女声最似晓晓(0.454 全场最近)，sid81=zm_055 最似云扬）
@@ -495,8 +498,9 @@ async function loadSettings(){
   // "cloud_openai_compat"）。旧版严格判等：手改的 cloud_openai_compat 下拉框
   // 显示"本地"而实际跑云，且下一次任意保存把它静默改写成 local_kokoro（云配
   // 置丢失、行为翻转、无警告）。放宽为前缀判等，未知值如实提示不静默。
-  $("#tts_provider").value = String(S.tts.provider||"").startsWith("cloud") ? "cloud" : "local_kokoro";
-  if (S.tts.provider && !["local_kokoro","cloud","cloud_openai_compat"].includes(S.tts.provider))
+  $("#tts_provider").value = String(S.tts.provider||"").startsWith("cloud") ? "cloud"
+    : ["local_matcha","local_melo"].includes(S.tts.provider) ? S.tts.provider : "local_kokoro";
+  if (S.tts.provider && !["local_kokoro","local_matcha","local_melo","cloud","cloud_openai_compat"].includes(S.tts.provider))
     toast("tts.provider 值 "+S.tts.provider+" 未知，已按云档显示；保存将写入下拉框选项");
   $("#stt_cloud_base").value = S.stt.cloud?.base_url||""; $("#stt_cloud_model").value = S.stt.cloud?.model||"";
   $("#tts_cloud_base").value = S.tts.cloud?.base_url||""; $("#tts_cloud_voice").value = S.tts.cloud?.voice||"";
@@ -529,6 +533,11 @@ function syncBoxes(){
   $("#sttCloudBox").style.display = $("#stt_provider").value==="cloud"?"":"none";
   $("#sttLocalBox").style.display = $("#stt_provider").value==="cloud"?"none":"";
   $("#ttsCloudBox").style.display = $("#tts_provider").value==="cloud"?"":"none";
+  // v1.1.5：matcha/melo 单音色档——音色表与自定义音色上传只服务 Kokoro，禁用防误配
+  const _single = ["local_matcha","local_melo"].includes($("#tts_provider").value);
+  $("#tts_sid").disabled = _single;
+  $("#tts_single_hint").style.display = _single ? "" : "none";
+  $("#tv_row").style.display = _single ? "none" : "";
 }
 $("#stt_provider").onchange=syncBoxes; $("#tts_provider").onchange=syncBoxes;
 function syncNluWarn(){ $("#nluOffWarn").style.display = $("#nlu_enabled").checked ? "none" : ""; }
@@ -1024,6 +1033,6 @@ $("#regenBtn").onclick = async ()=>{
   try { await post("/api/token/regenerate",{}); toast("已重置"); loadEndpoints(); } catch(e){ toast(e.message); }
 };
 </script>
-<script src="js/starsky.js?v=1.1.4"></script>
+<script src="js/starsky.js?v=1.1.5"></script>
 </body>
 </html>

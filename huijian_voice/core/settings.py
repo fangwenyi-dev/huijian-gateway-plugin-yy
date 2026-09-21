@@ -36,7 +36,9 @@ DEFAULTS: dict[str, Any] = {
         "cloud": {"provider": "", "base_url": "", "api_key": "", "model": ""},
     },
     "tts": {
-        "provider": "local_kokoro",           # local_kokoro | cloud
+        "provider": "local_kokoro",           # local_kokoro | local_matcha | local_melo | cloud
+                                              # （v1.1.5 新增 matcha/melo 本地档，均单女声 sid0；
+                                              # 未知 local_* 引擎读侧回落 kokoro）
         # v1.0.65（深审 F11 定案）："cloud" 为正统拼法（Web UI 唯一写入值）；
         # "cloud_openai_compat" 为历史别名（存量 settings.json 与测试仍用，
         # 引擎读侧 startswith("cloud") 双吃，UI 显示已放宽——不再静默翻转）。

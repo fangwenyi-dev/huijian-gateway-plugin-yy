@@ -251,7 +251,7 @@ class ModelStore:
                 return self.is_ready(key)
         if imported.exists():
             if self._extract(key, imported, entry):
-                return True
+                return self._ensure_extra_files(key, entry)
         # 2) 三级 URL 下载
         if not auto:
             self._set_status(key, state="manual", pct=0, detail="自动下载关闭；放包到 import/ 或开开关")
@@ -260,8 +260,68 @@ class ModelStore:
         dest_tar.parent.mkdir(parents=True, exist_ok=True)
         ok = self._download_any(entry, dest_tar)
         if ok and self._extract(key, dest_tar, entry):
-            return True
+            return self._ensure_extra_files(key, entry)
         return self.is_ready(key)
+
+    # ── extra_files（v1.1.5：主 tarball 之外的附属单文件）──────────
+    # 动机：matcha-icefall-zh-en 官方包**不含声码器**（README 明示另取
+    # vocos-16khz-univ.onnx），而缺 vocoder 时 sherpa C++ 构造直接终止进程
+    # （台架实锤，非可捕获异常）——附属文件必须与主包同级、且就绪判定硬闸。
+    # 纪律与主包一致：sha256 校验、tmp+replace 原子落盘、多源回退、
+    # import/ 同名文件优先（手动逃生门）。落盘目录=解包实际目录（top_dir 探测）。
+    def _resolved_dir(self, key: str, entry: dict) -> Path:
+        top = entry.get("top_dir", "")
+        cand = self.models_dir / key / top
+        if top and cand.is_dir():
+            return cand
+        return self.models_dir / key
+
+    def _ensure_extra_files(self, key: str, entry: dict) -> bool:
+        extras = entry.get("extra_files") or []
+        if not extras:
+            return True
+        base = self._resolved_dir(key, entry)
+        base.mkdir(parents=True, exist_ok=True)
+        for ef in extras:
+            name = ef.get("file") or ""
+            if not name:
+                continue
+            dest = base / name
+            imp = self.import_dir / name
+            if dest.exists() and imp.exists():
+                imp.unlink(missing_ok=True)   # 导入口残留让位已就位文件（防反复重下）
+            if dest.exists():
+                if not ef.get("sha256") or self._sha_ok(dest, ef["sha256"]):
+                    continue
+                dest.unlink(missing_ok=True)  # 坏字节：重取（导入口→urls 同序）
+            if imp.exists():
+                try:
+                    tmp = dest.with_suffix(dest.suffix + ".tmp")
+                    tmp.write_bytes(imp.read_bytes())
+                    os.replace(tmp, dest)
+                    if not ef.get("sha256") or self._sha_ok(dest, ef["sha256"]):
+                        continue
+                    dest.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            pseudo = {"_key": key, "tarball": name, "sha256": ef.get("sha256", ""),
+                      "urls": ef.get("urls", []), "size_mb": ef.get("size_mb", 0)}
+            if not self._download_any(pseudo, dest):
+                self._set_status(key, state="incomplete",
+                                 detail=f"附属文件 {name} 获取失败（可放 import/{name}）")
+                return False
+        return self.is_ready(key)
+
+    @staticmethod
+    def _sha_ok(path: Path, expected: str) -> bool:
+        try:
+            h = hashlib.sha256()
+            with open(path, "rb") as f:
+                for blk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(blk)
+            return h.hexdigest() == expected
+        except OSError:
+            return False
 
     def ensure_async(self, key: str, force: bool = False) -> None:
         if (t := self._threads.get(key)) and t.is_alive():

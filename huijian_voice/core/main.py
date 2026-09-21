@@ -152,7 +152,7 @@ class Service:
             need_asr = str(self.settings.get("stt.provider", "")).startswith("local")
             need_tts = str(self.settings.get("tts.provider", "")).startswith("local")
             need = ([self.asr.model_key] if need_asr else []) + \
-                   (["tts_kokoro_multilang"] if need_tts else [])
+                   ([self.tts.model_key()] if need_tts else [])
             try:
                 pend = [k for k in need if not self.store.is_ready(k)]
                 if pend:
@@ -168,7 +168,9 @@ class Service:
                         # v4.2：回落档在载/用户切了 local_model——主档就绪即原地换绑
                         # （推理在飞 rebind 返回 False，60s 后下一轮再试，不断会话）
                         await loop.run_in_executor(None, self.asr.rebind_primary)
-                    if need_tts and not self.tts.ready():
+                    # v1.1.5：判据收紧为"当前档引擎在载"——web 切 TTS 引擎后
+                    # 本循环负责换绑（在飞让位在 inner 内处理，不断会话）
+                    if need_tts and not self.tts.ready_for_current_provider():
                         await loop.run_in_executor(None, self.tts.ensure_loaded)
                     # TextCNN 预热（小模型，镜像内置）
                     if self.settings.get("nlu.textcnn_enabled", True):

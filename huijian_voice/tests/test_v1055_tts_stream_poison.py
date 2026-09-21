@@ -604,7 +604,8 @@ def test_recheck_warm_cache_replays_without_synth():
     eng.ensure_loaded = fake_load
     calls = []
     eng._synth = lambda *a: (calls.append(a), b"\x00\x00" * 480)[1]
-    eng._cache[("开灯了。", 28, 1.0)] = ([FRAME], len(FRAME))   # 预热真 28 嗓
+    # v1.1.5：缓存键含引擎档（跨引擎音频不得互串）
+    eng._cache[("local_kokoro", "开灯了。", 28, 1.0)] = ([FRAME], len(FRAME))   # 预热真 28 嗓
     eng._encode = lambda pcm: [b"SHOULD-NOT-BE-USED"]
     out, e = _collect(eng, "开灯了。")
     assert calls == [], "命中回放不得再合成"

@@ -139,8 +139,13 @@ def test_ensure_loaded_clears_cache_only_on_generation_change():
     src = (ROOT / "core" / "tts.py").read_text(encoding="utf-8")
     i = src.index("def ensure_loaded")
     body = src[i:src.index("def unload", i)]
-    j = body.index("_cache.clear()")
-    before = body[:j]
-    assert "keep" in before or "_loaded_gen_key" in before, (
-        "P6a 回潮：_cache.clear() 又回到无条件执行（同代重载白丢整张 LRU，"
-        "违背 unload 侧『省电档秒回旧帧』承诺）")
+    # v1.1.5：合法清缓存口=两类换代——引擎换绑（跨引擎）与模型换代（gen-key）。
+    # P6a 纪律不变：**任何** _cache.clear() 前后必须紧邻这两类换代判据之一。
+    idxs = [n for n, ln in enumerate(body.splitlines()) if "_cache.clear()" in ln]
+    assert idxs, "清缓存口整体消失？"
+    lines = body.splitlines()
+    for n in idxs:
+        ctx = "\n".join(lines[max(0, n - 8):n + 4])
+        assert ("引擎换绑" in ctx or "_loaded_gen_key" in ctx or "换代" in ctx), (
+            "P6a 回潮：_cache.clear() 脱离换代判据裸执行（同代重载白丢整张 LRU，"
+            "违背 unload 侧『省电档秒回旧帧』承诺）")

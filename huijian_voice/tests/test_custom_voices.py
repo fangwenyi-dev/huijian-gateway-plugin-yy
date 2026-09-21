@@ -101,11 +101,13 @@ def test_resolve_sid_int_name_and_guards(tmp_path):
     eng.settings = _Settings({"tts.sid": "老婆"})
     assert eng.resolve_sid() == 5
     eng.settings = _Settings({"tts.sid": "不存在"})
-    assert eng.resolve_sid() == 28                     # 名字查不到 → 回落默认
-    eng.settings = _Settings({"tts.sid": "99"})
-    assert eng.resolve_sid() == 28                     # 越界 → 回落默认
+    assert eng.resolve_sid() == 0                      # v1.1.5：默认 28 对本假件(n=20)
+    eng.settings = _Settings({"tts.sid": "99"})        # 越界→回落默认→默认仍越界→钳 0
+    assert eng.resolve_sid() == 0                      # （旧形态把越界 28 直接送 generate）
     eng.settings = _Settings({})
-    assert eng.resolve_sid() == 28                     # 未配置 → 默认
+    assert eng.resolve_sid() == 0
+    eng_k = _engine(tmp_path, {"tts.sid": "999"}, n_spk=103)
+    assert eng_k.resolve_sid() == 28                   # 真 Kokoro 规模：默认 28 有效
 
 
 # ── voices_status / HTTP ───────────────────────────────────────

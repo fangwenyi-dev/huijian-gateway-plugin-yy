@@ -182,6 +182,20 @@ _DROP_TOLERANCE_RATIO = 0.2     # 相对项：多付/实付 超此比按撒谎�
 
 _DEFAULT_SID = 28   # 本地定案默认音色 zf_044（用户拍板 2026-09-19；云失败回落唯一用嗓，音色归属条款③）
 
+# ── v1.1.5 多本地引擎（provider → 模型键 / 默认音色）─────────────────────
+# 2026-09-21 四引擎台架横评（bench_tts_20260921）：Kokoro 维持默认（103 音色）；
+# Matcha 中英（RTF 0.022/首包 32ms）与 MeloTTS 中英（RTF 0.197）入可选档，
+# 均为**单说话人 sid0**。ZipVoice 实测 RTF 0.9~1.66+首包 2.1s+非增量回调出局
+# （CPU 流式预算不可达，接入=现场半速卡顿观感）。
+PROVIDER_MODEL_KEYS = {
+    "local_kokoro": "tts_kokoro_multilang",
+    "local_matcha": "tts_matcha_zh_en",
+    "local_melo": "tts_melo_zh_en",
+}
+
+def _default_sid_for(provider: str) -> int:
+    return _DEFAULT_SID if provider == "local_kokoro" else 0
+
 # ── v1.0.55 云失败钉扎（现场 2026-09-12「还是有两个 tts 音色」主修）──────
 # 旧形态：每一轮都先试云、失败再本地——云持续不可用时 = **逐句换嗓**（男⇄女
 # 随机交替）+ **逐句白等云超时**（first_byte 6s）双惩罚。钉扎 = 一次云失败后
@@ -731,6 +745,24 @@ class TtsEngine:
         except Exception:
             return 0
 
+    def _provider(self) -> str:
+        """当前本地引擎档（v1.1.5）：local_kokoro/local_matcha/local_melo；
+        未知 local_* 值回落 kokoro（与云档 startswith 双吃同纪律，配置写坏
+        绝不哑播）。云档判定在调用侧（startswith("cloud")）。"""
+        prov = str(self.settings.get("tts.provider", "local_kokoro"))
+        return prov if prov in PROVIDER_MODEL_KEYS else "local_kokoro"
+
+    def model_key(self) -> str:
+        """当前档需要就绪的模型键（main._loop_models 预下载/换绑判定用）。"""
+        return PROVIDER_MODEL_KEYS[self._provider()]
+
+    def loaded_provider(self) -> str:
+        """在载引擎档；未标（旧桩/升级瞬态）按历史默认 kokoro。"""
+        return getattr(self, "_loaded_prov", None) or "local_kokoro"
+
+    def ready_for_current_provider(self) -> bool:
+        return self._tts is not None and self.loaded_provider() == self._provider()
+
     def voices_status(self) -> dict:
         """管理面板：官方音色数 / 当前注入的自定义区（名→sid）/ 投递目录预览。
         纯读，不触发加载。"""
@@ -789,10 +821,14 @@ class TtsEngine:
                                raw, _DEFAULT_SID)
         n = int(getattr(self._tts, "num_speakers", 0) or 0)
         if sid is None or sid < 0 or (n and sid >= n):
-            if sid is not None:
-                logger.warning("[TTS] tts.sid=%s 越界（本机共 %d 音色），回落 %d",
-                               raw, n, _DEFAULT_SID)
-            sid = _DEFAULT_SID
+            # v1.1.5：默认音色按引擎档取。Kokoro 的 sid28 残留对单音色档是
+            # **预期态**（切引擎但没改音色），静默钳 0 不 WARN；其余越界照报。
+            if sid is not None and sid != _DEFAULT_SID:
+                logger.warning("[TTS] tts.sid=%s 越界（本机共 %d 音色），回落默认",
+                               raw, n)
+            sid = _default_sid_for(self._provider())
+            if n and sid >= n:
+                sid = 0
         return sid
 
     def _speed(self) -> float:
@@ -898,18 +934,22 @@ class TtsEngine:
                 fp += ":fb"
             return fp
         tag = "u"
+        prov = self._provider()
         try:
-            entry = self.store.lock_entry("tts_kokoro_multilang") if self.store else {}
+            entry = self.store.lock_entry(PROVIDER_MODEL_KEYS[prov]) if self.store else {}
             tag = str(entry.get("sha256") or "")[:8] or "u"
         except Exception:  # noqa: BLE001 假件 store/异常形制：指纹照出，回落 u
             pass
+        # v1.1.5：引擎档入指纹前缀——Kokoro 保持 "local:"（存量钉与 HA 盘缓存
+        # 键不轮换），matcha/melo 各带本名；换引擎=换嗓=换键，模板句必重合成。
+        prefix = "local" if prov == "local_kokoro" else prov
         # v1.0.65（深审 F6）：自定义区并入**内容摘要**（merge 已算好的官方包+
         # 各音色 (name,size,mtime) 指纹串的短哈希）——旧版只取数量 c{len}，
         # 同名重传改良版 bin（数量/sid/模型 lock sha 全不变）指纹不动 →
         # HA 盘缓存（无 TTL）模板句永久 v1 嗓。c{len}+h{hash8}：数量与内容双钉。
         cfp = getattr(self, "_custom_fp", "")
         ch = hashlib.sha1(cfp.encode("utf-8")).hexdigest()[:8] if cfp else "0"
-        return (f"local:sid{self.resolve_sid()}+c{len(self._custom_sids)}h{ch}"
+        return (f"{prefix}:sid{self.resolve_sid()}+c{len(self._custom_sids)}h{ch}"
                 f"+{speed_s}+m{tag}")
 
     def reset_cloud_pin(self, reason: str = "") -> None:
@@ -962,7 +1002,9 @@ class TtsEngine:
         # 线程堆满 = asr/textcnn/to_thread 全排队，F3 想根治的"下载中饿死
         # STT"以新形态存活。引擎级单飞：已在飞行，后来者**立即**回 False
         # （本轮按"模型未就绪"截尾收束，日志点名），不陪等不占线程。
-        if self._tts is not None:
+        # v1.1.5：判据从"有引擎"收紧为"有**当前档**引擎"——web 切 provider 后
+        # 旧引擎在载也必须走门（inner 里做在飞避让式换绑）。
+        if self.ready_for_current_provider():
             return True
         with self._load_gate:
             if self._loading:
@@ -988,69 +1030,127 @@ class TtsEngine:
         # 占 1 个 executor 线程堵在锁上（默认池 8 线程），云档不预载 = 首次试听
         # 即"下载中全栈饿死 STT"。store 的 per-key single-flight（其 F2 纪律）
         # 本就防重复下载，本锁只护对象换装。
-        if self._tts is not None:
+        prov = self._provider()
+        if self._tts is not None and self.loaded_provider() == prov:
             return True
-        key = "tts_kokoro_multilang"
+        if self._tts is not None:
+            # v1.1.5 引擎换绑（web 切 provider）：在飞合成让位在载引擎先干完，
+            # 本轮保持旧嗓（不断播报），下一轮 models 循环（≤60s）再换。
+            with self._lock:
+                if self._busy or self._round_busy:
+                    logger.info("[TTS] 引擎换绑 %s→%s 推迟（合成/整轮在飞），下一轮重试",
+                                self.loaded_provider(), prov)
+                    return True
+                self._tts = None
+            self._cache.clear()
+            self._cache_bytes = 0
+            logger.warning("[TTS] 引擎换绑：%s → %s（句级缓存清空，跨引擎音频不作废即用）",
+                           self.loaded_provider(), prov)
+        key = PROVIDER_MODEL_KEYS[prov]
         d = self.store.model_dir_for(key)
         if not d:
             try:
                 if self.store.ensure(key):
                     d = self.store.model_dir_for(key)
             except Exception as e:  # noqa: BLE001 下载异常按未就绪上报，不穿锁
-                logger.error("[TTS] kokoro 模型下载异常: %s", e)
+                logger.error("[TTS] %s 模型下载异常: %s", key, e)
         if not d:
-            logger.error("[TTS] kokoro 模型未就绪")
+            # 现场 grep 口径（v1052 钉）：kokoro 行字面量不得改写，他档另起新行
+            if prov == "local_kokoro":
+                logger.error("[TTS] kokoro 模型未就绪")
+            else:
+                logger.error("[TTS] %s 模型未就绪", key)
             return False
         with self._lock:
-            if self._tts is not None:      # double-check：下载期间他人已装载
+            if self._tts is not None and \
+                    self.loaded_provider() == prov:   # double-check
                 return True
             t_load = time.perf_counter()          # v1.0.52：一次性加载耗时观测
             try:
                 import sherpa_onnx as so
-                k = so.OfflineTtsKokoroModelConfig()
-                # 两代命名都认：int8 包主模型叫 model.int8.onnx、fp32 包叫
-                # model.onnx（现役定案=v1.1 fp32；导入口放哪种都收，审查换包免改码）。
-                main = d / "model.int8.onnx"
-                if not main.exists():
-                    main = d / "model.onnx"
-                k.model = str(main)
-                # 自定义音色注入（投递口 const.TTS_VOICES_DIR）
-                self._custom_sids, self._custom_fp, voices_path = \
-                    {}, "", str(d / "voices.bin")
-                try:
-                    _off_n = self._voices_count(key)
-                    merged, names, skipped, cont_fp = merge_custom_voices(
-                        d / "voices.bin", const.TTS_VOICES_DIR,
-                        d / "voices_custom_merged.bin", _off_n)
-                    if names:
-                        voices_path, self._custom_sids = str(merged), names
-                        self._custom_fp = cont_fp
-                        logger.info("[TTS] 自定义音色 %d 路已注入（sid≥%d）：%s",
-                                    len(names), _off_n,
-                                    "、".join(sorted(names)))
-                    for why in skipped:
-                        logger.warning("[TTS] 自定义音色被跳过：%s", why)
-                except Exception as e:      # 注入失败绝不拖垮引擎
-                    logger.warning("[TTS] 自定义音色合并失败（用官方表）：%s", e)
-                k.voices = voices_path
-                k.tokens = str(d / "tokens.txt")
-                lex = [str(d / f) for f in ("lexicon-zh.txt", "lexicon-us-en.txt") if (d / f).exists()]
-                k.lexicon = ",".join(lex)
-                if (d / "espeak-ng-data").is_dir():
-                    k.data_dir = str(d / "espeak-ng-data")
-                if (d / "dict").is_dir():
-                    k.dict_dir = str(d / "dict")
-                k.lang = ""   # 语种自动：kokoro v1.1 multi-lang 前端自带中英路由。
-                # 定案依据（2026-09-13 台架 lang 矩阵）：lang="zh" 时 espeak-ng 走 cmn
-                # 通道，英文片段全部 "Failed to set eSpeak-ng voice" 静默丢弃——
-                # 即现场遗留"英文实体名片段致句中缺词/整句静音"根因；lang="" 在
-                # 纯中/中英混/纯英三型均完整产出（v1.0/v1.1 两代包同验，纯中零差异）。
                 model_cfg = so.OfflineTtsModelConfig()
-                model_cfg.kokoro = k
+                main = None
+                voices_path = None
+                self._custom_sids, self._custom_fp = {}, ""   # 非 kokoro 档不注入
+                if prov == "local_matcha":
+                    # Matcha 中英（dengcunqin 导出）：声学+独立声码器，单说话人。
+                    # vocos 缺失=sherpa C++ 构造终止进程（台架实锤），required_files
+                    # 已在 lock 硬闸，这里再显式存在性检查兜手动导入的残缺树。
+                    if not (d / "vocos-16khz-univ.onnx").exists():
+                        logger.error("[TTS] matcha 缺声码器 vocos-16khz-univ.onnx"
+                                     "（模型页重新下载或放 import/）")
+                        return False
+                    k = so.OfflineTtsMatchaModelConfig()
+                    main = d / "model-steps-3.onnx"
+                    k.acoustic_model = str(main)
+                    k.vocoder = str(d / "vocos-16khz-univ.onnx")
+                    k.tokens = str(d / "tokens.txt")
+                    k.lexicon = str(d / "lexicon.txt")
+                    if (d / "espeak-ng-data").is_dir():
+                        k.data_dir = str(d / "espeak-ng-data")
+                    model_cfg.matcha = k
+                    fsts = [f for f in ("number-zh.fst", "date-zh.fst", "phone-zh.fst")
+                            if (d / f).exists()]
+                elif prov == "local_melo":
+                    k = so.OfflineTtsVitsModelConfig()
+                    # fp32 优先（音质定案同 Kokoro 弃 int8 口径）；仅 fp32 缺失才回落
+                    main = d / "model.onnx"
+                    if not main.exists():
+                        main = d / "model.int8.onnx"
+                    k.model = str(main)
+                    k.tokens = str(d / "tokens.txt")
+                    k.lexicon = str(d / "lexicon.txt")
+                    if (d / "dict").is_dir():
+                        k.dict_dir = str(d / "dict")
+                    if (d / "espeak-ng-data").is_dir():
+                        k.data_dir = str(d / "espeak-ng-data")
+                    model_cfg.vits = k
+                    fsts = [f for f in ("number.fst", "date.fst", "phone.fst",
+                                        "new_heteronym.fst") if (d / f).exists()]
+                else:
+                    k = so.OfflineTtsKokoroModelConfig()
+                    # 两代命名都认：int8 包主模型叫 model.int8.onnx、fp32 包叫
+                    # model.onnx（现役定案=v1.1 fp32；导入口放哪种都收，审查换包免改码）。
+                    main = d / "model.int8.onnx"
+                    if not main.exists():
+                        main = d / "model.onnx"
+                    k.model = str(main)
+                    # 自定义音色注入（投递口 const.TTS_VOICES_DIR）
+                    voices_path = str(d / "voices.bin")
+                    try:
+                        _off_n = self._voices_count(key)
+                        merged, names, skipped, cont_fp = merge_custom_voices(
+                            d / "voices.bin", const.TTS_VOICES_DIR,
+                            d / "voices_custom_merged.bin", _off_n)
+                        if names:
+                            voices_path, self._custom_sids = str(merged), names
+                            self._custom_fp = cont_fp
+                            logger.info("[TTS] 自定义音色 %d 路已注入（sid≥%d）：%s",
+                                        len(names), _off_n,
+                                        "、".join(sorted(names)))
+                        for why in skipped:
+                            logger.warning("[TTS] 自定义音色被跳过：%s", why)
+                    except Exception as e:      # 注入失败绝不拖垮引擎
+                        logger.warning("[TTS] 自定义音色合并失败（用官方表）：%s", e)
+                    k.voices = voices_path
+                    k.tokens = str(d / "tokens.txt")
+                    lex = [str(d / f) for f in ("lexicon-zh.txt", "lexicon-us-en.txt") if (d / f).exists()]
+                    k.lexicon = ",".join(lex)
+                    if (d / "espeak-ng-data").is_dir():
+                        k.data_dir = str(d / "espeak-ng-data")
+                    if (d / "dict").is_dir():
+                        k.dict_dir = str(d / "dict")
+                    k.lang = ""   # 语种自动：kokoro v1.1 multi-lang 前端自带中英路由。
+                    # 定案依据（2026-09-13 台架 lang 矩阵）：lang="zh" 时 espeak-ng 走 cmn
+                    # 通道，英文片段全部 "Failed to set eSpeak-ng voice" 静默丢弃——
+                    # 即现场遗留"英文实体名片段致句中缺词/整句静音"根因；lang="" 在
+                    # 纯中/中英混/纯英三型均完整产出（v1.0/v1.1 两代包同验，纯中零差异）。
+                    model_cfg.kokoro = k
+                    fsts = [f for f in ("number-zh.fst", "date-zh.fst", "phone-zh.fst")
+                            if (d / f).exists()]
                 model_cfg.num_threads = _engine_threads()   # v1.0.92：默认仍 2，可 env 显式抬
                 model_cfg.provider = "cpu"
                 cfg = so.OfflineTtsConfig(model=model_cfg)
-                fsts = [f for f in ("number-zh.fst", "date-zh.fst", "phone-zh.fst") if (d / f).exists()]
                 if fsts:
                     cfg.rule_fsts = ",".join(str(d / f) for f in fsts)
                 tts = so.OfflineTts(cfg)
@@ -1066,10 +1166,13 @@ class TtsEngine:
                 # 音素通道，缺数据目录时 sherpa 只在 stderr 报
                 # "Failed to set eSpeak-ng voice"、Python 侧全句静默失败
                 # （2026-09-09 播报静音事故）。此处显式点名，不再让人猜。
-                if not (d / "espeak-ng-data").is_dir():
+                # v1.1.5：判据仅 Kokoro——melo 包结构本就不带 espeak-ng-data
+                # （英文走自身 lexicon），matcha 带之（2026-09-21 冒烟实锤误报）。
+                if prov == "local_kokoro" and not (d / "espeak-ng-data").is_dir():
                     logger.error("[TTS] 模型目录缺 espeak-ng-data/：含英文字母的句子"
                                  "将合成失败，请重导 kokoro-multi-lang 完整包")
                 self._tts = tts
+                self._loaded_prov = prov
                 # v1.0.85（P6a）：旧形态每次成功加载都无条件清缓存——与 unload
                 # 侧「同代重载输出逐比特一致、缓存刻意保留（省电档秒回旧帧）」
                 # 的承诺直接矛盾：省电档首个含 miss 的轮一过，整张 LRU 白丢。
@@ -1082,8 +1185,16 @@ class TtsEngine:
                     self._cache.clear(); self._cache_bytes = 0   # 换代模型：旧音频作废
                 self._loaded_gen_key = _gk
                 self.last_used = time.time()
-                logger.warning("[TTS] Kokoro multi-lang 已加载（%d 音色），sid=%s",
-                               tts.num_speakers, self.settings.get("tts.sid", _DEFAULT_SID))
+                if prov == "local_kokoro":
+                    logger.warning("[TTS] Kokoro multi-lang 已加载（%d 音色），sid=%s",
+                                   tts.num_speakers,
+                                   self.settings.get("tts.sid", _DEFAULT_SID))
+                else:
+                    _lbl = {"local_matcha": "Matcha zh-en",
+                            "local_melo": "MeloTTS zh_en"}[prov]
+                    logger.warning("[TTS] %s 已加载（%d 音色），sid=%s",
+                                   _lbl, tts.num_speakers,
+                                   self.settings.get("tts.sid", _default_sid_for(prov)))
                 # v1.0.52：加载耗时独立成行（现场"首句慢"是加载还是合成，一眼可辨）
                 logger.info("[TTS] Kokoro 引擎就绪，耗时 %dms",
                             int((time.perf_counter() - t_load) * 1000))
@@ -1202,6 +1313,9 @@ class TtsEngine:
                     if engine_out is not None:
                         engine_out["engine"] = "local:fallback"
         loop = asyncio.get_running_loop()
+        # v1.1.5：句级缓存键含引擎档——换绑让位窗口内旧引擎在载时，同 (句,sid,
+        # 语速) 不得跨引擎复用音频；引擎维度入键，宁缺不混。
+        prov_key = self._provider()
         # 音色归属定案（用户 2026-09-18）：本地档=web 设定音色（数字或自定义主名）；
         # 云档=云端对应音色（可选）；**云失败回落=固定默认本地音色 sid28**——回落是
         # 应急通道，取最保守单音色，不跟 web 配置（可能是自定义名/云专属号）漂移。
@@ -1223,7 +1337,7 @@ class TtsEngine:
                 # 流式路 raise+弃缓存+重连且不自愈）。真词句空产出照报截断，
                 # 定案②语义不丢。
                 continue
-            key = (sent, sid, speed)
+            key = (prov_key, sent, sid, speed)
             hit = self._cache_get(key)
             if hit is not None:
                 self._cache.move_to_end(key)
@@ -1261,7 +1375,7 @@ class TtsEngine:
                             engine_out["engine"] = f"local:sid{sid}" + (
                                 "(云钉扎)" if eng0 == "local:pinned"
                                 else ("(云回落)" if eng0 == "local:fallback" else ""))
-                        key = (sent, sid, speed)      # 复核后本句键重算
+                        key = (prov_key, sent, sid, speed)   # 复核后本句键重算
                         hit = self._cache_get(key)
                         if hit is not None:
                             self._cache.move_to_end(key)
