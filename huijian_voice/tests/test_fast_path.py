@@ -76,7 +76,10 @@ MATRIX = {
 }
 
 GUARD_NONE = [
-    "空调调到26度",          # 空调缺区域守卫（原 v1.5 语义保留）
+    "开空调",                # 空调缺区域守卫（v1.1.1 起**只管开关族**：模式/属性
+                             # 句按数据集放行同域扇出，正例钉在
+                             # test_dataset_vocab_batch2.test_bare_ac_guard_
+                             # narrowed_to_power_lane）
     "客厅现在多少度",        # 放行给查询族
     "现在几点了",
     "创建自动化",

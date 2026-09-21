@@ -281,12 +281,28 @@ def test_mode_verb_parity(fp, sentence, mode):
     assert dev["name"] == "空调" and dev["domains"] == ["climate"], (sentence, p.args)
 
 
-def test_bare_ac_mode_still_refused_by_area_guard(fp):
-    """动词拉齐**不得**把「空调缺区域」设计性守卫一起放开：裸空调模式句仍拒收
-    （与 打开空调 同权，宁如实失败不猜哪台空调）。"""
-    assert _match(fp, "空调调成制冷模式") is None
-    assert _match(fp, "空调调成除湿模式") is None
+def test_bare_ac_guard_narrowed_to_power_lane(fp):
+    """v1.1.1 数据集对账：「空调缺区域」守卫**收窄到开关族**，模式/属性句放开。
+
+    原 v1.1.0 钉把三条裸空调句一律拒收，代价是数据集 14 句打死（「空调调成制冷
+    模式」② 已正确产 SetDeviceMode cool 仍被整句作废、「把空调风速调大」T1
+    SetFanSpeed 1.00 同样作废）。分域判据不是放松红线，而是把红线钉在真正的
+    实害面上：
+      · 开关（Turn*）=改变**别人家**设备电源态，跨房间实害且不可一样撤回 → 仍拒；
+      · 模式/参数=全屋同向语义一致，且数据集对这些句的期望 target 本就是
+        {domains:[climate]} 无区域（单空调户是唯一 sane 解），说错了一句口令即可
+        改回 → 放行。
+    多空调户的可见影响已在 v1.1.1 发布说明单列，由产品负责人签字确认。
+    """
+    for sentence, mode in (("空调调成制冷模式", "cool"), ("空调调成除湿模式", "dry")):
+        p = _match(fp, sentence)
+        assert p is not None and p.intent == "SetDeviceMode", (sentence, p)
+        assert p.args.get("mode") == mode, (sentence, p.args)
+        dev = p.args["target"][0]["devices"][0]
+        assert dev["name"] == "空调" and dev["domains"] == ["climate"], (sentence, p.args)
+    # 开关族一字未动：这两句复现 2026-09 事故形态（扇出+假成功），必须继续 MISS
     assert _match(fp, "打开空调") is None
+    assert _match(fp, "关闭空调") is None
 
 
 # ── 护栏：加词后区域名与新设备词不得跨词根互吞（与一期同型风险）──────
@@ -351,3 +367,39 @@ def test_equal_length_ties_follow_authoring_order():
     assert two_char.index("幕布") < two_char.index("投影"), two_char[:12]
     assert T.KNOWN_DEVICES == sorted(T._STATIC_ORDER, key=len, reverse=True)
 
+
+
+# ── ⑦ v1.1.0 发版后审计：近音档不得把「动作/模式语素」糊成设备词（误执行类）──
+# 「内倒」neidao --⑦--> 「雷达」leida（滑窗 "neida" 距 1 ≤ tol，雷达=v1.0.42 家电族
+# 收的毫米波存在传感器）⇒「打开内倒」曾产 TurnDeviceOn name=雷达：用户要的是窗内倒
+# 动作，设备却去开传感器并回「办好了」= 误执行 + 谎报；「通风」→「筒灯」同型。
+# 与「亮度→浴霸」同族，修法同 _ATTR_NO_PINYIN：动作/模式语素禁入近音档（
+# targets._ACTION_NO_PINYIN），宁 MISS 也不猜设备（v1.0.69 宁如实失败红线）。
+HALLUCINATION_CASES = [("内倒", "雷达"), ("客厅内倒", "雷达"), ("通风", "筒灯")]
+
+
+@pytest.mark.parametrize(("frag", "banned"), HALLUCINATION_CASES)
+def test_action_morphemes_never_become_device_names(frag, banned):
+    a, n, _s = T.parse_target(frag)
+    assert n != banned and banned not in str((a, n)), (frag, a, n)
+
+
+@pytest.mark.parametrize(("sentence", "banned"), [
+    ("打开内倒", "雷达"), ("打开客厅内倒", "雷达"), ("打开通风", "筒灯"),
+])
+def test_hallucination_never_reaches_the_plan(fp, sentence, banned):
+    """端到端：计划里绝不能出现被近音糊出来的设备名（那会被集成真的执行掉）。"""
+    p = _match(fp, sentence)
+    assert p is None or banned not in str(p.args), (sentence, p.args if p else None)
+
+
+def test_pinyin_blocklist_does_not_blind_literal_window_words(fp):
+    """禁区只关近音档——字面窗词/机型动作道必须原样工作（防"修复"做成新失能）。"""
+    for s, want in (("打开内倒窗", "内倒窗"), ("打开内开内倒窗", "内开内倒窗"),
+                    ("打开客厅上悬窗", "上悬窗"), ("打开办公室推拉窗", "推拉窗")):
+        p = _match(fp, s)
+        assert p is not None and p.intent == "ControlWindow", s
+        tgt = p.args["target"][0]
+        assert tgt["devices"][0]["name"] == want, (s, tgt)
+    q = _match(fp, "开窗器内倒")                      # 内倒作为**动作**的既有车道
+    assert q is not None and q.args.get("action") == "a", q.args

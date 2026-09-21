@@ -28,6 +28,97 @@ from .query import looks_local_query
 
 logger = logging.getLogger("huijian.fastpath")
 
+# ── v1.1.1 属性车道批次常量（#3 色名表 / #4 绝对值哨兵）───────────────
+# 「动词+绝对值」的中间哨兵：字面表阶段还不知道设备族，属性名一律挂哨兵，
+# 等 _build_plan 解析出 target.domains 后再由 resolve_absolute_lane 落名。
+# 哨兵绝不出 _build_plan（test_v1111 test_sentinel_attribute_never_escapes 钉）。
+_ABSOLUTE = "@absolute"
+
+# 色名 → 色值。**hex 全部取自慧尖数据集 assistant 真值**（两份数据集 16 条
+# color 样本逐字抄录，不自创色卡）：暖色 #FFAA80 / 暖白色 #FFEFD5 / 冷色
+# #80FFFF / 紫 #8000FF / 红 #FF0000 / 黄 #FFFF00 / 绿 #00FF00 / 蓝 #0000FF /
+# 白 #FFFFFF。集成端 light.color 处理器（parse_delta 认 # 前缀 → RGBColor）。
+_COLOR_HEX = {"暖白色": "#FFEFD5", "暖色": "#FFAA80", "冷色": "#80FFFF",
+              "白色": "#FFFFFF", "红色": "#FF0000", "橙色": "#FFA500",
+              "黄色": "#FFFF00", "绿色": "#00FF00", "青色": "#00FFFF",
+              "蓝色": "#0000FF", "紫色": "#8000FF", "粉色": "#FFC0CB"}
+# 橙/青/粉=同族话术补全（数据集未穷举，形态与已列色词同构）；长词排前，
+# Python re 交替是最左优先，「暖白色」必须在「暖色」之前。
+_COLOR_ALT = "|".join(sorted(_COLOR_HEX, key=len, reverse=True))
+
+# ②③ 设备前缀剥离的补充候选：具名表 KNOWN_DEVICES_PREFIX 全表 ≥2 字，单字
+# 泛设备词「灯」进那张表会污染 parse_target 评分与窗族守卫（targets 侧表另有
+# 用途，不改），而「灯光」既不在表内也非 KNOWN_DEVICE——数据集原形「把灯调成
+# 红色」「把灯光调成白色」两条路都够不到，只在本层动作表重扫时补这两个头。
+_BARE_DEV_HEADS = ("灯光", "灯")
+
+
+def _strip_heads() -> tuple:
+    """②③ 剥离候选（具名表 ∪ 裸设备词，长词在前）。每次现读：动态词表会扩表。"""
+    return tuple(sorted(set(T.KNOWN_DEVICES_PREFIX) | set(_BARE_DEV_HEADS),
+                        key=len, reverse=True))
+
+
+def resolve_color_delta(word: str) -> Optional[str]:
+    """色名词 → #RRGGBB；表外词 None。
+
+    绝不把中文原词当 delta 发上 wire——集成 parse_delta 只认 `#` 前缀，
+    其余形态落 invalid value，用户听到的是"没听懂"却已占用一次执行。
+    """
+    return _COLOR_HEX.get((word or "").strip())
+
+
+def color_word(hex_value: str) -> Optional[str]:
+    """#RRGGBB → 中文色名（播报侧回显）；表外 None。hex 念进 TTS 是噪音。"""
+    h = (hex_value or "").upper()
+    return next((w for w, v in _COLOR_HEX.items() if v.upper() == h), None)
+
+
+def resolve_absolute_lane(domains: list, raw_delta: str) -> Optional[tuple]:
+    """「开到/调到+绝对值」按设备族落属性名 → (attribute, delta)；族落不了 None。
+
+    域×属性名一律取集成 register_adjustment 的合法组合（intent_adjust_attribute
+    逐条核）：light=brightness/color/temperature、cover=position（**只支持
+    number**）、fan/humidifier/number 各一档、climate 由**单位**裁决（%/档→
+    fan_speed；度形温度句根本不进本车道，见 _ACTION_PATTERNS 绝对值表注释）。
+    climate 裸数属"26 度还是 26% 风速"二义，与 v1.0.69 红线同判据：宁如实
+    MISS，绝不猜（猜错=动了另一台设备的另一个属性）。
+
+    单位口径（parse_delta/calc_target 实测）：只有 档/挡 会改变集成侧分支
+    （level），% 对 number 分支等价 → 剥掉，免得把 "50%" 发成非法形态。
+    """
+    m = re.match(r"^\s*(一半|百分之([零一二三四五六七八九十百]+)|(\d+(?:\.\d+)?))\s*"
+                 r"([%％]|档|挡)?\s*$", (raw_delta or "").strip())
+    if not m:
+        return None
+    unit = m.group(4) or ""
+    if m.group(1) == "一半":
+        num = "50"                        # 「调一半」=绝对 50（v1.0.63 同口径）
+    elif m.group(3):
+        num = m.group(3)
+    else:
+        try:
+            n = int(T.cn2num(m.group(2)))
+        except (TypeError, ValueError):
+            return None                   # 数词表外形态（"百分之最大"）一律不接管
+        num = str(n)
+    if not re.fullmatch(r"\d+(\.\d+)?", num):
+        return None
+    if not 0 <= float(num) <= 100 and unit not in ("档", "挡"):
+        return None                       # 0-100 之外不属百分比/亮度/开合度语义
+    doms = [d for d in (domains or []) if d]
+    if "climate" in doms:
+        if unit in ("%", "％", "档", "挡"):
+            return ("fan_speed", num + unit if unit in ("档", "挡") else num)
+        return None
+    for dom, attr in (("light", "brightness"), ("cover", "position"),
+                      ("fan", "fan_speed"), ("humidifier", "humidity"),
+                      ("number", "value")):
+        if dom in doms:
+            return (attr, num + unit if unit in ("档", "挡") else num)
+    return None                           # 认不出族（switch/media_player/纯区域…）
+
+
 # ── 动作词匹配规则（v1.5 L207-255 逐字移植；(pattern, intent, action_val)）──
 _ACTION_PATTERNS: list[tuple[re.Pattern, str, Any]] = [
     # v1.0.40 修复（A1）：交替式必须**长词在前**——Python re 交替是"最左优先"而非
@@ -44,15 +135,33 @@ _ACTION_PATTERNS: list[tuple[re.Pattern, str, Any]] = [
     # 音乐带（2026-09-12）：后接音乐补语（播放/音乐/歌）时让位——"停止播放"
     # 是播控令不是窗帘暂停；裸"暂停/停"与"暂停窗帘"仍走窗户语义。
     (re.compile(r"^(暂停|停止|停)(?!(?:播放|音乐|歌|一?首))"), "ControlWindow", "pause"),
-    (re.compile(r"^(开到|打开到|关到)\s*(\d+)"), "AdjustDeviceAttribute", {"attribute": "position", "delta": "$2"}),
+    # v1.1.1 #4：「动词+绝对值」不再硬编码 position——属性名由**设备族**落
+    # （resolve_absolute_lane），认不出族如实 MISS。旧形态实测：「客厅灯开到50」
+    # 发 position 给 light=unsupported；「把窗帘调到50%」动词表够不到掉进 T1
+    # Turn，50% 整个丢光（假动作）。
+    # 尾随 度/℃ 一律**不接管**（负向预查）：温度绝对值有自己的成熟车道
+    # （上方 度 形专表 + T1 AdjustTemperature → HassClimateSetTemperature，
+    # golden「设为26度」钉在案），抢过来只会把无设备的上下文句判成 MISS。
+    (re.compile(r"^(?:开到|打开到|关到|调到|调为|调成|设为|设到|设成|改成|换成)\s*"
+                r"(\d+(?:\.\d+)?\s*(?:[%％]|档|挡)?|百分之[零一二三四五六七八九十百]+)"
+                r"(?![\d.零一二三四五六七八九十百%％档挡度℃Ff])"),
+     "AdjustDeviceAttribute", {"attribute": _ABSOLUTE, "delta": "$1"}),
+    # v1.1.1 对账：「(窗帘)调一半」形（数据集 position 50）。动词表**不收裸
+    # 调/设**——实测「调高亮度到80%」被 ^调+一半 之外的裸调截走后 rest 只剩
+    # 「高亮度到80%」，属性词快捷够不到 → 80% 丢光（test_context_chain_absolute
+    # _brightness 钉的就是这条链路），故 一半 单独成行。
+    (re.compile(r"^(?:调|整|拉)(?:到)?一半"), "AdjustDeviceAttribute",
+     {"attribute": _ABSOLUTE, "delta": "50"}),
     # v1.0.63 开向位置缺陷修复（golden 建表实锤）：旧表只有 ^关一半——
     # 「窗帘开一半」被 L91 ^(开|打开) 吃成 TurnDeviceOn、"一半"当残渣剥掉，
     # 用户要半开得到**全开**：错误结果比拒答危险（cover 开向/关向的"一半"
     # 目标位都是绝对 50，同 executor 既有落地，仅入口漏配）。
-    (re.compile(r"^(打开|开|关)(?:到)?一半"), "AdjustDeviceAttribute", {"attribute": "position", "delta": "50"}),
+    # v1.1.1 #4：同批改走族落表（帘→position、灯→brightness、空调无歧义属性→MISS）。
+    (re.compile(r"^(?:打开|开|关)(?:到)?一半"), "AdjustDeviceAttribute",
+     {"attribute": _ABSOLUTE, "delta": "50"}),
     (re.compile(r"^(调到|调为|调成|温度调到|温度设到|温度设为)\s*(\d+)\s*度"), "AdjustDeviceAttribute", {"attribute": "temperature", "delta": "$2"}),
     (re.compile(r"^(调到|调为|调成|温度调到|温度设到|温度设为)\s*([零一二三四五六七八九十百]+)\s*度?"), "AdjustDeviceAttribute", {"attribute": "temperature", "delta": "cn:$2"}),
-    (re.compile(r"^(亮度设到|亮度调到|调亮到|亮度)\s*(\d+)"), "AdjustDeviceAttribute", {"attribute": "brightness", "delta": "$2"}),
+    (re.compile(r"^(亮度设到|亮度调到|调亮到|调暗到|亮度)\s*(\d+)"), "AdjustDeviceAttribute", {"attribute": "brightness", "delta": "$2"}),
     (re.compile(r"^(亮度调到百分之)\s*([零一二三四五六七八九十百]+)"), "AdjustDeviceAttribute", {"attribute": "brightness", "delta": "cn:$2"}),
     (re.compile(r"^(亮度|调亮到)\s*百分之\s*([零一二三四五六七八九十百]+)"), "AdjustDeviceAttribute", {"attribute": "brightness", "delta": "cn:$2"}),
     (re.compile(r"^(调到百分之)\s*(\d+)"), "AdjustDeviceAttribute", {"attribute": "brightness", "delta": "$2"}),
@@ -63,11 +172,33 @@ _ACTION_PATTERNS: list[tuple[re.Pattern, str, Any]] = [
     (re.compile(r"^(dimmer|dim)"), "AdjustDeviceAttribute", {"attribute": "brightness", "delta": "-20"}),
     # ── 色温调节 ──
     (re.compile(r"^(色温调到|色温|调到)\s*(\d+)\s*[kK]"), "AdjustDeviceAttribute", {"attribute": "color_temperature", "delta": "$2"}),
-    (re.compile(r"^(暖光|暖色)"), "AdjustDeviceAttribute", {"attribute": "color_temperature", "delta": "2700"}),
-    (re.compile(r"^(冷光|冷色)"), "AdjustDeviceAttribute", {"attribute": "color_temperature", "delta": "6500"}),
+    # v1.1.1 #2/#3：色温相对档锚点（零宽，**不吃字**——属性词得留在 rest 里给
+    # _ATTR_ONLY 认族，见 _build_plan 属性词快捷）。过去「把色温调高一点」字面表
+    # 全够不到 ⇒ 掉 T1 判成 AdjustTemperature ⇒ 去动**空调**（跨域误执行，与
+    # 「内倒→雷达」同级）。锚上 color_temperature 后由扫描器出 ±500K（=集成
+    # light.temperature 的 supported_adjust_step），域恒 light，不再串到 climate。
+    (re.compile(r"^(?=色温)"), "AdjustDeviceAttribute", {"attribute": "color_temperature"}),
+    (re.compile(r"^(暖光)"), "AdjustDeviceAttribute", {"attribute": "color_temperature", "delta": "2700"}),
+    (re.compile(r"^(冷光)"), "AdjustDeviceAttribute", {"attribute": "color_temperature", "delta": "6500"}),
     (re.compile(r"^(白光|自然光)"), "AdjustDeviceAttribute", {"attribute": "color_temperature", "delta": "4000"}),
+    # v1.1.1 #3：色名词句（数据集 16 条 color 原形全 MISS 的收口）。色词在句尾，
+    # 引导动词 调成/设为 由 ②③ 前缀剥离后的 suffix 带进来，故动词段可选；
+    # delta 先落**色词原词**，_build_plan 末端 resolve_color_delta 折成 #hex
+    # （表外色词当场 MISS，不把中文发上 wire）。
+    (re.compile(r"^(?:调成|调到|设为|设成|改成|换成|变成|换到|切到|切换为)?("
+                + _COLOR_ALT + r")调?"), "AdjustDeviceAttribute",
+     {"attribute": "color", "delta": "$1"}),
     (re.compile(r"^(风大一点|风大些|加大风速|风量大一点|风量加大)"), "AdjustDeviceAttribute", {"attribute": "fan_speed", "delta": "+1"}),
     (re.compile(r"^(风小一点|风小些|减小风速|风量小一点|风量减小|风量调小)"), "AdjustDeviceAttribute", {"attribute": "fan_speed", "delta": "-1"}),
+    # v1.1.1 对账：风速/湿度**零宽锚点**（与 ^色温 同构，只定属性不吃字）——
+    # 数值与档位交 _ATTR_ONLY/_scan_delta 落，目标域由属性词快捷给（裸 风量/
+    # 风速 句无设备名，旧实现产 target 缺失的 Adjust，集成 slot_schema
+    # Required('target') 当场 Invalid）。
+    (re.compile(r"^(?=风速|风量)"), "AdjustDeviceAttribute", {"attribute": "fan_speed"}),
+    (re.compile(r"^(?=湿度)"), "AdjustDeviceAttribute", {"attribute": "humidity"}),
+    # v1.1.1 对账：开合度相对档锚点（数据集原形「把窗帘位置调低」=position -20，
+    # 原表只有 开到N/关到N 绝对形，"位置调低"整句 MISS）。
+    (re.compile(r"^(?=位置|开合度)"), "AdjustDeviceAttribute", {"attribute": "position"}),
     (re.compile(r"^(制热模式|制热|加热模式|加热)"), "SetDeviceMode", {"mode": "heat"}),
     (re.compile(r"^(制冷模式|制冷|冷却模式|冷却)"), "SetDeviceMode", {"mode": "cool"}),
     (re.compile(r"^(除湿模式|除湿|抽湿)"), "SetDeviceMode", {"mode": "dry"}),
@@ -78,11 +209,11 @@ _ACTION_PATTERNS: list[tuple[re.Pattern, str, Any]] = [
     # 「客厅空调换成制冷」落 MISS，而同一句换成「设为睡眠模式」却能出档——同源话术
     # 两套动词表=口径漂移，按 preset 族的长表统一（保留裸「改」在最后，交替序优先
     # 长动词，防「改成」被「改」截成残段）。
-    (re.compile(r"^(调到|调为|调成|设为|设成|改成|换成|切换为|切换到|切到|切为|换到|变为|进入|改)\s*(制热|制热模式|加热|加热模式)"), "SetDeviceMode", {"mode": "heat"}),
-    (re.compile(r"^(调到|调为|调成|设为|设成|改成|换成|切换为|切换到|切到|切为|换到|变为|进入|改)\s*(制冷|制冷模式|冷却|冷却模式)"), "SetDeviceMode", {"mode": "cool"}),
-    (re.compile(r"^(调到|调为|调成|设为|设成|改成|换成|切换为|切换到|切到|切为|换到|变为|进入|改)\s*(除湿|除湿模式|抽湿)"), "SetDeviceMode", {"mode": "dry"}),
-    (re.compile(r"^(调到|调为|调成|设为|设成|改成|换成|切换为|切换到|切到|切为|换到|变为|进入|改)\s*(送风|送风模式|通风)"), "SetDeviceMode", {"mode": "fan_only"}),
-    (re.compile(r"^(调到|调为|调成|设为|设成|改成|换成|切换为|切换到|切到|切为|换到|变为|进入|改)\s*(自动|自动模式)"), "SetDeviceMode", {"mode": "auto"}),
+    (re.compile(r"^(调到|调为|调成|调至|调整为|调整到|设置为|设定为|设定成|设置成|设为|设成|设置|设定|改成|换成|切换为|切换到|切到|切为|换到|变为|进入|改)\s*(制热模式|制热|加热模式|加热)"), "SetDeviceMode", {"mode": "heat"}),
+    (re.compile(r"^(调到|调为|调成|调至|调整为|调整到|设置为|设定为|设定成|设置成|设为|设成|设置|设定|改成|换成|切换为|切换到|切到|切为|换到|变为|进入|改)\s*(制冷模式|制冷|冷却模式|冷却)"), "SetDeviceMode", {"mode": "cool"}),
+    (re.compile(r"^(调到|调为|调成|调至|调整为|调整到|设置为|设定为|设定成|设置成|设为|设成|设置|设定|改成|换成|切换为|切换到|切到|切为|换到|变为|进入|改)\s*(除湿模式|除湿|抽湿)"), "SetDeviceMode", {"mode": "dry"}),
+    (re.compile(r"^(调到|调为|调成|调至|调整为|调整到|设置为|设定为|设定成|设置成|设为|设成|设置|设定|改成|换成|切换为|切换到|切到|切为|换到|变为|进入|改)\s*(送风模式|送风|通风)"), "SetDeviceMode", {"mode": "fan_only"}),
+    (re.compile(r"^(调到|调为|调成|调至|调整为|调整到|设置为|设定为|设定成|设置成|设为|设成|设置|设定|改成|换成|切换为|切换到|切到|切为|换到|变为|进入|改)\s*(自动模式|自动)"), "SetDeviceMode", {"mode": "auto"}),
     # ── 场景模式（v1.0.30 收编 060401/061701 语料：五拆之外的 HA preset 档；
     #    mode 直发英文规范名，集成端 set_preset_mode 通道按实体能力校验）──
     (re.compile(r"^(调到|调为|调成|设为|设成|改成|换成|切换为|切换到|切到|切为|换到|变为|进入)\s*(?:的)?(睡眠|睡觉|夜间)(?:模式|档位|挡位|档)?$"), "SetDeviceMode", {"mode": "sleep"}),
@@ -159,23 +290,53 @@ _DELTA_SCANNERS: dict[str, list[tuple[re.Pattern, Any]]] = {
         (re.compile(r"(?:一半|半数)"), "50"),
         (re.compile(r"(亮一点|亮一些|调亮|亮些|大一点|大一些|高一点|高一些|调高)"), "+20"),
         (re.compile(r"(暗一点|暗一些|调暗|暗些|小一点|小一些|低一点|低一些|调低)"), "-20"),
+        # v1.1.1 对账：极值档（与 fan_speed 同族缺口；集成 calc_target 的
+        # special 分支认 max/min，medium/auto 反而 unsupported，故只补这两个）
+        (re.compile(r"(最大|最亮|最高|满亮度)"), "max"),
+        (re.compile(r"(最小|最暗|最低)"), "min"),
     ],
     "temperature": [
         (re.compile(r"(?:调到|调为|调成|设为|设到|变成)\s*(\d+)\s*度"), "$1"),
+        # v1.1.1 对账：「调高N度」是相对档，必须先于裸 `(\d+)度` 收——否则
+        # 「把空调温度调高2度」被裸形吃成绝对 2℃（数据集期望 +2）。动词与数值
+        # 允许 ≤6 字间隙（「调高空调温度5度」数据集原形，中间隔着设备词）。
+        (re.compile(r"(?:调高|升高|提高|加大|调大)[^0-9]{0,6}?(\d+)\s*度"), "+$1"),
+        (re.compile(r"(?:调低|降低|减小|减少|调小)[^0-9]{0,6}?(\d+)\s*度"), "-$1"),
         (re.compile(r"(\d+)\s*度"), "$1"),
         (re.compile(r"(?:调到|设为)\s*([零一二三四五六七八九十百]+)\s*度"), "cn:$1"),
         (re.compile(r"(高一点|高一些|暖一点)"), "+1"),
         (re.compile(r"(低一点|低一些|凉一点)"), "-1"),
     ],
+    "humidity": [
+        (re.compile(r"湿度\s*(?:调到|设为|设到|为|成|到|至)?\s*(\d+)"), "$1"),
+        (re.compile(r"(大一点|大一些|高一点|调高)"), "+10"),
+        (re.compile(r"(小一点|小一些|低一点|调低)"), "-10"),
+    ],
     "fan_speed": [
         (re.compile(r"风[量速]?\s*(?:调到|设为|为|成|到|至)?\s*(\d+)"), "$1"),
-        (re.compile(r"(大一点|大一些|大些|加大|调大)"), "+1"),
-        (re.compile(r"(小一点|小一些|小些|减小|调小)"), "-1"),
+        # v1.1.1 对账：极值档与"调大/调小"补进（数据集 fan_speed 三档实测
+        # max/high/low，本表此前只有 ±1 数值档 → 「风速调到最大」整句 MISS）。
+        # 顺序即优先级：带"一点"的渐进档（既有承诺，golden「风量大一点」=+1）
+        # 必须排在裸 调大/加大 之前，否则相对档被极值档截胡。
+        (re.compile(r"(最大|最高|最强|满档|满风)"), "max"),
+        (re.compile(r"(最小|最低|最弱)"), "min"),
+        (re.compile(r"(大一点|大一些|大些|高一点|高一些|高些)"), "+1"),
+        (re.compile(r"(小一点|小一些|小些|低一点|低一些|低些)"), "-1"),
+        (re.compile(r"(调大|加大|增大|调高|提高)"), "high"),
+        (re.compile(r"(调小|减小|减少|调低|降低)"), "low"),
     ],
     "color_temperature": [
         (re.compile(r"(\d+)\s*[kK]"), "$1"),
-        (re.compile(r"(暖光|暖色|暖一点)"), "2700"),
-        (re.compile(r"(冷光|冷色|冷一点)"), "6500"),
+        # v1.1.1 #3：相对档排在绝对色温档之前——「色温调暖一点」要的是"再暖
+        # 一档"（±500K=集成 light.temperature 的 supported_adjust_step），不是
+        # 一步跳到 2700K 最暖档；「暖光/冷光」这类无"调"字的档位词仍走绝对值。
+        # 只认**显式**形态（调X / X一点），裸单字不收：「色温高的灯」不是指令。
+        (re.compile(r"(调高|升高|提高|变高|高一点|高一些|大一点|冷一点|冷一些"
+                    r"|凉一点|凉一些|变冷|调冷)"), "+500"),
+        (re.compile(r"(调低|降低|变小|变低|低一点|低一些|小一点|暖一点|暖一些"
+                    r"|变温|调温|调暖)"), "-500"),
+        (re.compile(r"(暖光|暖色)"), "2700"),
+        (re.compile(r"(冷光|冷色)"), "6500"),
         (re.compile(r"(白光|自然光)"), "4000"),
     ],
     "position": [
@@ -184,6 +345,10 @@ _DELTA_SCANNERS: dict[str, list[tuple[re.Pattern, Any]]] = {
         # v1.0.63：开向"一半"同判（把X开一半/开一半 残扫车道），绝对位 50。
         (re.compile(r"(?:打开|开|关)一半"), "50"),
         (re.compile(r"打开到\s*(\d+)"), "$1"),
+        # v1.1.1 对账：相对档（「把窗帘位置调低」数据集 = -20；步进 10% 的
+        # 集成侧 supported_adjust_step 取一档 = 20，与亮度 ±20 同口径）
+        (re.compile(r"(调高|开大|高一点|大一点|大一些|开一些)"), "+20"),
+        (re.compile(r"(调低|关小|低一点|小一点|小一些|关一些)"), "-20"),
     ],
 }
 
@@ -192,16 +357,58 @@ _DELTA_SCANNERS: dict[str, list[tuple[re.Pattern, Any]]] = {
 # 掉进 parse_target 质量门→miss→fallback（浴霸幻觉被 ⑦ 收紧堵掉后显形）。
 # 属性句的正确形态=属性域目标+delta 走 _apply_context 上下文继承回上一设备。
 _ATTR_ONLY = re.compile(
-    r"^\s*([\u4e00-\u9fff]{1,4}?(?:室|厅|房|间|区|馆|楼))?[的]?((?:亮度|色温|温度|风量|风速|位置|开合度))"
-    r"(?:调|整)*(?:高|低|亮|暗|大|小)?(?:到|至|为|成)?\s*(\d{1,3})?\s*[%％]?\s*(?:一半)?\s*(?:一点|一些|点|些)?\s*$")
+    # v1.1.1 数据集对账：连接动词段原为 `(?:调|整)*(?:到|至|为|成)?`，「湿度设为
+    # 50%」「风速调到最大」这类 设为/调到 复合形整段不认（掉 parse_target 撞
+    # 质量门=整句 MISS）；极值档（最大/最小）与"一半"根本没位置。改具名分段，
+    # area/attr 仍占 1/2 号组（既有 group(1)/group(2) 引用不破）。
+    r"^\s*([\u4e00-\u9fff]{1,4}?(?:室|厅|房|间|区|馆|楼))?[的]?"
+    r"(亮度|色温|温度|风量|风速|湿度|位置|开合度)"
+    r"(调到|调为|调成|调至|设为|设到|设成|设置为|设置到|设置成|调整到|升高到|降低到"
+    r"|调|设|整|到|至|为|成)*"
+    r"(?P<dir>高|低|亮|暗|大|小|暖|凉|冷|热)?"
+    r"(到|至|为|成)?"
+    r"\s*(?P<val>\d{1,3})?\s*(?:[%％度℃])?\s*"
+    r"(?P<sp>百分之[零一二三四五六七八九十百]+|一半|最大|最小|最高|最低|最强|最弱|满档)?\s*"
+    r"(?:的)?(?:一点|一些|点|些)?\s*$")
 _ATTR_DOMAIN = {"亮度": "light", "色温": "light", "温度": "climate",
-                "风量": "climate", "风速": "climate", "位置": "cover", "开合度": "cover"}
+                "风量": "climate", "风速": "climate", "湿度": "humidifier",
+                "位置": "cover", "开合度": "cover"}
+# 属性名→域（v1.1.1 对账）：裸属性句（「风速调到最大」「设置为制冷」）剥完
+# 数值后既无设备名也无区域，必须由**级联层**补一个同域过滤目标——
+# 集成 slot_schema Required('target') 缺槽即 Invalid（整句白丢）。
+# 不在 _build_plan 内补：那形态正是 pipeline._is_wholehouse_args 认的"显式全屋"
+# （空 name + domains 过滤），会被提前豁免上下文继承，实测把
+# 「打开办公室射灯」→「调高亮度到80%」的继承目标 射灯 吃成全屋灯。
+_ADJUST_DOMAIN = {"brightness": "light", "color": "light",
+                  "color_temperature": "light", "temperature": "climate",
+                  "fan_speed": "climate", "position": "cover",
+                  "humidity": "humidifier"}
+_MODE_DOMAIN = {"heat": "climate", "cool": "climate", "dry": "climate",
+                "fan_only": "climate"}
+
+
+def attribute_domain_target(intent: str, args: dict) -> list:
+    """Adjust/SetMode 无目标句 → 属性/模式所属域的过滤目标；判不出域返回 []。
+
+    只回 `domains` 过滤、**不回 name**：全屋同域扇出是这类句子的既有语义
+    （「亮度调高」=所有灯），具名目标一律交 pipeline 上下文继承先占。
+    """
+    try:
+        if intent == "AdjustDeviceAttribute":
+            fam = _ADJUST_DOMAIN.get(str((args or {}).get("attribute") or ""))
+        elif intent == "SetDeviceMode":
+            fam = _MODE_DOMAIN.get(str((args or {}).get("mode") or ""))
+        else:
+            fam = None
+        return [{"devices": [{"domains": [fam]}]}] if fam else []
+    except Exception:  # noqa: BLE001 兜底目标构造故障=不补（宁 Invalid 不猜设备）
+        return []
 # M3（2026-09-23 深审）：T0 动词头吞掉目标后，「短前缀+属性词+数值/相对档」尾巴
 # 不得静默丢——「开灯亮度50」曾落 TurnDeviceOn(灯)谎报成功，「亮度50」蒸发，
 # 且违约 CHANGELOG v1.0.37 承诺「触发词是开灯时，说开灯亮度50依然是调亮度」。
 _T0_ATTR_WORD = {"亮度": "brightness", "色温": "color_temperature",
                  "温度": "temperature", "风量": "fan_speed", "风速": "fan_speed",
-                 "开合度": "position", "位置": "position"}
+                 "湿度": "humidity", "开合度": "position", "位置": "position"}
 _T0_ATTR_TAIL = re.compile(
     r"^(?P<dev>[\u4e00-\u9fffA-Za-z0-9]{0,6}?)"
     r"(?P<attr>亮度|色温|温度|风量|风速|开合度|位置)"
@@ -501,8 +708,14 @@ def _scan_delta(text: str, attribute: str) -> Optional[tuple[str, str]]:
             if val.startswith("cn:"):
                 g = val[3:]
                 return T.cn2num(m.group(int(g[1:])) if g[1:].isdigit() else ""), m.group(0)
-            if val.startswith("$"):
-                return m.group(int(val[1:])), m.group(0)
+            if "$" in val:
+                # 模板替换（v1.1.1 对账扩）：原只认整串 "$n"，"+$2" 这类**带符号
+                # 模板**（相对档"调高N度"→ +N）会被 int("$2") 炸掉。逐处替换，
+                # 越界组号按空串处理（宁缺不崩）。
+                def _sub(g):
+                    idx = int(g.group(1))
+                    return (m.group(idx) or "") if m.lastindex and idx <= m.lastindex else ""
+                return re.sub(r"\$(\d)", _sub, val), m.group(0)
             return val, m.group(0)
     return None
 
@@ -512,6 +725,18 @@ def _scan_window_action(text: str) -> Optional[str]:
         if pat.search(text):
             return act
     return None
+
+
+def _tail_window_action(rest_text: str, window_word: str) -> Optional[str]:
+    """剥掉窗型词根后再扫动作（v1.1.1 #5：内倒语序可达性）。
+
+    「打开客厅窗户内倒」的 内倒 是**动作**，而「打开客厅的内开内倒窗」的
+    内倒 是**窗型词根**——同一子串两种身份，不先抹掉 _window_type 命中的整词
+    就无法区分，且后者被 _WINDOW_ACTION_SCAN 排在最前会截胡（数据集实锤该句
+    action=open，扫成 a=反向误执行）。返回 None 时交回动词头原判据。
+    """
+    residue = (rest_text or "").replace(window_word or "", "")
+    return _scan_window_action(residue) or None
 
 
 # v1.0.40 修复（D3）：T1 的标签集里只有 OpenCover、**没有 CloseCover**（见 _T1_MAP），
@@ -868,7 +1093,8 @@ class FastPath:
                 break
         # ② 未命中 → 已知设备名前缀剥离重试（"空调风量大一点"→"风量大一点"）
         if not matched_intent:
-            for kd in sorted(T.KNOWN_DEVICES_PREFIX, key=len, reverse=True):
+            # 剥离候选额外并 _BARE_DEV_HEADS（见 _strip_heads 注释）。
+            for kd in _strip_heads():
                 if text.startswith(kd) and len(text) > len(kd):
                     rest = text[len(kd):].strip()
                     for pattern, intent_type, action_val in _ACTION_PATTERNS:
@@ -882,8 +1108,14 @@ class FastPath:
                         break
         # ③ 仍未命中 → 区域前缀扫描 + 动作后缀匹配
         if not matched_intent and text and "\u4e00" <= text[0] <= "\u9fff":
-            prefix, suffix = T.extract_prefix(text)
-            if prefix and suffix:
+            # v1.1.1 数据集对账：两种切法依次试——extract_prefix 的判据是"前缀尾字
+            # ∈室厅房间楼区馆灯窗扇机…"，「阳台窗帘调成50%」会在 阳台窗|帘 处错切
+            # （窗帘被劈成 窗+帘 → ②③ 与内层设备剥离全失配 → 掉 T1 把 50% 丢光）；
+            # 区名直给切分（targets.split_area_head）补位。尾字形先试，「客厅…」
+            # 既有语义与 source 标注零扰动。
+            for prefix, suffix in (T.extract_prefix(text), T.split_area_head(text)):
+                if not (prefix and suffix):
+                    continue
                 suffix = suffix.lstrip("的")   # "客厅的窗帘关一半"：前缀扫描容忍属格「的」
                 for pattern, intent_type, action_val in _ACTION_PATTERNS:
                     m = pattern.match(suffix)
@@ -893,7 +1125,7 @@ class FastPath:
                         extra_args = _parse_action_value(action_val, m)
                         break
                 if not matched_intent:
-                    for kd in sorted(T.KNOWN_DEVICES_PREFIX, key=len, reverse=True):
+                    for kd in _strip_heads():
                         if suffix.startswith(kd) and len(suffix) > len(kd):
                             rest = suffix[len(kd):].strip()
                             for pattern, intent_type, action_val in _ACTION_PATTERNS:
@@ -1096,10 +1328,32 @@ class FastPath:
         # Adjust + 「区域?+属性词」：目标=该区域属性域，属性词不吃成设备名
         if intent == "AdjustDeviceAttribute" and rest_text and (mm := _ATTR_ONLY.match(rest_text)):
             area, attr_word = mm.group(1) or "", mm.group(2)
-            _dl = extra.get("delta", "")
-            if mm.group(3):                       # 句内绝对值兜底（scanner 失手时）
-                _dl = int(mm.group(3))
-            args = {"attribute": extra.get("attribute", ""), "delta": str(_dl)}
+            _attribute = extra.get("attribute") or _T0_ATTR_WORD.get(attr_word, "")
+            _dl = str(extra.get("delta") or "").strip()
+            _val, _dir, _sp = mm.group("val"), mm.group("dir"), mm.group("sp")
+            if _val:
+                # 方向字在前 = **相对档**（数据集实锤：「把空调温度调高2度」=+2，
+                # 旧实现取绝对值 2 → 空调被设到 2℃，H1 同族谎报）；无方向字才是
+                # 绝对值（「调到26度」）。
+                _dl = (f"{'-' if _dir in ('低', '小', '暗') else '+'}{_val}"
+                       if _dir in ("高", "低", "大", "小", "亮", "暗") else _val)
+            elif _sp == "一半":
+                _dl = "50"                          # 属性句"一半"=绝对 50（v1.0.63 同口径）
+            elif _sp and _sp.startswith("百分之"):
+                _dl = str(T.cn2num(_sp[len("百分之"):]))
+            elif _sp in ("最大", "最高", "最强", "满档"):
+                _dl = "max"                         # 集成 calc_target 的 special 支
+            elif _sp in ("最小", "最低", "最弱"):
+                _dl = "min"
+            elif _dl in ("", "None"):
+                # v1.1.1 #3：^色温/^风速|^湿度 零宽锚点只定属性不定值——数值/
+                # 相对档一律交扫描器，扫不到即如实 MISS，绝不发空 delta
+                # （集成 parse_delta 空值=invalid value，等于白占一次执行）。
+                scanned = _scan_delta(rest_text, _attribute)
+                _dl = scanned[0] if scanned else ""
+            if str(_dl).strip() in ("", "None"):
+                return self._miss(trace, f"属性句无数值:{rest_text}")
+            args = {"attribute": _attribute, "delta": str(_dl)}
             dom = _ATTR_DOMAIN.get(attr_word, "light")
             args["target"] = ([{"area": area}] if area else []) or [{"devices": [{"domains": [dom]}]}]
             if area:
@@ -1171,8 +1425,9 @@ class FastPath:
             if wt:
                 trace.append(f"窗型纠正:{name}→ControlWindow")
                 intent = "ControlWindow"
-                extra = {**extra, "action": extra.get("action") or
-                         ("open" if _was_on else "close")}
+                extra = {**extra, "action": extra.get("action")
+                         or _tail_window_action(rest_text, wt)
+                         or ("open" if _was_on else "close")}
             else:
                 # 2026-09 开窗器名称纠正（用户令优化第①项）：「关闭开窗器」
                 # 曾被 parse_target 剥成 name="窗" 残渣 + TurnDeviceOff 错意图
@@ -1196,8 +1451,9 @@ class FastPath:
                     name = full
                     trace.append(f"开窗器纠正:{name}→ControlWindow")
                     intent = "ControlWindow"
-                    extra = {**extra, "action": extra.get("action") or
-                             ("open" if _was_on else "close")}
+                    extra = {**extra, "action": extra.get("action")
+                             or _tail_window_action(rest_text, op)
+                             or ("open" if _was_on else "close")}
                 elif name in ("窗", "窗户"):
                     # 2026-09-14 现场日志（2026-09-27 修复批）：「打开办公室平
                     # 盖窗」谎报「窗户打开了」、窗没动——未知窗词「X窗」被
@@ -1227,8 +1483,10 @@ class FastPath:
                         trace.append(f"窗名抗折叠:{name}")
                     trace.append(f"泛窗纠正:{name}→ControlWindow")
                     intent = "ControlWindow"
-                    extra = {**extra, "action": extra.get("action") or
-                             ("open" if _was_on else "close")}
+                    extra = {**extra, "action": extra.get("action")
+                             or _tail_window_action(full or rest_text,
+                                                   _window_type(full or "") or "")
+                             or ("open" if _was_on else "close")}
         # 音乐泛词守卫（2026-09-12 零改动过渡带）：Turn* 车道若把泛音乐词
         # ("关掉音乐/关音乐")吃成设备名，会错关同名实体或空转失败。放行 None，
         # 交回级联 ⑤b 音乐带处理（真叫"音乐"的设备请说"关掉音乐开关"消歧）。
@@ -1243,10 +1501,44 @@ class FastPath:
         # 看中文等价词（name 现值现翻：桥前置换形/兜底顶名两条路都盖到），
         # 否则英文绕闸全屋扇出空调。
         _ac_probe = (T.en_device_zh(name) or str(name or "")).lower()
-        if name and any(k in _ac_probe for k in _AC_KEYWORDS):
+        if (name and intent in ("TurnDeviceOn", "TurnDeviceOff")
+                and any(k in _ac_probe for k in _AC_KEYWORDS)):
+            # v1.1.1 数据集对账：守卫**收窄到开关族**。原判据无差别拦所有意图，
+            # 实测把数据集 20+ 句打死（「空调调成制冷模式」② 已正确产
+            # SetDeviceMode cool、「把空调风速调大」T1 SetFanSpeed 1.00 均整句
+            # MISS）。分域判据：开关=改变别人家设备电源态（跨房间实害，2026-09
+            # 事故形态，保留）；模式/参数设定=全屋同向语义一致（数据集期望
+            # target 恒 {domains:[climate]} 无区域，单空调户是唯一 sane 解）。
             if not area and not _ac_name_qualified(name):
                 return self._miss(trace, "空调缺区域信息")
         args: dict[str, Any] = {}
+        # v1.1.1 #3/#4：@绝对值哨兵与色词原词在**目标域已定**之后才落最终形态。
+        # 只看设备名域提示、不看区域：区域句（"书房开到50"）属性二义=猜，按
+        # v1.0.69 红线如实 MISS。
+        if extra.get("attribute") == _ABSOLUTE:
+            _doms = list(T.domain_hint(name or "") or []) if name else []
+            _res = resolve_absolute_lane(_doms, str(extra.get("delta", "")))
+            if _res is None:
+                return self._miss(trace,
+                                  f"绝对值落不了设备族:{name or area or rest_text}")
+            extra = {**extra, "attribute": _res[0], "delta": _res[1]}
+            trace.append(f"绝对值族落:{_res[0]}={_res[1]}@{'/'.join(_doms)}")
+        if (extra.get("attribute") == "color"
+                and not str(extra.get("delta", "")).startswith("#")):
+            _hex = resolve_color_delta(str(extra.get("delta", "")))
+            if _hex is None:
+                return self._miss(trace, f"色名不可解:{extra.get('delta')}")
+            extra = {**extra, "delta": _hex}
+        if intent == "AdjustDeviceAttribute" and str(extra.get("delta") or "").strip() in ("", "None"):
+            # v1.1.1 对账：属性句缺 delta 一律如实 MISS（原形态产 args 无 delta
+            # 槽 → 集成 slot_schema Required('delta') Invalid，等于白执行一次）。
+            # 「把空调风速调大」这类 ② 剥离句 rest 只剩设备名，档位词在原句里，
+            # 扫描器必须拿**整句**扫。
+            _sc = _scan_delta(text, str(extra.get("attribute") or ""))
+            if _sc is None:
+                return self._miss(trace, f"Adjust 无可用数值:{rest_text or text}")
+            extra = {**extra, "delta": _sc[0]}
+            trace.append(f"数值回扫:{_sc[0]}")
         # 显式全屋（余下语序："全屋的灯打开"等）：目标不带区域、不带设备名，只留域
         # 过滤（集成端 name 空 + area 无 = 不过滤，全屋同域设备一起动），并打
         # whole_house 标，让卫星空间化/创建侧区域继承一律让路。

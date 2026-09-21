@@ -61,7 +61,11 @@ TOOLS: list[dict] = [
     {"type": "function", "function": {
         "name": "AdjustDeviceAttribute", "description": "调节设备属性", "parameters": {
             "type": "object", "properties": {
-                "attribute": {"type": "string", "enum": ["brightness", "colour_temperature", "temperature", "fan_speed", "position"]},
+                # v1.1.1 #2：枚举必须=集成 register_adjustment 的注册名。旧表里
+                # colour_temperature 是**注册表外死字段**（light 色温注册名
+                # temperature），LLM 照表发即 unsupported；补 color（RGB 色值）。
+                "attribute": {"type": "string", "enum": ["brightness", "color", "temperature",
+                                                         "fan_speed", "position", "humidity"]},
                 "delta": {"type": "string", "description": "绝对值 '50' / 相对 '+10','-20' / max / min"},
                 "target": _TARGET_SCHEMA}, "required": ["attribute", "delta"]}}},
     {"type": "function", "function": {

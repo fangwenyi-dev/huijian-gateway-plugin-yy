@@ -32,3 +32,7 @@ _bench/
 
 # v1.0.62 P0-2 回流语料运行期产物（持久卷文件；误配 HUIJIAN_DATA 时兜底防入库）
 huijian_voice/nlu_mining.jsonl
+
+# 会话期 scratch（探针/变异/编辑脚本与其中间产物）：历来只靠"不去 add"保命，
+# v1.1.1 起显式忽略——目录名一旦被批量 add 就会把内部文档与会话纪要带进交付仓。
+huijian_voice/.tmp-hj/

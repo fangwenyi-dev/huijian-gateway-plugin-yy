@@ -13,13 +13,40 @@ import logging
 import re
 from typing import Optional
 
-from .nlu.fast_path import Plan, is_pronoun, normalize_polite
+from .nlu.fast_path import Plan, color_word, is_pronoun, normalize_polite
 
 logger = logging.getLogger("huijian.executor")
 
 ACT_CN = {"open": "打开", "close": "关闭", "pause": "暂停", "a": "内倒", "tilt": "内倒"}
 ATTR_CN = {"brightness": "亮度", "colour_temperature": "色温", "color_temperature": "色温",
-           "temperature": "温度", "fan_speed": "风量", "position": "开合度"}
+           "temperature": "温度", "fan_speed": "风量", "position": "开合度",
+           "color": "颜色", "humidity": "湿度"}
+
+# 出站属性名映射（v1.1.1 #2）：网关内部属性名 ≠ 集成注册表名。
+# color_temperature / colour_temperature 在集成 register_adjustment 里**从未
+# 注册**（light 色温的注册名是 temperature）⇒ 「色温调到4000K」必 unsupported，
+# 三日实锤死字段。内部名不能就地改：temperature 在网关侧是**空调℃口径**
+# （_T0_ATTR_WORD / H1 改道 / 播报"调到X度"三分支全按 color_temperature 挑
+# 「色温/调冷调暖」），改名即串台。故只在**上 wire 前**单点映射，
+# Plan.args 与话术层一律不动。
+_ATTR_WIRE = {"color_temperature": "temperature",
+              "colour_temperature": "temperature"}
+
+
+def wire_args(name: str, args: dict) -> dict:
+    """执行出站参数归一（当前仅 AdjustDeviceAttribute 属性名对注册表）。永不抛。"""
+    try:
+        if name != "AdjustDeviceAttribute" or not isinstance(args, dict):
+            return args
+        mapped = _ATTR_WIRE.get(args.get("attribute"))
+        if not mapped:
+            return args
+        out = dict(args)
+        out["attribute"] = mapped
+        return out
+    except Exception:  # noqa: BLE001 —— 归一故障退回原参数（宁 unsupported 不猜）
+        logger.exception("[执行] 出站属性名归一异常")
+        return args
 MODE_CN = {"heat": "制热", "cool": "制冷", "dry": "除湿", "fan_only": "送风", "auto": "自动",
            "eco": "节能", "sleep": "睡眠", "offline": "关闭",
            "comfort": "舒适", "silent": "静音", "boost": "强力", "normal": "标准"}
@@ -142,7 +169,8 @@ class Executor:
         """单步意图执行，返回 (success, 原始 result dict)——供列表类意图
         （HassListAutomations 等）读结构化数据。永不抛，失败也带回 error dict。"""
         try:
-            result = await self.ha.handle_intent(plan.intent, plan.args)
+            result = await self.ha.handle_intent(plan.intent,
+                                                 wire_args(plan.intent, plan.args))
         except Exception as e:
             logger.info("[执行raw] %s 异常: %s", plan.intent, e)
             self.last_run = {"steps": 1, "applied": 0,
@@ -178,7 +206,7 @@ class Executor:
                 domain, service, data = direct
                 result = await self.ha.call_service(domain, service, data)
             else:
-                result = await self.ha.handle_intent(name, args)
+                result = await self.ha.handle_intent(name, wire_args(name, args))
             if not result.get("success"):
                 raw_err = str(result.get("error") or result.get("message") or "")
                 self.last_run = {"steps": len(steps), "applied": len(results),
@@ -504,6 +532,8 @@ class Executor:
         if intent == "AdjustDeviceAttribute":
             attr = ATTR_CN.get(args.get("attribute", ""), args.get("attribute", ""))
             delta = str(args.get("delta", ""))
+            if args.get("attribute") == "color":
+                delta = color_word(delta) or delta   # #RRGGBB 念进 TTS 是噪音
             if delta.startswith("+") or delta.startswith("-"):
                 up = delta.startswith("+")
                 verb = {"brightness": ("调亮", "调暗"), "fan_speed": ("调大", "调小"),
@@ -512,8 +542,13 @@ class Executor:
                 return f"好的，{head}{names}的{attr}{verb[0] if up else verb[1]}了" if attr else f"好的，已调节{names}"
             if args.get("attribute") == "temperature":
                 return f"好的，{head}{names}温度调到{delta}度了"
-            unit = "%" if args.get("attribute") in ("brightness", "position") else ("K" if args.get("attribute") == "color_temperature" else "档")
-            return f"好的，{head}{names}的{attr}已设为{delta}{unit if attr != '色温' else ''}".replace("档档", "档")
+            unit = ("%" if args.get("attribute") in ("brightness", "position")
+                    # 色温/颜色无量纲可播：K 与 # 念出来只是噪音（「色温已设为
+                    # 4000」「颜色已设为暖白」），v1.1.1 把原 `attr != '色温'`
+                    # 单点判断扩成集合，颜色族加入后不再漏。
+                    else "" if args.get("attribute") in ("color_temperature", "color")
+                    else "档")
+            return f"好的，{head}{names}的{attr}已设为{delta}{unit}".replace("档档", "档")
         if intent == "SetDeviceMode":
             mode = MODE_CN.get(args.get("mode", ""), args.get("mode", ""))
             return f"好的，{head}{names}已切到{mode}模式"

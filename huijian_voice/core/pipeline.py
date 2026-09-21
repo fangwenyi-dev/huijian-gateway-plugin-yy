@@ -37,8 +37,8 @@ from typing import Any, Callable, Coroutine, Optional
 
 from . import const
 from .nlu.fast_path import (END_DIALOGUE_INTENT, FastPath, Plan,
-                            is_end_dialogue, is_pronoun, is_whole_house,
-                            split_compound)
+                            attribute_domain_target, is_end_dialogue, is_pronoun,
+                            is_whole_house, split_compound)
 from .nlu import targets as T
 from .nlu.canonical import canonical
 from .nlu import music
@@ -1515,6 +1515,17 @@ class Pipeline:
                 plan.trace.append(f"{tag}:沿用实体 {spec['target']}")
                 injected = True
         if not injected:
+            if (plan.intent in ("AdjustDeviceAttribute", "SetDeviceMode")
+                    and not args.get("target")):
+                # v1.1.1 对账：裸属性/裸模式句（「风速调到最大」「设置为制冷」）
+                # 无设备无区域时补同域过滤目标——集成 slot_schema Required
+                # ('target') 缺槽即 Invalid，整句白丢。必须在 fp 之外补：那形态
+                # 正是 _is_wholehouse_args 的"显式全屋"，写进 _build_plan 会
+                # 提前豁免上下文继承（射灯→全屋灯事故）。
+                fam_target = attribute_domain_target(plan.intent, args)
+                if fam_target:
+                    args["target"] = fam_target
+                    plan.trace.append(f"属性域兜底:{fam_target}")
             self._apply_spatial(plan, args, origin)
         return plan
 

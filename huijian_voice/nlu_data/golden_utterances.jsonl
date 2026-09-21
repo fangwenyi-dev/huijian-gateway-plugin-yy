@@ -1,5 +1,5 @@
 {"text": "打开客厅的灯", "intent": "TurnDeviceOn", "source": "t0"}
-{"text": "把客厅的灯打开", "intent": "TurnDeviceOn", "source": "t1"}
+{"text": "把客厅的灯打开", "intent": "TurnDeviceOn", "source": "t0_prefix_strip"}
 {"text": "开灯", "intent": "TurnDeviceOn", "source": "t0"}
 {"text": "关灯", "intent": "TurnDeviceOff", "source": "t0"}
 {"text": "关掉卧室空调", "intent": "TurnDeviceOff", "source": "t0"}
@@ -16,7 +16,7 @@
 {"text": "亮度调高", "intent": "AdjustDeviceAttribute", "source": "t1"}
 {"text": "调亮一点", "intent": "AdjustDeviceAttribute", "source": "t0"}
 {"text": "亮度调到50%", "intent": "AdjustDeviceAttribute", "source": "t0"}
-{"text": "色温调低", "intent": null, "source": "miss"}
+{"text": "色温调低", "intent": "AdjustDeviceAttribute", "source": "t0"}
 {"text": "风量大一点", "intent": "AdjustDeviceAttribute", "source": "t0"}
 {"text": "回家模式", "intent": "HassTriggerVoiceScene", "source": "scene"}
 {"text": "观影模式", "intent": "HassTriggerVoiceScene", "source": "scene"}
@@ -36,11 +36,11 @@
 {"text": "给大门上锁", "intent": "HassLock", "source": "t0"}
 {"text": "打开卧室的空调", "intent": "TurnDeviceOn", "source": "t0"}
 {"text": "关闭书房的灯", "intent": "TurnDeviceOff", "source": "t0"}
-{"text": "把厨房灯关了", "intent": "TurnDeviceOff", "source": "t0_prefix_dev"}
+{"text": "把厨房灯关了", "intent": "TurnDeviceOff", "source": "t0_prefix_strip"}
 {"text": "打开卫生间的排风扇", "intent": "TurnDeviceOn", "source": "t0"}
 {"text": "开一下灯呗", "intent": "TurnDeviceOn", "source": "t0"}
 {"text": "麻烦把客厅空调关了", "intent": "TurnDeviceOff", "source": "t0_prefix_strip"}
-{"text": "灯打开吧", "intent": "TurnDeviceOn", "source": "t1"}
+{"text": "灯打开吧", "intent": "TurnDeviceOn", "source": "t0_strip"}
 {"text": "让风扇转起来", "intent": null, "source": "miss"}
 {"text": "暗一点", "intent": "AdjustDeviceAttribute", "source": "t0"}
 {"text": "亮一些", "intent": "AdjustDeviceAttribute", "source": "t0"}

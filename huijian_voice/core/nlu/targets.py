@@ -60,7 +60,7 @@ _KNOWN_DEVICES_TAIL = ["提升窗", "平开窗", "推拉窗", "平推窗", "天�
                        "卷帘", "百叶帘", "落地扇",
                        "中央空调", "挂机空调", "柜机空调",
                        "电风扇", "投影仪", "空气净化器",
-                       "空调", "风扇", "窗户", "窗帘", "加湿器", "热水器", "净化器", "灯", "窗", "幕布",
+                       "空调", "风扇", "窗户", "窗帘", "纱窗", "加湿器", "热水器", "净化器", "灯", "窗", "幕布",
                        "门", "电视", "投影", "音箱",
                        # v1.0.42 家电族：冷启动（registry 动态词表未同步时）也能
                        # 直呼这些常用设备名。
@@ -112,7 +112,7 @@ KNOWN_DEVICES_PREFIX = ["空调", "风扇", "加湿器", "净化器", "热水器
                         # 只在本表」同型）——「客厅百叶窗关闭」④ 前缀剥不出尾动词，
                         # 整句 MISS；且它是 cover（_window_type 帘族闸返 None），只走
                         # Turn*，故仅入前缀表、**不进 _WINDOW_TYPES/集成窗表**。
-                        "百叶窗",
+                        "百叶窗", "纱窗",
                         "扫地机器人", "扫拖机器人", "吸尘器", "拖地机",
                         # 2026-09 通用智能家居产品词（与表一同步，SOV「X关闭」回捞）
                         "洗地机", "除螨仪", "擦窗机器人", "新风机", "新风", "除湿机",
@@ -263,6 +263,19 @@ def bilingual_targets(entries: list) -> list:
 # 近音撞进设备表就是"目标幻觉"（亮度→浴霸 事故形）。
 _ATTR_NO_PINYIN = ("亮度", "色温", "温度", "湿度", "风量", "风速",
                    "开合度", "模式", "档位", "音量")
+
+# 2026-10-01（v1.1.0 发版后对账审计）目标幻觉禁区：
+# **动作/模式语素不是设备名**，一律禁入 ⑦ 拼音模糊档（与上方 _ATTR_NO_PINYIN 同族
+# 同修法——「亮度→浴霸」那次事故就是这个形态）。实锤两例：
+#   「内倒」neidao --⑦--> 「雷达」leida（滑窗 "neida" 距 1 ≤ tol；「雷达」是
+#   v1.0.42 家电族收的毫米波存在传感器）⇒「打开内倒」产 TurnDeviceOn name=雷达：
+#   用户要的是窗内倒动作，设备却去开传感器并回「办好了」=误执行+谎报；
+#   「通风」tongfeng --⑦--> 「筒灯」tongdeng（距 1 ≤ tol=2）⇒ 同型误执行。
+# 禁区只关**近音档**：「内倒窗/内开内倒窗/上悬窗」等字面词仍由 ⑥ 正常命中（实测
+# 零回归）。宁 MISS 如实失败，绝不猜设备（v1.0.69 红线）。
+_ACTION_NO_PINYIN = ("内倒", "内开", "外开", "上悬", "下悬", "悬窗", "开合",
+                     "推窗", "通风", "换气", "排气", "制冷", "制热", "除湿",
+                     "送风", "睡眠", "节能", "省电", "自动")
 
 # ── 动态设备词表（体验批 P2-17：别名自学习）────────────────────
 # 静态 KNOWN_DEVICES 是通用词表；真实部署里设备叫「氛围灯带/玄关射灯/新风机」等
@@ -442,6 +455,30 @@ def extract_prefix(text: str, start: int = 2, end: int = 10) -> tuple:
     return None, text
 
 
+def split_area_head(text: str) -> tuple:
+    """句首**区名**切分 → (area, rest)；无区名 (None, text)。
+
+    extract_prefix 的判据是"前缀尾字∈室厅房间楼区馆灯窗扇机…"，覆盖不到
+    BASE_AREAS 里不带尾字的通用空间词：「阳台窗帘调成50%」在 i=3 处把
+    「窗帘」从中间劈开（阳台窗 | 帘调成50%），②③ 与内层设备剥离全失配，
+    整句退到 T1 → 50% 数值直接丢光（数据集对账实锤：阳台/主卧/次卧/玄关系列
+    「区域+设备+绝对值」句全灭，同构的「客厅窗帘调成80%」却因为"厅"是尾字而通过）。
+    区域表（静态 BASE_AREAS ∪ HA 动态区表）本身认得这些词，这里按长名优先
+    直给切分，只回区域不吃设备名。帘族护栏同 _area_like（"阳台" 前缀不吞帘）。
+    """
+    t = (text or "").strip()
+    if not t:
+        return None, t
+    try:
+        names = sorted(set(BASE_AREAS) | set(_dyn_areas), key=len, reverse=True)
+        for a in names:
+            if a and t.startswith(a) and len(t) > len(a):
+                return a, t[len(a):].lstrip("的地里得")
+    except Exception:  # noqa: BLE001 切分器永不冒泡（保守=不切）
+        return None, t
+    return None, t
+
+
 def _area_of_prefix(pre: str) -> str | None:
     """目标词前缀→区域名（修A）：尾字区域词命中（"办公室"）→ 剥属格「的/里/得」重试
     （"办公室的"）→ 二次前缀扫描回捞（未知复合词 "办公室吊灯" 的单字残段→"办公室"）。
@@ -487,11 +524,15 @@ def domain_hint(name: str) -> list[str]:
         return ["climate"]
     if "灯" in n or "照明" in n:
         return ["light"]
-    if "窗帘" in n or "百叶" in n or n.endswith("帘") or "幕布" in n:
+    if "窗帘" in n or "百叶" in n or n.endswith("帘") or "幕布" in n or "纱窗" in n:
         # 2026-10-01 数据集对账二期：卷帘x2/百叶帘x2 此前 domains=[]（集成端只能全
         # 实体面找名，同名歧义面大）——帘族按词尾收口（纱帘/罗马帘/梦境帘同源）。
         # 幕布 必须在 投影 规则**之前**判：HA 生态里「投影幕布」是 cover，而
         # 「投影仪」才是 media_player——顺序错则幕布被划进媒体设备域（实锤错域）。
+        # 纱窗 同批补口（v1.1.1 绝对值车道实需）：HA 生态里纱窗=cover 实体，
+        # 与 fast_path._POS_CURTAIN_WORDS/_CURTAIN_ROOT_WORDS 的帘族判定同源；
+        # 缺它则「纱窗开到50%」族落不到属性名（认不出族=如实 MISS 是新车道
+        # 红线，但设备族本身在表里就得认得出）。
         return ["cover"]
     if "风扇" in n or n.endswith("扇"):
         # 落地扇x1 同型缺陷；扇族词尾一律 fan（吊扇/壁扇/台扇同源）。灯规则在上方，
@@ -549,7 +590,9 @@ def _generic_rescue(pre: str, generic: str):
             return None
         if not all("\u4e00" <= c <= "\u9fff" for c in pre):
             return None
-        if any(w in pre for w in _ATTR_NO_PINYIN) or any(c in pre for c in _RESIVE_NO_GO):
+        if (any(w in pre for w in _ATTR_NO_PINYIN)
+                or any(w in pre for w in _ACTION_NO_PINYIN)
+                or any(c in pre for c in _RESIVE_NO_GO)):
             return None
         # 剥掉可识别的区域前缀（「展厅催拉」→ 修饰段只剩「催拉」；区域本身
         # 由调用方 _area_of_prefix 走既有车道回捞）
@@ -704,7 +747,8 @@ def parse_target(raw: str, action_match=None) -> tuple[str | None, str | None, i
     # 窗口错 2 个=半句皆可错，短词误配是必然；②残段含属性词禁入⑦——亮度/色温
     # 这类**参数名**永远不该升格成设备目标（属性句走 no-target+上下文继承）。
     if (not _hit_dev and len(stripped) <= 8
-            and not any(w in stripped for w in _ATTR_NO_PINYIN)):
+            and not any(w in stripped for w in _ATTR_NO_PINYIN)
+            and not any(w in stripped for w in _ACTION_NO_PINYIN)):
         try:
             from pypinyin import lazy_pinyin
             py_raw = "".join(lazy_pinyin(stripped))

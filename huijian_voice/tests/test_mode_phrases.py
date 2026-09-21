@@ -82,9 +82,18 @@ def test_unknown_mode_rejected():
 
 
 def test_bare_device_still_needs_area():
-    """跨房间同名设备不猜——裸"空调"头句维持既有「缺区域」行为。"""
-    p = _m("空调设为睡眠模式")
-    assert p is None                          # 与"打开空调"同一产品铁律
+    """v1.1.1 守卫分域：**开关族**仍不猜哪台空调；模式/属性族按数据集放行同域。
+
+    与 test_dataset_vocab_batch2.test_bare_ac_guard_narrowed_to_power_lane 同判据
+    （数据集对账实锤：无差别拦截把 14 句模式/风速指令整句打死）。
+    """
+    assert _m("开空调") is None                   # 电源态跨房间实害，铁律不动
+    assert _m("关空调") is None
+    p = _m("空调设为睡眠模式")                    # 模式设定=全屋同向语义一致
+    assert p is not None and p.intent == "SetDeviceMode", p
+    assert p.args.get("mode") == "sleep", p.args
+    assert p.args["target"][0]["devices"][0]["name"] == "空调", p.args
+    assert p.args["target"][0]["devices"][0]["domains"] == ["climate"], p.args
 
 
 CC = Path(__file__).resolve().parents[1] / "custom_components" / "huijian_ai"
