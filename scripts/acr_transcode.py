@@ -193,6 +193,22 @@ def push_blob(dst: Registry, repo: str, digest: str, data: bytes, label: str):
     except urllib.error.HTTPError as e:
         if e.code != 404:
             raise
+    # blob 级重启（run 35676700243 实证）：跨境链路把已建立的 upload session
+    # 掐掉后，session 级重试（复用旧 Location）全部秒败 EOF——服务端只认新
+    # session。整块失败即重 POST 开新 session 从 0 重传，最多 3 轮。
+    for round_no in range(1, 4):
+        try:
+            if _push_blob_once(dst, repo, digest, data, label):
+                return
+        except (RuntimeError, OSError) as e:
+            log(f"  ⟲ {label} 第{round_no}/3轮整体失败({type(e).__name__}: "
+                f"{str(e)[:120]})，换新 session 重传")
+            if round_no == 3:
+                raise
+            time.sleep(10 * round_no)
+
+
+def _push_blob_once(dst: Registry, repo: str, digest: str, data: bytes, label: str) -> bool:
     _, loc, _ = dst.request("POST", f"/v2/{repo}/blobs/uploads/", repo, b"",
                             headers={"Content-Length": "0"})
     if not loc:
@@ -220,6 +236,7 @@ def push_blob(dst: Registry, repo: str, digest: str, data: bytes, label: str):
     dst.request("PUT", use + sep + f"digest={digest}", repo, b"",
                 headers={"Content-Length": "0"})
     log(f"  blob 完成: {label} ({len(data)}B)")
+    return True
 
 
 def push_manifest(dst: Registry, repo: str, ref: str, manifest: bytes, media_type: str):
