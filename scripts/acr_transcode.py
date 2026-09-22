@@ -43,7 +43,7 @@ MEDIA_MANIFEST = "application/vnd.oci.image.manifest.v1+json"
 MEDIA_INDEX = "application/vnd.oci.image.index.v1+json"
 MEDIA_CONFIG = "application/vnd.oci.image.config.v1+json"
 LAYER_GZIP = "application/vnd.oci.image.layer.v1.tar+gzip"
-CHUNK = 8 * 1024 * 1024
+CHUNK = 2 * 1024 * 1024   # 降级链路实测 8MB 块 300s 写不完（<30KB/s）；2MB 块=同速下 67s 稳过
 UA = {"User-Agent": "acr-transcode/1.0 (huijian_voice CI)"}
 
 
@@ -151,7 +151,7 @@ class Registry:
 
     def request(self, method, path, repo, body: bytes, headers=None,
                 actions=("pull", "push"), status_ok=(200, 201, 202, 204),
-                attempts=4):
+                attempts=6):
         # GitHub runner → 国内 ACR 的跨境链路写超时是常态（v1.1.5 两次 run 均死于
         # push_blob 的 TLS write timeout，签名一致=非偶发）。连接级异常按指数退避
         # 重试；HTTP 状态错不重试（语义错误重发也不会变好）。PATCH 带 Content-Range
