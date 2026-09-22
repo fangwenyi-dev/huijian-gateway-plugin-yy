@@ -82,8 +82,15 @@ def test_hard_secret_rules_are_nonempty():
 
 
 def test_no_secrets_in_tracked_files():
+    # 本文件自身必须豁免：里面的 JWT/私钥/手机号是**反向钉用的合成样本**（见
+    # test_secret_detector_really_fires），不豁免则守卫会咬自己的测试——CI 首跑
+    # 实锤：本地核验时该文件还没入库，git ls-files 不含它，扫不到就以为绿。
+    # 豁免范围钉死在本文件，第二条豁免需要改代码才能加。
+    self_rel = (pathlib.Path(__file__).resolve().relative_to(REPO)).as_posix()
     offenders = []
     for rel in _tracked_files():
+        if rel == self_rel:
+            continue
         path = REPO / rel
         if not path.is_file() or path.stat().st_size > 4_000_000:
             continue
