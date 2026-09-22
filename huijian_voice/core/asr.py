@@ -52,6 +52,9 @@ class AsrEngine:
         self._busy = 0          # 在飞推理数（卸载避让；审查 F1）
         self._loading = False   # 冷启动双载闩（下载/构建期并发诉求直接 False，走礼貌话术）
         self.last_used = time.time()
+        # 本轮拿不到结果的具名分因。空串与"用户没说话"在设备侧逐字节同形，
+        # 没有这个字段就只能靠人猜（与 v1.0.96「每条路带回具名分因」同口径）。
+        self.last_reason = ""
 
     # ── 引擎选择 ────────────────────────────────────────────────
     def _primary_kind(self) -> str:
@@ -111,11 +114,13 @@ class AsrEngine:
             d = self.store.model_dir_for(key)
         if d is None:
             logger.warning("[STT] 模型未就绪(%s)", key)
+            self.last_reason = f"模型资产缺失({key})，下载未完成或 /data 不可写"
             return False
         try:
             rec = self._build_recognizer(kind, d)
         except Exception as e:
             logger.error("[STT] 模型加载失败(%s): %s", kind, e)
+            self.last_reason = f"模型加载失败({kind}): {type(e).__name__}: {e}"
             return False
         with self._lock:
             self._rec = rec
@@ -131,6 +136,7 @@ class AsrEngine:
             if self._rec is not None:
                 return True
             if self._loading:
+                self.last_reason = "模型正在加载（冷启动双载闩拦下本轮）"
                 return False
             self._loading = True
         try:
@@ -178,6 +184,7 @@ class AsrEngine:
     async def transcribe_pcm(self, pcm_s16: bytes) -> str:
         """整句 s16le@16k → 文本。云档优先（若配置），失败回落本地。"""
         self.last_used = time.time()
+        self.last_reason = ""
         prov = str(self.settings.get("stt.provider", "local_paraformer"))
         if prov.startswith("cloud"):
             cloud = self.settings.get("stt.cloud") or {}
@@ -189,6 +196,10 @@ class AsrEngine:
             loop = asyncio.get_running_loop()
             ok = await loop.run_in_executor(None, self.ensure_loaded)
             if not ok:
+                # 轮次级分因：设备侧只看到 stt.text=""，与真静音同形。没有这一行，
+                # "说了没反应"只能靠翻加载日志猜时间戳对齐。
+                logger.warning("[STT] 本轮空结果：本地引擎未就绪（%s / %s）",
+                               self.model_key, self.last_reason or "加载日志见上")
                 return ""
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._local_transcribe, pcm_s16)
@@ -203,6 +214,8 @@ class AsrEngine:
         with self._lock:
             rec = self._rec
             if rec is None:
+                # 在载 recognizer 被 reaper/reload 摘走：与静音同形，补分因
+                self.last_reason = "推理在飞时引擎被卸载（省电档/reload）"
                 return ""
             self._busy += 1
         try:

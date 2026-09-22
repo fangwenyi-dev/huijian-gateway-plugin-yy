@@ -163,6 +163,8 @@ class Executor:
         # 最近一次 run 的执行状态（pipeline 复议安全闸读它；永不作为业务返回值，
         # 免得动 run 的 (ok, speech) 契约把既有调用点/测试全推翻）。
         self.last_run: dict = {"steps": 0, "applied": 0, "indeterminate": False}
+        # 能力预检"整体放行"的分因闩锁（见 _capability_refuse）
+        self._gate_blind_warned = False
 
     async def run_raw(self, plan: Plan) -> tuple[bool, dict]:
         """单步意图执行，返回 (success, 原始 result dict)——供列表类意图
@@ -196,7 +198,17 @@ class Executor:
                 return None
             states = await self.ha.states()
             if not states:
+                # 放行是对的（桥不通时拒=凭空少做），但放行意味着这条动作
+                # **没过任何能力检查**。不留痕的话，v1.0.69 那类"假成功 +
+                # ServiceNotSupported 风暴"会重新变成无迹可查。
+                if not self._gate_blind_warned:
+                    self._gate_blind_warned = True
+                    logger.warning("[执行] HA 状态读空，本条及后续能力预检整体放行"
+                                   "（未做能力检查）；reachable=%s last_error=%s",
+                                   getattr(self.ha, "reachable", None),
+                                   getattr(self.ha, "last_error", ""))
                 return None
+            self._gate_blind_warned = False
             cands = capability.resolve_candidates(
                 states, getattr(self.ha, "_entity_area", {}) or {},
                 (args or {}).get("target"))

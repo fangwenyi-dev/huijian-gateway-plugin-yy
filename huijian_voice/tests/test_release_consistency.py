@@ -272,6 +272,27 @@ def test_www_starsky_assets_and_cachebust():
                 f"{rel} 与网关母本分叉——修设计请改母本后同步复制，禁单边演化"
 
 
+def test_www_cachebust_is_universally_current():
+    """?v= 泛化计数钉（2026-09-22 优化盘点 P3-补）。
+
+    上游 test_www_starsky_assets_and_cachebust 只逐条验 3 个**具名**资产串，
+    形态是"应该有 A/B/C"。后果：新增第 4 个 `?v=旧值` 资产永远不会被发现——
+    客户硬刷前拿的还是旧 js，而这正是 cache-bust 唯一要防的事（网关 v1.7.1
+    教训）。本钉反向判：**页面上任何一处 ?v= 都必须等于当前版本**，新增资产
+    自动进入管辖，不依赖有人记得来加名字。
+
+    计数下界用"页面上真实带 ?v= 的资产数"而非写死 3：写死的数字会被删剩的
+    死链凑数，也不随资产增减而更新。"""
+    ver = _config()["version"]
+    www = (ROOT / "www" / "index.html").read_text(encoding="utf-8")
+    stamped = re.findall(r'[?&]v=([^"&\s]+)', www)
+    assert stamped, "index.html 再无任何 ?v= cache-bust——钉桩本身失去对象"
+    stale = sorted({s for s in stamped if s != ver})
+    assert not stale, (
+        f"www 资产挂着过期版本参数 {stale}，当前版本 {ver}："
+        "客户硬刷前会取到旧 css/js（网关 v1.7.1 同因）")
+
+
 def test_repository_manifest_current_spec():
     repo = ROOT.parent
     assert (repo / "repository.yaml").exists(), "商店清单须为 repository.yaml（新规范）"

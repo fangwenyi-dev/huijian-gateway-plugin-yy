@@ -548,6 +548,45 @@ class Plan:
     # 显式全屋语义（"打开所有灯/全部灯/全屋的灯"）：目标不带区域不带名字，只留域过滤；
     # 空间化（卫星区域注入）与创建侧区域继承都必须让路，否则"所有灯"会被缩成一间屋。
     whole_house: bool = False
+    # ── 判定旗标（2026-09-22 优化盘点 P2）─────────────────────────
+    # trace 是给人看的诊断串。此前"要不要给 T1 一次接管机会""这句要不要走上下文
+    # 继承"三处判据直接 startswith/in 在 trace 文案上——改一句日志措辞就静默改了
+    # 执行语义，而且改的人完全不知道。生产侧在裁定点就地写旗标，消费侧只读旗标；
+    # __post_init__ 从 trace 兜一层派生，只为兼容手搓 trace 的测试替身。
+    flags: set = field(default_factory=set)
+
+    def mark(self, *flags: str) -> "Plan":
+        for f in flags:
+            self.flags.add(f)
+        return self
+
+    def __post_init__(self) -> None:
+        for flag, tokens in _FLAG_TRACE_TOKENS.items():
+            if flag in self.flags:
+                continue
+            if any(tok in t for t in (self.trace or ()) for tok in tokens):
+                self.flags.add(flag)
+
+
+# 旗标 ↔ trace 文案的唯一映射（派生兜底用；改文案只需动这一处）
+FLAG_PRONOUN_TARGET = "pronoun_target"        # 代词目标，待上下文注入
+FLAG_ANAPHORA_STRIPPED = "anaphora_stripped"  # 句首回指副词已剥离成具名短句
+FLAG_CHAIN_ANAPHORA = "chain_anaphora"        # 链内回指：同句先行分句供目标
+
+_FLAG_TRACE_TOKENS: dict[str, tuple[str, ...]] = {
+    FLAG_PRONOUN_TARGET: ("代词目标",),
+    FLAG_ANAPHORA_STRIPPED: ("回指→",),
+    FLAG_CHAIN_ANAPHORA: ("链内回指",),
+}
+
+# T0 目标提取质量不足的 miss 原因名。生产者(:1411 附近)与消费者(T1 接管闸)
+# 共用同一个常量，不再各写一份字面量——守卫钉的是"字面量不得出现在消费点"。
+MISS_LOW_EXTRACT_QUALITY = "提取质量低"
+
+# trace 前缀 tag 名（诊断文案，但被"聚合链内回指注记"按前缀取用）。同样只许
+# 一处定义：pipeline 写 tag、聚合读 tag 都走这个常量（v1.1.1 同病灶）。
+TRACE_TAG_CHAIN = "链内回指"
+TRACE_TAG_CONTEXT = "上下文"
 
 
 # ── 礼貌/口语归一（体验批 P2-16）───────────────────────────────
@@ -1224,8 +1263,10 @@ class FastPath:
         # （音乐泛词交音乐带、PlayMusic 不接管、复合残句拒猜、ControlWindow 无动作词…），
         # 让 T1 接管会把"故意不接"变成"乱接"——CI 实测反例：`关掉音乐` 被兜底接成
         # TurnDeviceOff 且设备名是整句残渣（test_music_generic_word_not_device 红）。
+        # 判据走 MISS_LOW_EXTRACT_QUALITY 常量：生产者(_build_plan 质量门)与本
+        # 消费者共用同一个名字，字面量不再各写一份（守卫钉禁此处出现裸字面量）。
         if (plan is None and source != "t1" and trace
-                and trace[-1].startswith("miss:提取质量低")
+                and trace[-1].startswith(f"miss:{MISS_LOW_EXTRACT_QUALITY}")
                 and self.settings.get("nlu.textcnn_enabled", True) and self.textcnn):
             # v1.0.40 修复（A1 后半）：T0 命中了动作、但**目标提取落空**（残留字/质量门/
             # 提取低分）时，旧实现直接落空进兜底话术——而 T1 往往判得对（实测「打开窗户」
@@ -1408,7 +1449,7 @@ class FastPath:
             elif not rest_text.strip():
                 area, name = None, None          # 无目标=全屋（Turn* / ControlWindow 通用窗）
             else:
-                return self._miss(trace, f"提取质量低(score={score})")
+                return self._miss(trace, f"{MISS_LOW_EXTRACT_QUALITY}(score={score})")
         # 窗型词落进设备名 → 按钮按压语义，不是开关设备（实机 2026-09-08：
         # 「打开 办公室平开窗」被错产成 TurnDeviceOn，集成按开关找窗必 miss）。
         # 2026-09-30 英文桥（用户现场：'turn on the office light'/'close the

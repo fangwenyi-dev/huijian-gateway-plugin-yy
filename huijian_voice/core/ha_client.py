@@ -48,6 +48,7 @@ class HAClient:
         self._lock = asyncio.Lock()
         self.last_error = ""
         self._reachable = False   # 真连通判据（区别于 ok=已配置；UI/状态面用这个）
+        self._states_warned = False  # states 刷新失败的分因闩锁（见 _refresh_states）
 
     # ── URL 拼接唯一真源 ────────────────────────────────────────
     def _url(self, path: str) -> str:
@@ -230,12 +231,21 @@ class HAClient:
                         states = await r.json()
                         self._states = {e["entity_id"]: e for e in states}
                         self._cache_ts = time.time()
+                        self._states_warned = False   # 恢复即重新武装分因
                     else:
                         self.last_error = f"states {r.status}"
             except Exception as e:
                 self._reachable = False
                 self.last_error = str(e)
-                logger.debug("[HA] states 刷新失败: %s", e)
+                # 每次刷新只留一条具名分因（闩锁），成功刷新即重新武装。不用
+                # "由通转不通"的下降沿判据：_reachable 初值 False，全新安装把
+                # URL 配错会一次都不触发——那条恰恰最需要日志。
+                if not self._states_warned:
+                    self._states_warned = True
+                    logger.warning("[HA] states 刷新失败，此后能力预检失效、状态查询"
+                                   "读空（本条闩锁至下次成功）: %s", e)
+                else:
+                    logger.debug("[HA] states 刷新失败: %s", e)
             if time.time() - self._reg_ts > self._REG_TTL or not self._areas:
                 await self._load_registries()
 

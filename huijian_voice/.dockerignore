@@ -1,0 +1,36 @@
+# 构建上下文 = huijian_voice/（Dockerfile 的 COPY 路径是相对它的）。
+# 此前仓内无 .dockerignore：.tmp-hj(1.4MB)、_e2e_data、__pycache__、会话日志
+# 全在 context 内，只靠 Dockerfile 的 COPY 白名单兜住——白名单一旦有人加一条
+# COPY . 就把会话纪要与现场凭据带进客户镜像。这里补第二道门。
+*
+!core/
+!custom_components/
+!nlu_data/
+!www/
+!translations/
+!config.yaml
+!manifest.json
+!requirements.txt
+!models.lock.json
+!firmware.lock.json
+!boot.sh
+!run.sh
+!nginx.sh
+!klar-engine.sh
+!nginx-huijian.conf
+!Dockerfile
+!build.yaml
+!DOCS.md
+!README.md
+!logo.png
+!icon.png
+
+# 白名单之外再兜一层：即便日后有人放宽 COPY，也不带走会话产物
+**/__pycache__/
+**/*.pyc
+.tmp-hj/
+_e2e_data/
+_smoke_data/
+.pytest_cache/
+*.log
+tests/

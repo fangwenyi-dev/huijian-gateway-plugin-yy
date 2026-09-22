@@ -1,5 +1,37 @@
 # 变更日志
 
+## [1.1.6] - 2026-09-22 交付链加固与静默失败收口（全仓优化盘点驱动）
+- 发布链：`.gitignore` 补齐仓根泄漏面（`/_* /*.md /huijian_voice/_* /_quarantine/` 等）——
+  此前 79 个未跟踪会话产物逐 ID `check-ignore` 全部未忽略，一次 `git add -A` 即可把
+  现场凭据与内部纪要推给全体客户；未跟踪数降至 11。新增 `.dockerignore`（构建上下文
+  此前无第二道门，只靠 Dockerfile COPY 白名单兜）。
+- 凭据面：仓根脚本内嵌的 HA 长期令牌与仓外 `~/gates/.hatok` 逐字节相同，迁
+  `scripts/field_topology.py` 改读 env/gates 文件；全仓受版文件实测 JWT/私钥/手机号零命中。
+  新增 `test_repo_leak_guard`（7 钉）守索引事实而非 .gitignore 是否写全，含反向钉与
+  白名单过期钉；`MODIFICATION_RECORD.md`（224 行内部改稿）原在集成目录内、会随
+  boot.sh `cp -a` 落进客户 `/homeassistant`，迁 `docs/internal/`。
+- CI 闸口：加 `concurrency`（`cancel-in-progress: false`——进行中的 ACR 上传被中断会留
+  半成品 manifest，比排队更糟）；加"同名 tag 已存在即停"闸——release 步骤本是 Create or
+  Update，版本号不涨重推会原地覆盖已发布镜像与 Release，老用户版本串未变就永远收不到。
+  附注标签按 `^{}` peeled 判，同 commit 重跑放行，`force_republish` 可明示绕过。
+- 静默失败：STT 引擎未就绪/在飞卸载导致的空结果补轮次级具名分因（与真静音在设备侧
+  逐字节同形）；`ha_client` states 刷新失败加闩锁式一次性 WARN（不用下降沿判据——
+  `_reachable` 初值 False，新客户配错 URL 会一次都不触发）；能力预检整体放行时留痕；
+  桥不通不再被播报成"请到设置-音乐重新选择"。`/api/health` 增 klar 熔断态/TTS provider/asr 分因。
+- 探针：`/healthz` 状态码语义一字不动（引擎懒加载，改成就绪探针会把十分钟没人说话的
+  正常客户机被 Supervisor 无限重启）；另开 `/readyz` 仅在模型资产判负时 503，是否切
+  watchdog 待真实安装观察后定。
+- 误执行根因：`Plan` 增 `flags`/`mark()`，三处直接 sniff trace 诊断文案的执行判据（T1 接管
+  闸、上下文继承、`_is_anaphoric`）改读旗标；miss 原因名与 tag 名收正常量。trace 文本
+  一字未改，手搓 trace 的既有钉全绿。新增 `test_plan_flag_contract`（6 钉，按 AST 字面量判
+  而非行内子串）——变异验证：注入"pipeline 抄第二份文案"红、注入"fast_path 就地解读"红。
+- 守卫与成本：AST 守卫三条规则统一 `rglob`（`huijian/` 子目录原对两条是盲区，实测 51 处
+  `async_call` 全合法，收紧不引红）+ 新增禁字符串化取用钉；`?v=` 泛化计数钉（原只验 3 个
+  具名串，新增第 4 个过期资产永远抓不到）；两枚 OTA 钉的 `example.invalid` 走真 DNS 占掉
+  全量回归 31% 时长，改本地拒连 → 22.6s→4.1s。
+- 回归：改前基线与改后红集逐 ID 差分零新增（含 21 项云 TTS 推流测试在正确 `_winlibs`
+  PATH 前置下真实执行通过）。
+
 ## [1.1.5] - 2026-09-22 本地 TTS 多引擎档（Matcha/MeloTTS 入可选，台架四引擎横评驱动）
 - 台架横评（bench_tts_20260921，同句集/2线程/x86）：Kokoro v1.1 fp32 RTF 0.264（现役基线）
   / MeloTTS zh_en 0.197 / **Matcha zh-en 0.022、首包 32ms** / ZipVoice distill 0.902~1.658

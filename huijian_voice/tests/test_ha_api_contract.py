@@ -33,7 +33,18 @@ CONST_ALLOW_DEFAULT = {"DOMAIN"}
 
 
 def _files():
-    return sorted(CC.glob("*.py"))
+    """递归全量。
+
+    v1.0.94 生产 500 那批把新规则改成了 rglob（见下方 _files_all），但
+    async_call 形参白名单与 components.*.const 两条**仍走顶层 glob** ——
+    `huijian/` 子目录（transport 全家 + http/audio）对这两条依旧是盲区，
+    而 async_call 恰恰在这些文件里被密集调用。三条规则统一递归口径。"""
+    return sorted(CC.rglob("*.py"))
+
+
+def _files_all():
+    """兼容旧名（部分测试按此名引用递归全量）。"""
+    return _files()
 
 
 def _attr_chain(node):
@@ -115,9 +126,35 @@ REGISTRY_MODULE_NAMES = {"er", "dr", "entity_registry", "device_registry"}
 
 
 def _files_all():
-    """递归全量。既有 _files() 只 glob 顶层 *.py，子目录（huijian/ 等）是守卫
-    盲区——本次生产 500 正落在盲区里，故新规则一律走递归。"""
-    return sorted(CC.rglob("*.py"))
+    """旧名兼容：递归口径已与 _files() 合一（本文件此前两条规则走顶层 glob，
+    huijian/ 子目录是盲区；三条规则现已统一）。"""
+    return _files()
+
+
+def test_registry_helper_never_called_via_string_indirection():
+    """`async_entries_for_config_entry` 只准写成属性调用，禁止字符串化。
+
+    为什么单独立一条：上一条按**接收者变量名**白名单放行（er/dr/...），于是
+    `getattr(reg, "async_entries_for_config_entry")(…)` 或 `getattr(reg, NAME)`
+    换个变量名就能原样溜过——本仓确有此惯用法（intent_window_const.py:348
+    `getattr(area_registry, "async_list_areas", None)`），不是假想敌。字符串
+    形态一旦允许，形状守卫对这批名字就整体失效。"""
+    bad = []
+    for py in _files():
+        tree = ast.parse(py.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and node.value in REGISTRY_MODULE_FUNCS:
+                bad.append(f"{py.relative_to(HERE)}:{node.lineno} 名字被字符串化")
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                    and node.func.id in {"getattr", "hasattr", "setattr"}:
+                for arg in node.args[1:2]:
+                    if isinstance(arg, ast.Constant) \
+                            and arg.value in REGISTRY_MODULE_FUNCS:
+                        bad.append(f"{py.relative_to(HERE)}:{node.lineno} "
+                                   f"{node.func.id}(…, \"{arg.value}\")")
+    assert not bad, (
+        "注册表模块级函数不得经字符串间接取用，否则形状守卫失效："
+        + "; ".join(bad))
 
 
 def test_registry_enumeration_uses_module_level_call():

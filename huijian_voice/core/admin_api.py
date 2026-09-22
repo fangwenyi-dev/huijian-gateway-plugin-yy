@@ -60,6 +60,12 @@ def make_admin_app(ctx) -> web.Application:
 async def _health(request):
     ctx = request.app[CTX_KEY]
     s = ctx.settings
+    klar = getattr(getattr(ctx, "pipeline", None), "klar", None)
+    try:
+        klar_state = klar.state() if klar is not None else {}
+    except Exception:  # noqa: BLE001 状态页不得因观测面把管理页弄成 500
+        logger.exception("[健康] klar 状态读取失败")
+        klar_state = {"unavailable": True}
     return web.json_response({
         "ok": True,
         "version": _addon_version(),
@@ -69,7 +75,14 @@ async def _health(request):
         "sessions": len(ctx.sessions),
         "models_ready": {k: ctx.store.is_ready(k) for k in ctx.store.keys()},
         "asr_loaded": bool(ctx.asr.ready()) if ctx.asr else False,
-        "tts_loaded": bool(ctx.tts.ready()) if ctx.tts else False,
+        # 引擎起不来时的具名分因（懒加载下 asr_loaded=False 本身不说明故障）：
+        # 现场"说了没反应"与"用户真没说话"在设备侧逐字节同形，靠这个字段分开。
+        "asr_reason": getattr(ctx.asr, "last_reason", "") if ctx.asr else "",
+        "tts_loaded": bool(ctx.tts and ctx.tts.ready()),
+        "tts_provider": str(s.get("tts.provider", "")),
+        # 一级 NLU 是否在降级走 TextCNN：降级是对的，"降了级没人知道"才是缺陷
+        "klar": klar_state,
+        "textcnn_ready": bool(getattr(ctx, "textcnn", None)),
         "llm_enabled": bool(s.get("llm.enabled")),
         # 本地理解总开关（首页状态位数据源）：关掉后场景触发词/本地建・改・删/
         # 查询族/音乐带全停，必须一眼可见，不能静默降级

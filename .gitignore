@@ -36,3 +36,46 @@ huijian_voice/nlu_mining.jsonl
 # 会话期 scratch（探针/变异/编辑脚本与其中间产物）：历来只靠"不去 add"保命，
 # v1.1.1 起显式忽略——目录名一旦被批量 add 就会把内部文档与会话纪要带进交付仓。
 huijian_voice/.tmp-hj/
+
+# ── v1.1.6 泄漏面收口 ──────────────────────────────────────────────
+# 上面那条只挡了 huijian_voice/ 一处。仓根实际堆着 70+ 个会话产物
+# （_*.log/_*.txt 回归台账、_*.ps1 发版脚本、_repro_*.py 探针），
+# 逐 ID check-ignore 实测**全部未忽略**——一次 `git add -A` 就会把
+# 现场 JWT、客户内网 IP、会话纪要随代码推给全体客户（ci.yaml 是
+# push main 即构建发版，无版本递增门禁）。故仓根 `_*` 整片忽略。
+/_*
+# 例外：确有长期价值的仓根工具/资产迁入 scripts/ 后不受影响；
+# 若确需在仓根长期保留某个 `_*` 文件，用 `!` 逐条放行并注明理由。
+
+# 工具/会话自有状态，非交付物
+/.agent-teams/
+/.qoder-credits/
+/.codegraph/
+/.vibe-loop.json
+
+# Windows shell 未展开的 %SystemDrive% 字面量被当目录名建出来（外部工具
+# known-folder 落盘，09-21 12:54 与 v1.1.1 发版会话同分钟）
+/%SystemDrive%/
+
+# 仓根 0 字节 config.yaml：会话重定向误建。加载项清单只在
+# huijian_voice/config.yaml；Supervisor 只扫一级子目录所以不致报错，
+# 但 add -A 后会成为商店仓根部空 manifest，而 ci.yaml 的 YAML 语法门
+# 对空文件 safe_load→None 照样打 OK，抓不住。
+/config.yaml
+
+# 隔离区：疑似垃圾但不确定是否有人在用的东西先移到这里，不直接删
+/_quarantine/
+
+# 仓根内部方案/纪要（OTA 方案、深审报告、三端协议方案、发布纪要…）。
+# CLAUDE.md 铁律"内部文档禁发"：这些是工作台稿，不是交付物。仓根只允许
+# README/CHANGELOG/CLAUDE 三件套对外，其余 .md 一律不入库；要长期留存就
+# 放 docs/internal/（该目录同样被忽略，但不会被任何 COPY/打包路径带走）。
+/*.md
+!README.md
+!CHANGELOG.md
+!CLAUDE.md
+
+# 加载项目录内的会话日志（如 _v1097_full.log）：`/_*` 是根锚定的，挡不到这里，
+# 而 `git add huijian_voice/` 是会发生的。
+/huijian_voice/_*
+/huijian_voice/*.log

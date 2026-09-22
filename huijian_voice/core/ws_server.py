@@ -52,6 +52,7 @@ def make_ws_app(ctx: AppContext) -> web.Application:
     app[CTX_KEY] = ctx          # 处理器经 request.app 取用（闭包全局名是移植手误）
     app.router.add_get("/xiaozhi/v1/{channel}", _ws_handler)
     app.router.add_get("/healthz", _health)
+    app.router.add_get("/readyz", _readyz)
     app.router.add_get("/discover", _discover)
     # allow_head=False（v1.0.65 审查批 F-OTA-03）：微信/企业微信/浏览器的链接
     # 预览器会对 URL 先发 HEAD——默认 allow_head=True 时 HEAD 复用同一 handler，
@@ -193,9 +194,46 @@ async def _discover(request: web.Request) -> web.Response:
     })
 
 
+# 模型资产"已经判负"的状态：不是"还没轮到"，是下不来了（源全失败/需手动导入）。
+_FATAL_MODEL_STATES = ("failed", "incomplete", "manual")
+
+
+def _readiness(ctx) -> dict:
+    """就绪判定 + 分因。
+
+    引擎是懒加载（第一句话才载），所以 asr_ready=False **本身不是故障**。
+    把 /healthz 直接改成"引擎没载就 503"，会让一台十分钟没人说话的正常客户机
+    被 Supervisor 无限重启——比"watchdog 永远绿"更糟。真故障判据是模型资产已
+    判负：那时引擎永远起不来，且重启也救不回来（下载还会再失败）。
+    """
+    snap = {}
+    snapshot = getattr(ctx.store, "snapshot", None)
+    if callable(snapshot):
+        try:
+            snap = snapshot() or {}
+        except Exception:  # noqa: BLE001 探针不得把自己弄成 500
+            logger.exception("[WS] 模型状态快照读取失败（healthz 降级为无资产信息）")
+            snap = {}
+    fatal = sorted(k for k, v in snap.items()
+                   if v.get("state") in _FATAL_MODEL_STATES and not v.get("ready"))
+    return {
+        "ok": not fatal,
+        "asr_ready": bool(ctx.asr and ctx.asr.ready()),
+        "tts_ready": bool(ctx.tts and ctx.tts.ready()),
+        "sessions": len(ctx.sessions),
+        "models_fatal": fatal,
+        "models": {k: v.get("state") for k, v in sorted(snap.items())},
+    }
+
+
 async def _health(request: web.Request) -> web.Response:
-    ctx = request.app[CTX_KEY]
-    ready = bool(ctx.asr and ctx.asr.ready())
-    return web.json_response({"ok": True, "asr_ready": ready,
-                              "tts_ready": bool(ctx.tts and ctx.tts.ready()),
-                              "sessions": len(ctx.sessions)})
+    """Supervisor watchdog 目标（config.yaml:26）。状态码语义一字不动：恒 200，
+    只在 body 里把就绪与判负面如实带出。真就绪探针见 /readyz。"""
+    return web.json_response(_readiness(request.app[CTX_KEY]))
+
+
+async def _readyz(request: web.Request) -> web.Response:
+    """严格就绪探针：仅当模型资产判负才 503。watchdog 换成它是安全的一行改动，
+    但那是全体客户的重启行为变更，需先在真实安装上看到 /healthz 的 body 再决定。"""
+    body = _readiness(request.app[CTX_KEY])
+    return web.json_response(body, status=200 if body["ok"] else 503)

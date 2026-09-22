@@ -146,6 +146,24 @@ class KlarClient:
             if probe:
                 self._probing = False
 
+    def state(self) -> dict:
+        """熔断与降级的可观测面（/api/health 消费，永不抛）。
+
+        klar 掉线在客户现场的唯一表征是"复杂句听不懂"——降级本身是对的
+        （fail-open 是本层的定义），但**降了级没人知道**就等于缺陷。v1.0.96
+        同口径：每条降级路要带回具名分因。
+        """
+        now = time.monotonic()
+        left = max(0.0, self._cooldown_until - now)
+        return {
+            "fails": self._fails,
+            "circuit_open": self._fails >= _FAIL_THRESHOLD and left > 0,
+            "cooldown_left_s": round(left, 1),
+            "probing": self._probing,
+            "parsed_ok": self.parsed_ok,
+            "last_error": self.last_error,
+        }
+
     def _note_fail(self, err: str) -> None:
         self.last_error = err
         self._fails += 1

@@ -36,7 +36,10 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Coroutine, Optional
 
 from . import const
-from .nlu.fast_path import (END_DIALOGUE_INTENT, FastPath, Plan,
+from .nlu.fast_path import (END_DIALOGUE_INTENT, FLAG_ANAPHORA_STRIPPED,
+                            FLAG_CHAIN_ANAPHORA, FLAG_PRONOUN_TARGET,
+                            TRACE_TAG_CHAIN, TRACE_TAG_CONTEXT,
+                            FastPath, Plan,
                             attribute_domain_target, is_end_dialogue, is_pronoun,
                             is_whole_house, split_compound)
 from .nlu import targets as T
@@ -832,6 +835,11 @@ class Pipeline:
         except Exception:
             ent = {}
         if ent is None:
+            # get_state 返回 None 有两种真因：端点确实不存在，或桥根本读不到
+            # （states 空）。把后者也播报成"请到设置-音乐重新选择"，是当着用户
+            # 的面把人支进死胡同——真因在通道，重选端点没用（v1.0.97 同族）。
+            if getattr(self.ha, "reachable", True) is False:
+                return "抱歉，连不上 HA，暂时读不到播放端点，请检查 HA 通道后再试"
             return (f"抱歉，HA 里找不到播放端点 {entity}，"
                     "请到 设置-音乐 重新选择")
         st = str((ent or {}).get("state") or "")
@@ -1448,7 +1456,8 @@ class Pipeline:
             if not plans:
                 return None
         first = plans[0]
-        chain_notes = [t for p in plans[1:] for t in p.trace if "链内回指" in t]
+        chain_notes = [t for p in plans[1:] if FLAG_CHAIN_ANAPHORA in p.flags
+                       for t in p.trace if t.startswith(f"{TRACE_TAG_CHAIN}:")]
         merged = Plan(intent=first.intent, args=first.args, source=first.source,
                       utterance=text,
                       trace=list(first.trace) + chain_notes + [f"复合x{len(plans)}"],
@@ -1497,13 +1506,14 @@ class Pipeline:
             now = time.time()
             ttl = float(self.settings.get("dialog.context_ttl_s", CONTEXT_TTL_S))
             fresh = bool(spec) and (now - spec["ts"] <= ttl)
-        # 回指标记：fast_path 已裁定的"代词目标/回指"trace 最可靠；裸代词句与
-        # 句首副词句式（"再打开"/"把它关了"）兜底文本级判定。
-        marked = (any(("代词目标" in t or "回指→" in t) for t in plan.trace)
+        # 回指标记：fast_path 已裁定的"代词目标/回指"以**旗标**为准（trace 文案
+        # 只作诊断，改措辞不得改语义）；裸代词句与句首副词句式（"再打开"/"把它
+        # 关了"）兜底文本级判定。
+        marked = (bool({FLAG_PRONOUN_TARGET, FLAG_ANAPHORA_STRIPPED} & plan.flags)
                   or is_pronoun(text) or "它" in text or "们" in text
                   or any(t in text for t in ("再", "还是", "继续", "也")))
         injected = False
-        tag = "链内回指" if seed is not None else "上下文"
+        tag = TRACE_TAG_CHAIN if seed is not None else TRACE_TAG_CONTEXT
         if fresh and (marked or plan.intent in ("AdjustDeviceAttribute", "SetDeviceMode")):
             # 目标继承：慧尖 target 形态（含基础 Turn*；空 args 也算——代词句
             # _build_plan 产 args={}）直接复装；klar 平铺走 area/entity_id 支路
@@ -1519,6 +1529,9 @@ class Pipeline:
                 args["entity_id"] = spec["target"]
                 plan.trace.append(f"{tag}:沿用实体 {spec['target']}")
                 injected = True
+            if injected and seed is not None:
+                # 链内回指旗标就地落，供 _is_anaphoric/复合链聚合消费
+                plan.mark(FLAG_CHAIN_ANAPHORA)
         if not injected:
             if (plan.intent in ("AdjustDeviceAttribute", "SetDeviceMode")
                     and not args.get("target")):
@@ -1537,8 +1550,8 @@ class Pipeline:
     @staticmethod
     def _is_anaphoric(plan: Plan, text: str) -> bool:
         """该计划的目标是否来自代词/回指解析（此类目标不得再叠卫星区域）。"""
-        return (any(("代词目标" in t or "回指→" in t or "链内回指" in t)
-                    for t in plan.trace)
+        return (bool({FLAG_PRONOUN_TARGET, FLAG_ANAPHORA_STRIPPED,
+                      FLAG_CHAIN_ANAPHORA} & plan.flags)
                 or is_pronoun(text) or "它" in text or "们" in text)
 
     def _apply_spatial(self, plan: Plan, args: dict, origin: str) -> None:

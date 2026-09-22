@@ -6,6 +6,19 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      force_republish:
+        description: '明知故犯地重发已存在的 tag（覆盖已发布镜像与 Release）'
+        type: boolean
+        default: false
+
+# 同一时刻只允许一条发版链：v1.1.5 首发即因 push-acr 跨境写超时挂掉
+# （run 35626978134），若此时又有第二次 push 触发并发构建，两个 job 会交错
+# 写同一 ACR tag。cancel-in-progress 必须为 false——进行中的 ACR 上传被中断
+# 会留下半成品 manifest，比排队慢更糟。
+concurrency:
+  group: huijian-release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   ARCHITECTURES: '["amd64", "aarch64"]'
@@ -127,6 +140,43 @@ jobs:
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "提取到版本号: $VERSION"
+
+      - name: 发布闸口——同名 tag 已存在即停
+        # release job 是 "Create or Update Release"（ci.yaml 原有语义），且
+        # push-acr 会把镜像 tag 覆写进 ACR。config.yaml 版本号没涨就重推
+        # main，会把已发布版本原地换掉：老用户版本串未变，永远收不到更新，
+        # 也永远不知道自己被换了镜像。判据区分两种情形——
+        #   tag 指向本次同一 commit → 只是重跑失败的构建，放行；
+        #   tag 指向别的 commit     → 真覆盖，拦停（需 force_republish 明示）。
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          # 必须是 `|| true`：run 步默认 set -e，ls-remote 失败（临时网络/鉴权抖动）
+          # 会让 prepare job 直接红，闸口本身反而卡死发布链——闸口不得比它守的事更脆。
+          REFS=$(git ls-remote origin 2>/dev/null || true)
+          if [ -z "$REFS" ]; then
+            echo "::warning title=tag 闸口降级::git ls-remote origin 无输出，本轮跳过存在性判定"
+            exit 0
+          fi
+          DIRECT=$(awk -v r="refs/tags/v$VERSION" '$2==r{print $1}' <<<"$REFS")
+          # 附注标签的 refs/tags/vX 指向 tag 对象而非 commit，必须一起看 peeled
+          # 的 refs/tags/vX^{}——否则同一 commit 的重跑会被误判成"指向他处"拦停
+          PEELED=$(awk -v r="refs/tags/v$VERSION^{}" '$2==r{print $1}' <<<"$REFS")
+          TARGET="${PEELED:-$DIRECT}"
+          if [ -z "$TARGET" ]; then
+            echo "tag v$VERSION 未发布过，放行"
+            exit 0
+          fi
+          echo "已存在 tag v$VERSION -> ${TARGET:0:8}"
+          if [ "$TARGET" = "${{ github.sha }}" ]; then
+            echo "::notice title=重跑同一 commit::v$VERSION 指向本次 commit，按重跑放行"
+            exit 0
+          fi
+          if [ "${{ inputs.force_republish }}" = "true" ]; then
+            echo "::warning title=强制重发::正在覆盖已发布的 v$VERSION（原指向 ${TARGET:0:8}）"
+            exit 0
+          fi
+          echo "::error title=拒绝覆盖已发布版本::v$VERSION 已存在且指向 ${TARGET:0:8}（本次 ${{ github.sha }}）。升 huijian_voice/config.yaml 的版本号，或改用 workflow_dispatch 并勾选 force_republish。"
+          exit 1
 
       - name: Generate changelog
         id: changelog

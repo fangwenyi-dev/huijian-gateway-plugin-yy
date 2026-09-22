@@ -136,10 +136,10 @@ def store(tmp_path):
     lock = tmp_path / "firmware.lock.json"
     lock.write_text(json.dumps({"releases": [
         {"version": "2.9.9", "file": "huijian-s3-2.9.9.bin",
-         "urls": ["https://example.invalid/a.bin"], "sha256": "0" * 64,
+         "urls": ["http://127.0.0.1:1/a.bin"], "sha256": "0" * 64,
          "size": 10, "notes_zh": "测试版"},
         {"version": "3.0.0", "file": "huijian-s3-3.0.0.bin",
-         "urls": ["https://example.invalid/b.bin"], "size": 10},   # 故意缺 sha256
+         "urls": ["http://127.0.0.1:1/b.bin"], "size": 10},   # 故意缺 sha256
     ]}), encoding="utf-8")
     st = FirmwareStore(root=tmp_path / "data", lock_path=lock)
     return st
@@ -200,7 +200,9 @@ def test_download_refuses_without_sha(store):
     assert not ok and "sha256" in msg, "缺校验值必须拒下载（供应链闸）"
     ok, msg = store.download("9.9.9")
     assert not ok, "lock 未登记版本拒绝"
-    # 唯一源失败（example.invalid）→ 换源耗尽，如实失败
+    # 唯一源失败（127.0.0.1:1 连接被拒，秒失败）→ 换源耗尽，如实失败。
+# 旧形态用 example.invalid：.invalid 走真 DNS，本机解析超时 11s×2 占掉
+# 全量回归的 31%——失败语义相同，但没有理由让每次都付网络超时。
     ok, msg = store.download("2.9.9")
     assert not ok and "失败" in msg
 
@@ -386,7 +388,7 @@ def test_versions_survive_dirty_size(store, monkeypatch):
     lock = store.lock_path
     lock.write_text(json.dumps({"releases": [
         {"version": "5.5.5", "file": "d-5.5.5.bin",
-         "urls": ["https://example.invalid/d"], "sha256": "0" * 64, "size": "10KB"},
+         "urls": ["http://127.0.0.1:1/d"], "sha256": "0" * 64, "size": "10KB"},
     ]}), encoding="utf-8")
     srv = _serve(make_admin_app(_admin_ctx(store, {})))
     port = next(srv)
