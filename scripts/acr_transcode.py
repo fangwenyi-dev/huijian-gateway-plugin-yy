@@ -32,6 +32,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -145,23 +146,40 @@ class Registry:
         h.update(headers or {})
         return http_get(f"https://{self.host}{path}", h, timeout=timeout, binary=binary)
 
-    def _conn(self, timeout=120):
+    def _conn(self, timeout=300):
         return http.client.HTTPSConnection(self.host, timeout=timeout)
 
     def request(self, method, path, repo, body: bytes, headers=None,
-                actions=("pull", "push"), status_ok=(200, 201, 202, 204)):
+                actions=("pull", "push"), status_ok=(200, 201, 202, 204),
+                attempts=4):
+        # GitHub runner → 国内 ACR 的跨境链路写超时是常态（v1.1.5 两次 run 均死于
+        # push_blob 的 TLS write timeout，签名一致=非偶发）。连接级异常按指数退避
+        # 重试；HTTP 状态错不重试（语义错误重发也不会变好）。PATCH 带 Content-Range
+        # =幂等放置，同 session 重发同段安全。
         t = self.token(repo, list(actions))
         h = {"Authorization": "Bearer " + t}
         h.update(headers or {})
-        c = self._conn()
-        c.request(method, path, body=body, headers=h)
-        r = c.getresponse()
-        data = r.read()
-        loc = r.getheader("Location")
-        c.close()
-        if r.status not in status_ok:
-            raise RuntimeError(f"{method} {path} → {r.status} {data[:200].decode('utf-8','replace')}")
-        return r.status, loc, data
+        last = None
+        for i in range(attempts):
+            c = self._conn()
+            try:
+                c.request(method, path, body=body, headers=h)
+                r = c.getresponse()
+                data = r.read()
+                loc = r.getheader("Location")
+                if r.status not in status_ok:
+                    raise RuntimeError(
+                        f"{method} {path} → {r.status} {data[:200].decode('utf-8','replace')}")
+                return r.status, loc, data
+            except OSError as e:            # TimeoutError/SSLError/连接重置都属此类
+                last = e
+                log(f"  ↻ {method} {path.split('?')[0]} 网络异常({type(e).__name__})，"
+                    f"第{i + 1}/{attempts}次重试")
+                if i + 1 < attempts:
+                    time.sleep(5 * (2 ** i))
+            finally:
+                c.close()
+        raise RuntimeError(f"{method} {path} 重试 {attempts} 次仍失败：{last}")
 
 
 # ────────────────────────── blob 上传（分块 PATCH 流，ACR 已实证） ──────────────────────────
