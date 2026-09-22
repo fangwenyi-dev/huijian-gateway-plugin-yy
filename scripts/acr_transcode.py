@@ -121,11 +121,11 @@ class Registry:
             realm, service = m.group(1), (s.group(1) if s else self.host)
         self._realm, self._service = realm, service
 
-    def token(self, repo, actions):
+    def token(self, repo, actions, fresh=False):
         self._challenge()
         scope = f"repository:{repo}:{','.join(actions)}"
         key = scope
-        if key in self._tokens:
+        if not fresh and key in self._tokens:
             return self._tokens[key]
         hdr = {}
         if self.user:
@@ -152,21 +152,27 @@ class Registry:
     def request(self, method, path, repo, body: bytes, headers=None,
                 actions=("pull", "push"), status_ok=(200, 201, 202, 204),
                 attempts=6):
-        # GitHub runner → 国内 ACR 的跨境链路写超时是常态（v1.1.5 两次 run 均死于
-        # push_blob 的 TLS write timeout，签名一致=非偶发）。连接级异常按指数退避
-        # 重试；HTTP 状态错不重试（语义错误重发也不会变好）。PATCH 带 Content-Range
-        # =幂等放置，同 session 重发同段安全。
-        t = self.token(repo, list(actions))
-        h = {"Authorization": "Bearer " + t}
-        h.update(headers or {})
+        # GitHub runner → 国内 ACR 的跨境链路写超时是常态（v1.1.5 三连 run 实证：
+        # 块写超时、upload session 被掐、以及 run 35678680808 的 layer4 推到 97%
+        # 后 token 过期→新 session POST 全 401）。纪律：①连接级异常(OSError)指数
+        # 退避重试；②**每次重试都 fresh=True 重取 token**（ACR 临时 token 有效期
+        # 短，慢链路单 blob 十分钟级上传中途必过期）；③401 也走重试；④其余 HTTP
+        # 状态错不重试（语义错误重发不会变好）。PATCH 带 Content-Range=幂等放置。
+        h = dict(headers or {})
         last = None
         for i in range(attempts):
             c = self._conn()
             try:
+                t = self.token(repo, list(actions), fresh=(i > 0))
+                h["Authorization"] = "Bearer " + t
                 c.request(method, path, body=body, headers=h)
                 r = c.getresponse()
                 data = r.read()
                 loc = r.getheader("Location")
+                if r.status == 401 and i + 1 < attempts:
+                    log(f"  ⚿ {method} 401（token 过期？），重取 token 重试")
+                    time.sleep(2)
+                    continue
                 if r.status not in status_ok:
                     raise RuntimeError(
                         f"{method} {path} → {r.status} {data[:200].decode('utf-8','replace')}")
