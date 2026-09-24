@@ -127,6 +127,17 @@ class ModelStore:
                 return False
         return True
 
+    @staticmethod
+    def _tarball_required(entry: dict) -> list:
+        """主包自带应检文件 = required_files 剔除 extra_files 附属。
+
+        附属（如 matcha 的 vocos 声码器）由二跳补下，**不参与**解包后即刻校验——
+        否则解包闸因附属缺失恒 False、补下逻辑永不被调用（鸡生蛋，2026-09-24
+        matcha「解包后校验文件缺失」永久 incomplete 实锤）。"""
+        extra = {ef.get("file") for ef in (entry.get("extra_files") or [])
+                 if ef.get("file")}
+        return [rf for rf in entry.get("required_files", []) if rf not in extra]
+
     def _read_stamp(self, key: str) -> Optional[str]:
         try:
             raw = (self.models_dir / key / ".extracted_ok").read_text(
@@ -310,6 +321,8 @@ class ModelStore:
                 self._set_status(key, state="incomplete",
                                  detail=f"附属文件 {name} 获取失败（可放 import/{name}）")
                 return False
+        if self.is_ready(key):
+            self._set_status(key, state="ready", pct=100, detail="已就绪")
         return self.is_ready(key)
 
     @staticmethod
@@ -411,6 +424,14 @@ class ModelStore:
             with open(target / ".extracted_ok", "w", encoding="utf-8") as mf:
                 mf.write(f"{entry.get('tarball', tar_path.name)}|"
                          f"{entry.get('sha256', '')}")
+            # 鸡生蛋根修（2026-09-24 matcha 实锤）：此处只判**主包自带**文件
+            # （required_files 剔除 extra_files 附属），齐即返回 True 交
+            # _ensure_extra_files 补附属（vocos 声码器等）。此前直接 is_ready 全量
+            # 判（含附属）⇒ 附属未下时恒 False ⇒ 补下永不被调用 ⇒ 永久 incomplete。
+            base = self._resolved_dir(key, entry)
+            if not self._files_ok(base, self._tarball_required(entry)):
+                self._set_status(key, state="incomplete", detail="解包后校验文件缺失")
+                return False
             if self.is_ready(key):
                 self._set_status(key, state="ready", pct=100, detail="已就绪")
                 logger.info("[模型] %s 就绪 @ %s", key, target)
@@ -418,14 +439,13 @@ class ModelStore:
                 # SenseVoice+kokoro ≈1.4GB 死重再无删除点（本仓 _write_status
                 # S17-2「必关必删」同纪律）。import/ 目录是用户手动导入口
                 # （lock:5「放包即用」），**不动**；校验失败路径也不动（留待重试）。
+                # 附属未就绪时暂留归档：补下失败重试不必重拉主包。
                 if tar_path.parent == self.models_dir:
                     try:
                         tar_path.unlink(missing_ok=True)
                     except OSError as e:
                         logger.warning("[模型] 归档删除失败（不阻断）: %s", e)
-                return True
-            self._set_status(key, state="incomplete", detail="解包后校验文件缺失")
-            return False
+            return True
         except Exception as e:
             logger.error("[模型] 解包 %s 失败: %s", key, e)
             self._set_status(key, state="failed", detail=str(e))

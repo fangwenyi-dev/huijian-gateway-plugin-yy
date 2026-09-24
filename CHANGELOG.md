@@ -1,5 +1,16 @@
 # 变更日志
 
+## [1.1.9] - 2026-09-24 matcha「解包后校验文件缺失」鸡生蛋根修
+- 根因：`_extract` 解包后用 `is_ready` 全量判 `required_files`（含 vocos 声码器等 extra_files 附属），
+  而附属只由 `_ensure_extra_files` 二跳补下、且仅在 `_extract` 返回 True 后才被调用 ⇒ 附属未下时
+  `_extract` 恒 False ⇒ 补下永不被触发 ⇒ matcha 永久「不完整/解包后校验文件缺失」（2026-09-24 面板实锤）。
+- 修复：解包闸改判 `_tarball_required`（required_files 剔除 extra_files 附属）——主包自带文件齐即放行交
+  二跳补附属；附属补齐后置 ready；主包自带文件真缺（坏包）仍判 incomplete 不放宽；附属未就绪时暂留
+  下载归档（补下失败重试不必重拉主包）。新增 `test_v119_store_extra_files_gate`（3 钉，import/ 零网络
+  走全链路：修复前 ensure 恒 False、修复后 True 且 vocos 补齐、坏包仍 incomplete）。
+- 生效后处置：加载项更新到 v1.1.9，面板对 tts_matcha_zh_en 点「下载」即补齐声码器转 ready（或手动投放
+  vocos-16khz-univ.onnx 到 /data/models/import/ 亦可）。
+
 ## [1.1.8] - 2026-09-24 固件 v2.1.65 与加载项同步登记（OTA 下发打通）
 - 固件同步：`firmware.lock.json` 登记 **v2.1.65** 出货档（共享单 AFE·SE 关 + 设备侧 AEC + 双麦 MMR +
   端点闸 1500，即 SenseVoice 台架复测所用档）。固件仓 gujian-esp32-ha-V3 为**私仓**，其 release 资产
