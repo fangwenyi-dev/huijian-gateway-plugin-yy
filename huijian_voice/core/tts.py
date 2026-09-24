@@ -747,18 +747,19 @@ class TtsEngine:
 
     def _provider(self) -> str:
         """当前本地引擎档（v1.1.5）：local_kokoro/local_matcha/local_melo；
-        未知 local_* 值回落 kokoro（与云档 startswith 双吃同纪律，配置写坏
-        绝不哑播）。云档判定在调用侧（startswith("cloud")）。"""
-        prov = str(self.settings.get("tts.provider", "local_kokoro"))
-        return prov if prov in PROVIDER_MODEL_KEYS else "local_kokoro"
+        未知 local_* 值回落 **local_melo**（v1.1.10 默认档改 melo：单女声 sid0、
+        台架横评 RTF 0.197 优于 kokoro 0.264 且更稳；配置写坏绝不哑播）。
+        云档判定在调用侧（startswith("cloud")）。"""
+        prov = str(self.settings.get("tts.provider", "local_melo"))
+        return prov if prov in PROVIDER_MODEL_KEYS else "local_melo"
 
     def model_key(self) -> str:
         """当前档需要就绪的模型键（main._loop_models 预下载/换绑判定用）。"""
         return PROVIDER_MODEL_KEYS[self._provider()]
 
     def loaded_provider(self) -> str:
-        """在载引擎档；未标（旧桩/升级瞬态）按历史默认 kokoro。"""
-        return getattr(self, "_loaded_prov", None) or "local_kokoro"
+        """在载引擎档；未标（旧桩/升级瞬态）按默认 melo（v1.1.10 默认档）。"""
+        return getattr(self, "_loaded_prov", None) or "local_melo"
 
     def ready_for_current_provider(self) -> bool:
         return self._tts is not None and self.loaded_provider() == self._provider()
@@ -904,7 +905,7 @@ class TtsEngine:
         本指纹只认 sid 数值，Kokoro 换包（v1_0→v1_1 那次真实发生过：同 sid 不同嗓）
         不换键=HA 消息哈希盘缓存永远命中旧包音频，与 speed 漏入同族同病灶。
         取不到 lock（假件/缺条目）回落 "u"，行为确定。"""
-        prov = str(self.settings.get("tts.provider", "local_kokoro"))
+        prov = str(self.settings.get("tts.provider", "local_melo"))
         speed_s = f"s{self._speed():g}"
         if prov.startswith("cloud"):
             cloud = self.settings.get("tts.cloud") or {}

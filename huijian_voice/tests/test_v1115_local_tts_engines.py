@@ -61,7 +61,7 @@ def test_provider_model_key_mapping_and_unknown_fallback():
     assert _engine({"tts.provider": "local_kokoro"}).model_key() == "tts_kokoro_multilang"
     assert _engine({"tts.provider": "local_matcha"}).model_key() == "tts_matcha_zh_en"
     assert _engine({"tts.provider": "local_melo"}).model_key() == "tts_melo_zh_en"
-    assert _engine({"tts.provider": "local_不存在的档"}).model_key() == "tts_kokoro_multilang"
+    assert _engine({"tts.provider": "local_不存在的档"}).model_key() == "tts_melo_zh_en"  # v1.1.10 未知档回落 melo
 
 
 def test_fingerprint_engine_prefix_rotates_but_kokoro_compat():

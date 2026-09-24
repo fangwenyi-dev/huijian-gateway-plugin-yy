@@ -13,8 +13,8 @@ def test_first_boot_creates_and_persists(settings):
 
 def test_defaults_match_decisions(settings):
     assert settings.get("stt.provider") == "local_paraformer"
-    assert settings.get("tts.provider") == "local_kokoro"
-    assert settings.get("tts.sid") == 28               # 定案默认 zf_044（用户拍板 2026-09-19，取代 2026-09-13 的 sid18 zf_026 定案）
+    assert settings.get("tts.provider") == "local_melo"   # v1.1.10 默认档改 melo
+    assert settings.get("tts.sid") == 0                   # melo 单女声 sid0（kokoro 档用户自选 28）
     assert settings.get("tts.speed") == 1.25           # 定案默认语速 1.25（用户拍板 2026-09-19，旧默认 1.0）
     assert settings.get("llm.enabled") is False        # LLM 默认关
     assert settings.get("power.unload_when_idle_min") == 0
@@ -37,7 +37,7 @@ def test_masked_writeback_noop(settings):
 def test_corrupt_file_rebuilt(settings):
     settings.path.write_text("{ broken", encoding="utf-8")
     settings.load_or_create()
-    assert settings.get("tts.sid") == 28
+    assert settings.get("tts.sid") == 0    # v1.1.10 默认 sid0（melo 默认档）
     assert settings.path.with_suffix(".json.bak").exists()
 
 

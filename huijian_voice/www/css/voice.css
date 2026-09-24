@@ -132,3 +132,46 @@ main { position: relative; z-index: 1; }
 main > section { display: none; }
 main > section.on { display: block; animation: hj-fade .25s ease; }
 @keyframes hj-fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; } }
+
+/* ── v1.1.10 状态行/模型就绪度卡片布局根修 ─────────────────────
+   此前 .stat-row/.stat-label/.stat-val 无任何样式：label 与 value 两个 span
+   在 .grid 窄格内 inline 流排，长 value（pill+百分比+detail）被挤成 1 字宽竖排
+   （截图「解包后校验文件缺失」竖排溢出）。改 flex：label 左、value 右可换行，
+   detail 独占一行右对齐正常折行。 */
+.stat-row { display: flex; flex-wrap: wrap; align-items: center;
+    justify-content: space-between; gap: 6px 10px; min-width: 0;
+    padding: 10px 12px; border-radius: 12px;
+    background: rgba(148, 163, 184, .06);
+    border: 1px solid rgba(148, 163, 184, .14); }
+.stat-label { font-size: 13px; font-weight: 600; color: var(--text-primary, #e2e8f0);
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.stat-val { display: flex; flex-wrap: wrap; align-items: center;
+    justify-content: flex-end; gap: 6px; min-width: 0; margin-left: auto; }
+.stat-val .hint { margin: 0; flex-basis: 100%; text-align: right;
+    word-break: break-word; line-height: 1.5; }
+/* 模型就绪度格宽放宽，避免 4 列挤成竖排 */
+#modelPills.grid { grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); }
+
+/* ── 可收起说明（场景/自动化怎么用）── */
+.help-collapse > summary { cursor: pointer; font-size: 13px; font-weight: 700;
+    color: var(--glow); list-style: none; display: flex; align-items: center;
+    gap: 8px; user-select: none; }
+.help-collapse > summary::-webkit-details-marker { display: none; }
+.help-collapse > summary::before { content: "▸"; color: var(--primary-light);
+    transition: transform .18s ease; }
+.help-collapse[open] > summary::before { transform: rotate(90deg); }
+.help-collapse[open] > .hint { margin-top: 10px; }
+
+/* ── v1.1.10 手机端适配 ───────────────────────────────────────
+   此前 voice.css 无 @media：窄屏 .grid 仍 auto-fill 多列、nav 页签横排溢出、
+   stat-row 双列挤压。窄屏改单列 + 页签换行 + 状态行纵排。 */
+@media (max-width: 640px) {
+    .grid, #modelPills.grid { grid-template-columns: 1fr; }
+    .stat-row { flex-direction: column; align-items: flex-start; gap: 6px; }
+    .stat-val { margin-left: 0; justify-content: flex-start; }
+    .stat-val .hint { text-align: left; }
+    nav { flex-wrap: wrap; gap: 6px; }
+    nav button { flex: 1 1 auto; min-width: 84px; padding: 8px 10px; font-size: 12px; }
+    .card { padding: 14px; }
+    table { font-size: 12px; }
+}

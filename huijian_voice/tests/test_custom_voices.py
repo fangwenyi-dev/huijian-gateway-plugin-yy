@@ -107,7 +107,7 @@ def test_resolve_sid_int_name_and_guards(tmp_path):
     eng.settings = _Settings({})
     assert eng.resolve_sid() == 0
     eng_k = _engine(tmp_path, {"tts.sid": "999"}, n_spk=103)
-    assert eng_k.resolve_sid() == 28                   # 真 Kokoro 规模：默认 28 有效
+    assert eng_k.resolve_sid() == 0                    # v1.1.10 默认 sid0（melo 默认档）；103 规模下 0 有效
 
 
 # ── voices_status / HTTP ───────────────────────────────────────

@@ -16,8 +16,8 @@
      v1.0.42 的 #1d1750「过紫」与更早 #030712「过黑」均已作废，勿回潮 -->
 <meta name="theme-color" content="#071426">
 <title>慧尖HA语音插件</title>
-<link rel="stylesheet" href="css/huijian.css?v=1.1.9">
-<link rel="stylesheet" href="css/voice.css?v=1.1.9">
+<link rel="stylesheet" href="css/huijian.css?v=1.1.10">
+<link rel="stylesheet" href="css/voice.css?v=1.1.10">
 </head>
 <body>
 <!-- 「星辰大海」背景层（与网关加载项同一设计标准/同一固定种子＝同一片天）：
@@ -241,7 +241,8 @@
     <button class="act gray" id="autoBtn">刷新</button>
     <div class="hint">「语音引擎」= 说「当客厅温度超过28度就打开空调」这类话创建的自动化（测试/删除/改阈值就在操作列）；「无实体」多为 YAML 定义未重载。</div>
   </div>
-  <div class="card"><h3>场景和自动化怎么使用</h3>
+  <div class="card"><details class="help-collapse">
+    <summary>场景和自动化怎么使用 <span class="mut">（点此展开 / 收起）</span></summary>
     <div class="hint" style="line-height:2.0">
       <b>① 语音场景——一句话当开关</b>：对语音助手说「<b>当我说晚安，就关闭客厅灯</b>」；
       创建成功后，任何时候说「晚安」就执行。一条场景最多带 3 个动作：
@@ -261,6 +262,7 @@
       换动作说「把场景晚安改成关闭所有灯」；自动化——操作列可<b>测试执行</b>、<b>删除</b>、
       数值条件<b>改阈值</b>；要改触发条件本身，删掉再说一句新的（语音/web 均可）。
     </div>
+    </details>
   </div>
 </section>
 
@@ -312,7 +314,7 @@
 
 <script>
 "use strict";
-const CURRENT_VERSION = "1.1.9";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
+const CURRENT_VERSION = "1.1.10";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
 // 音色表 = kokoro-multi-lang-v1_1 官方 103 sid 全表（k2-fsa docs sid 表实证；
 // 标注=对用户上传试听样本的 CAM++ 声纹溯源榜：v1_1 不含晓晓/云扬，
 // sid18=zf_026 女声最似晓晓(0.454 全场最近)，sid81=zm_055 最似云扬）
@@ -1081,6 +1083,6 @@ $("#regenBtn").onclick = async ()=>{
   try { await post("/api/token/regenerate",{}); toast("已重置"); loadEndpoints(); } catch(e){ toast(e.message); }
 };
 </script>
-<script src="js/starsky.js?v=1.1.9"></script>
+<script src="js/starsky.js?v=1.1.10"></script>
 </body>
 </html>

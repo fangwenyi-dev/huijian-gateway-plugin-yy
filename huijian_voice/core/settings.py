@@ -36,13 +36,13 @@ DEFAULTS: dict[str, Any] = {
         "cloud": {"provider": "", "base_url": "", "api_key": "", "model": ""},
     },
     "tts": {
-        "provider": "local_kokoro",           # local_kokoro | local_matcha | local_melo | cloud
-                                              # （v1.1.5 新增 matcha/melo 本地档，均单女声 sid0；
-                                              # 未知 local_* 引擎读侧回落 kokoro）
+        "provider": "local_melo",            # local_kokoro | local_matcha | local_melo | cloud
+                                              # （v1.1.10 默认档改 melo：单女声 sid0、台架 RTF 0.197
+                                              # 优于 kokoro 0.264；未知 local_* 读侧回落 melo）
         # v1.0.65（深审 F11 定案）："cloud" 为正统拼法（Web UI 唯一写入值）；
         # "cloud_openai_compat" 为历史别名（存量 settings.json 与测试仍用，
         # 引擎读侧 startswith("cloud") 双吃，UI 显示已放宽——不再静默翻转）。
-        "sid": 28,                             # 定案默认：zf_044（女声；用户拍板 2026-09-19，取代 2026-09-13 的 sid18 zf_026 定案）。103 音色 web 全可选
+        "sid": 0,                              # v1.1.10 默认档 melo=单女声 sid0。kokoro 档用户自选（28=zf_044 历史定案）
         "speed": 1.25,                         # 用户拍板 2026-09-19（旧默认 1.0）。服务端钳位 0.5–2.0（tts._SPEED_MIN/_SPEED_MAX），Web 滑条 0.6–2.0
         "cache_enabled": True,                 # 体验批 P0-4：句级 opus LRU 缓存（本地档）
         "cloud": {"provider": "", "base_url": "", "api_key": "", "model": "", "voice": "",

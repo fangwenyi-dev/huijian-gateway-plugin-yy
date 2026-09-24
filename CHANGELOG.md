@@ -1,5 +1,18 @@
 # 变更日志
 
+## [1.1.10] - 2026-09-24 默认 TTS 改 MeloTTS + 语音 Web UI 三修
+- 默认 TTS 档改 **local_melo**（tts_melo_zh_en，单女声 sid0）：settings/tts.py 读侧默认与未知档回落、
+  models.lock default_provider 同步翻转（melo=true、kokoro=false）。台架横评 melo RTF 0.197 优于
+  kokoro 0.264 且更稳；kokoro 仍可选（用户自选 sid，历史定案 28=zf_044）。存量 settings.json
+  若已显式写 tts.provider 则以其为准（读侧不静默翻转）。
+- Web UI 三修：①模型就绪度/状态卡片根修——`.stat-row/.stat-label/.stat-val` 此前无任何样式，
+  label+value 在窄格内 inline 流排致长 detail 竖排溢出（截图「解包后校验文件缺失」竖排）；改 flex
+  （label 左、value 右可换行、detail 独占行正常折行）+ `#modelPills` 列宽 minmax(250px,1fr)。
+  ②手机端适配——voice.css 补 `@media ≤640px`：grid/模型卡单列、nav 页签换行、状态行纵排、
+  卡片/表格收紧（此前 voice.css 无 @media，窄屏多列挤压+页签横排溢出）。③「场景和自动化怎么使用」
+  说明改 `<details>` 默认收起（summary 带展开/收起箭头），不再长期占屏。
+- 回归 1924 passed / 30 项环境失败零新增；3 个钉旧默认(kokoro/sid28)的测试随默认翻转更新。
+
 ## [1.1.9] - 2026-09-24 matcha「解包后校验文件缺失」鸡生蛋根修
 - 根因：`_extract` 解包后用 `is_ready` 全量判 `required_files`（含 vocos 声码器等 extra_files 附属），
   而附属只由 `_ensure_extra_files` 二跳补下、且仅在 `_extract` 返回 True 后才被调用 ⇒ 附属未下时
