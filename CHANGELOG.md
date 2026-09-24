@@ -12,6 +12,9 @@
   卡片/表格收紧（此前 voice.css 无 @media，窄屏多列挤压+页签横排溢出）。③「场景和自动化怎么使用」
   说明改 `<details>` 默认收起（summary 带展开/收起箭头），不再长期占屏。
 - 回归 1924 passed / 30 项环境失败零新增；3 个钉旧默认(kokoro/sid28)的测试随默认翻转更新。
+- CI e2e 就绪 need 同步（run_e2e.sh）：默认档改 melo 后 kokoro 不再主动下载，原 need 钉死
+  tts_kokoro_multilang 恒不满足⇒25min 超时⇒Release 被跳过（run 35987834390 实红）。TTS 侧改
+  「melo 或 kokoro 任一就绪即可」，对默认档翻转免疫。
 
 ## [1.1.9] - 2026-09-24 matcha「解包后校验文件缺失」鸡生蛋根修
 - 根因：`_extract` 解包后用 `is_ready` 全量判 `required_files`（含 vocos 声码器等 extra_files 附属），
