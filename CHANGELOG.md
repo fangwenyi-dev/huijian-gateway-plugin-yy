@@ -1,5 +1,35 @@
 # 变更日志
 
+## [1.1.7] - 2026-09-24 NLU 诚实执行 + 确认环健壮性 + 多卫星分桶（办公室台架 32b8 实证驱动）
+- 执行器诚实闸（问题1根修）：klar grounded `entity_id` 计划执行前查目标实体可用态——HA 对
+  `unavailable` 实体的 service call **照样回 success**（空操作），而 klar 直调走 call_service、
+  结果无 per-entity `states`，`_receipt` 回落顶层 success ⇒ 谎报「客厅的灯关了」（办公室实锤：
+  与可用射灯同名的离线孪生 `light.she_deng` 被命中）。新增 `_availability_refuse`：目标**全部**
+  确证 `unavailable` 才如实失败并点名设备；任一可用 / 不在快照（未知）/ 快照空（桥不通）一律
+  放行（宁漏放不误拒，同 `capability` 只读裁决纪律），只认 `unavailable` 不碰 `unknown` 瞬态。
+  补齐能力预裁只看 target 形、罩不住 entity_id 形的缺口。新增 `test_v117_unavailable_entity_gate`（10 钉）。
+- 确认环自适应 TTL（问题2根修）：30s 固定存活窗从「提示生成」算起，而长歧义提示（「家里有 N 台
+  设备名字相近…」）播报就吃掉 ~23s，办公室实测只剩 7.2s 给用户重唤醒+回答，稍一迟疑/唤醒重试/
+  「确认」被听错即超时 → 应答被当改口走 fallback。改按提示字数估算播报时长动态放宽（base + 字数
+  ×0.2s，封顶 +30s），短提示维持基线；无 `ttl` 键的旧挂起回落基线，是/否/改口三态语义一字不动。
+  `test_confirm_ttl_expiry` 随判据更新，另加 3 钉（旧形态回落/自适应单调/长提示跨基线仍生效）。
+- 多卫星 origin 分桶（问题2根修）：`device_hint` 原取 `request.remote`——但 WS 客户端是 HA 集成
+  不是卫星，多台卫星（bb28/32b8）全折成宿主 IP ⇒ 确认环/跨轮上下文按 IP 撞桶串台（一台挂起的
+  确认被另一台应答）。集成 `send_hello` 增 `device=entry.unique_id`（设备 MAC，稳定、跨重连不变），
+  加载项 hello 分支收敛 `device_hint` 为该 MAC；缺字段/畸形回落 `request.remote`，向后兼容旧集成。
+  `test_protocol_ws` 加 3 钉（device 命中/缺省回落/畸形忽略）。
+- 播报孤儿流根修（并批 WIP）：announce 腿推流句柄此前从未登记，三处 cancel 够不着 → 设备 barge-in
+  收口只回 AnnounceFinished、集成侧推流任务成孤儿。登记 `_announce_stream_task` + `_revoke_announce_stream`
+  （只吊销句柄+cancel，不代发 TTS_STREAM_END、不替任何流落状态），作 `_stream_tts_audio` 逐帧验
+  `_dl_seq` 自停之后的第二道防线。`test_announce_orphan_stream`。
+- ACR 分发 `get()` 401 自愈（并批 WIP）：`request()` 已 fresh 重取 token，但 `get()` 仍用缓存——
+  76MB 层传完 token 过期，下一层秒传探测 401（非 404）直接炸穿 push-acr。`get()` 401 时 fresh
+  重取再试（穷尽原样抛，交 call site 语义处理），非 401 不重试。`test_acr_transcode` 3 钉。
+- 本地 TTS 单音色档 UI（并批 WIP）：matcha/melo 均单女声 sid0，音色表与自定义音色上传只服务
+  Kokoro，Web UI 对其禁用防误配。`test_v1115_local_tts_engines`。
+- 回归：改前基线与改后红集逐 ID 差分零新增（本机 30 项失败=缺 libopus / Windows 无 SIGALRM /
+  磁盘满模拟 / www 母本仅本机存在，均环境性；CI Linux+libopus0+无母本 全绿）；新增 16 钉全过。
+
 ## [1.1.6] - 2026-09-22 交付链加固与静默失败收口（全仓优化盘点驱动）
 - 发布链：`.gitignore` 补齐仓根泄漏面（`/_* /*.md /huijian_voice/_* /_quarantine/` 等）——
   此前 79 个未跟踪会话产物逐 ID `check-ignore` 全部未忽略，一次 `git add -A` 即可把

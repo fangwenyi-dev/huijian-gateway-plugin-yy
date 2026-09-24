@@ -217,6 +217,46 @@ class Executor:
             logger.exception("[执行] 能力预裁异常（放行）")
             return None
 
+    async def _availability_refuse(self, name: str, args: dict) -> Optional[str]:
+        """v1.1.7（办公室实锤 light.she_deng unavailable 谎报「客厅的灯关了」）：
+        klar grounded entity_id 计划执行前查目标实体可用态。
+
+        病灶：HA 对 unavailable 实体的 service call **照样回 success**（空操作），
+        而 klar 直调走 call_service、结果无 per-entity `states`，_receipt 回落顶层
+        success ⇒ 谎报成功。能力预裁（_capability_refuse）只看 target 形，对
+        entity_id 形直接放行，罩不住这条。
+
+        闸规则（保守，宁漏放不误拒，同 capability.py:116/201 纪律）：
+          · 目标 entity_id **全部**在 states 快照里且**全部** state=='unavailable'
+            → 如实失败；
+          · 任一可用 / 目标不在快照（未知，快照可能不全）/ 快照空（桥不通）→ 放行；
+          · 只认 'unavailable'（确证离线），不碰 'unknown'（推送实体未首 poll 瞬态）。
+        永不抛。"""
+        try:
+            raw = (args or {}).get("entity_id")
+            eids = [raw] if isinstance(raw, str) and "." in raw else [
+                e for e in (raw or []) if isinstance(e, str) and "." in e]
+            if not eids:
+                return None
+            states = await self.ha.states()
+            if not states:
+                return None                       # 桥不通/快照空：拒=凭空少做，放行
+            present = [states[e] for e in eids if e in states]
+            if not present:
+                return None                       # 目标都不在快照=未知，不凭空拒
+            if not all(str((e or {}).get("state")) == "unavailable" for e in present):
+                return None                       # 有可用/未知台 → 放行（交 _receipt）
+            nm = ""
+            for e in present:
+                nm = str(((e.get("attributes") or {}).get("friendly_name")) or "")
+                if nm:
+                    break
+            what = f"「{nm}」" if nm else "目标设备"
+            return f"{what}现在离线（不可用），这条没执行成，等它恢复再试"
+        except Exception:  # noqa: BLE001 裁决故障=放行（宁多发一次，绝不少做）
+            logger.exception("[执行] 可用态预裁异常（放行）")
+            return None
+
     async def run(self, plan: Plan) -> tuple[bool, str]:
         """执行 Plan（klar 多分句/复合链逐步顺序执行）。返回 (success, 中文播报)。永不抛。"""
         steps = [(plan.intent, plan.args)] + [
@@ -241,6 +281,14 @@ class Executor:
                                  "indeterminate": False}
                 logger.info("[执行] %s %s → 能力预裁拦下 | %s", name, args, cap)
                 return False, "抱歉，" + cap
+            avail = await self._availability_refuse(name, args)
+            if avail is not None:
+                # v1.1.7：目标实体确证 offline → 如实失败，绝不发空操作再谎报成功
+                self.last_run = {"steps": len(steps), "applied": len(results),
+                                 "indeterminate": False}
+                logger.info("[执行] %s %s → 目标不可用闸拦下（防谎报成功）| %s",
+                            name, args, avail)
+                return False, "抱歉，" + avail
             direct = self._klar_direct(name, args) if plan.source == "klar" else None
             if direct is not None:
                 domain, service, data = direct

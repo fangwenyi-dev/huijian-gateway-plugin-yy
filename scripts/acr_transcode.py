@@ -140,11 +140,22 @@ class Registry:
         self._tokens[key] = t
         return t
 
-    def get(self, path, repo, actions=("pull",), headers=None, binary=False, timeout=60):
-        t = self.token(repo, list(actions))
-        h = {"Authorization": "Bearer " + t}
-        h.update(headers or {})
-        return http_get(f"https://{self.host}{path}", h, timeout=timeout, binary=binary)
+    def get(self, path, repo, actions=("pull",), headers=None, binary=False, timeout=60,
+            attempts=3):
+        # run 35681170094 实证：request() 会 fresh 重取 token 了，但 get() 还用
+        # 缓存——76MB 层传完 token 已过期，下一层秒传探测 401 且非 404 直接炸穿。
+        # 401 时 fresh 重取再试（穷尽后原样抛，交 call site 语义处理）。
+        h = dict(headers or {})
+        for i in range(attempts):
+            t = self.token(repo, list(actions), fresh=(i > 0))
+            h["Authorization"] = "Bearer " + t
+            try:
+                return http_get(f"https://{self.host}{path}", h, timeout=timeout, binary=binary)
+            except urllib.error.HTTPError as e:
+                if e.code != 401 or i + 1 >= attempts:
+                    raise
+                log(f"  ⚿ GET {path.split('?')[0]} 401，重取 token 重试")
+                time.sleep(2)
 
     def _conn(self, timeout=300):
         return http.client.HTTPSConnection(self.host, timeout=timeout)

@@ -13,7 +13,8 @@ from collections import OrderedDict
 import pytest
 
 from core.nlu.fast_path import Plan, is_pronoun, normalize_polite, split_compound
-from core.pipeline import DEDUP_MAX_ENTRIES, Pipeline, Reply
+from core.pipeline import (CONFIRM_TTL_S, DEDUP_MAX_ENTRIES, Pipeline, Reply,
+                           _CONFIRM_ANN_MAX_EXTRA)
 
 
 def arun(coro):
@@ -501,9 +502,45 @@ def test_turn_off_lock_risky_normal_device_not():
 def test_confirm_ttl_expiry():
     p = _pipe()
     assert p._confirm_ask(_p("HassUnlock", _tgt(name="大门锁")), "o") is not None
-    p._confirm["o"]["ts"] = time.time() - 31
+    # v1.1.7：TTL 自适应（base + 提示播报估算），过期判据按挂起时存的 ttl 走
+    ttl = p._confirm["o"]["ttl"]
+    assert ttl >= CONFIRM_TTL_S
+    p._confirm["o"]["ts"] = time.time() - (ttl + 1)
     assert arun(p._confirm_answer("确认", "o")) is None
     assert "o" not in p._confirm
+
+
+def test_confirm_ttl_legacy_pending_without_ttl_uses_base():
+    """无 ttl 键的旧形态挂起（升级前持久化/手工塞）回落基线，不被自适应放宽。"""
+    p = _pipe()
+    p._confirm["o"] = {"plan": _p("HassUnlock", _tgt(name="大门锁")),
+                       "ts": time.time() - 31}            # 无 "ttl" 键
+    assert arun(p._confirm_answer("确认", "o")) is None    # 基线 30s → 31s 已过期
+    assert "o" not in p._confirm
+
+
+def test_confirm_ttl_adaptive_to_prompt_length():
+    """长提示获得更长应答窗（base + 字数×速率），短提示≈基线，且封顶。"""
+    p = _pipe()
+    short = p._confirm_ttl("说「确认」执行")
+    long = p._confirm_ttl(
+        "家里有 5 台设备名字相近（会议室空调、办公室空调、卧室空调、客厅空调、书房空调）。"
+        "我先对「会议室空调」执行，说「确认」就这么办，说「取消」先不动。")
+    assert short >= CONFIRM_TTL_S
+    assert long > short
+    assert long <= CONFIRM_TTL_S + _CONFIRM_ANN_MAX_EXTRA + 0.01   # 封顶不放飞
+
+
+def test_long_prompt_confirm_survives_past_base_ttl():
+    """办公室实测根治：长歧义提示播报吃掉基线窗后，自适应窗内「确认」仍生效。"""
+    ex = RecExecutor()
+    p = _pipe(ex=ex)
+    # 直接构造一个长提示挂起（ttl=50），把 ts 拨到 base 30s 之外、ttl 之内
+    p._confirm["o"] = {"plan": _p("HassUnlock", _tgt(name="大门锁")),
+                       "ts": time.time() - 40, "ttl": 50.0}
+    r = arun(p._confirm_answer("确认", "o"))
+    assert r is not None and r.source == "confirm_exec"   # 40s < 50s → 未过期，执行
+    assert len(ex.plans) == 1
 
 
 # ── P2-15 流式钩子 ─────────────────────────────────────────────

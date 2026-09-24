@@ -153,6 +153,16 @@ class BaseSession:
             self._spawn(self.send_json({"type": "pong"}))
             return True
         if typ == "hello":
+            # v1.1.7：集成在 hello 携带卫星身份（entry.unique_id = 设备 MAC）→ 用作
+            # origin 分桶键。根治多卫星共用 request.remote（HA 宿主 IP，因 WS 客户端
+            # 是集成不是卫星）⇒ 确认环/跨轮上下文按 IP 撞桶串台（bb28 的确认被 32b8
+            # 应答）。缺字段/畸形（旧集成）回落建连时的 request.remote，向后兼容。
+            dev = obj.get("device")
+            if isinstance(dev, str) and dev.strip():
+                if self.device_hint != dev.strip():
+                    logger.info("[WS] %s 会话 origin 由 hello 收敛为设备 %s（原 %s）",
+                                self.channel, dev.strip(), self.device_hint or "?")
+                self.device_hint = dev.strip()
             # 回执一份 hello（客户端会跳过非业务帧，无害且便于日志核对）
             self._spawn(self.send_json({
                 "type": "hello", "transport": "websocket", "channel": self.channel,

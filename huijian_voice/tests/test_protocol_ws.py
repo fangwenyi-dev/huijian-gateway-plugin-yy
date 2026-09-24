@@ -53,8 +53,10 @@ class FakeDecoder:
 class FakePipeline:
     def __init__(self, reply="好的，客厅的灯打开了。还有别的吩咐？"):
         self.reply = reply
+        self.calls = []          # v1.1.7：记录 (text, origin)，供 origin 分桶钉测
 
     async def handle(self, text, origin="", on_sentence=None):
+        self.calls.append((text, origin))
         @dataclass
         class R:
             text: str
@@ -189,6 +191,64 @@ def test_stt_ping_pong(server):
             texts, _ = await _collect(ws, 1)
             await ws.close()
             assert texts[0].get("type") == "pong"
+    _run(go())
+
+
+def test_llm_hello_device_sets_origin(server):
+    """v1.1.7：hello 携带 device（卫星 MAC）→ origin 按卫星分桶（多机不再共用宿主 IP）。
+    origin 经 LLM 通道 pipeline.handle 落地（集成把识别文本走 llm detect 送进来）。"""
+    port, ctx = server
+
+    async def go():
+        async with ClientSession() as sess:
+            ws = await _connect(sess, port, "llm")
+            await ws.send_str(json.dumps({"type": "hello", "device": "aabbccddeeff"}))
+            await ws.send_str('{"type":"listen","state":"detect","text":"打开客厅的灯"}')
+            while True:
+                msg = await asyncio.wait_for(ws.receive(), 6)
+                if msg.type == WSMsgType.TEXT and json.loads(msg.data).get("state") == "end":
+                    break
+            await ws.close()
+            assert ctx.pipeline.calls, "pipeline 未被调用"
+            assert ctx.pipeline.calls[-1][1] == "aabbccddeeff"
+    _run(go())
+
+
+def test_llm_hello_without_device_falls_back_to_remote(server):
+    """旧集成不带 device → origin 回落 request.remote（向后兼容，行为逐值不变）。"""
+    port, ctx = server
+
+    async def go():
+        async with ClientSession() as sess:
+            ws = await _connect(sess, port, "llm")
+            await ws.send_str(json.dumps({"type": "hello"}))
+            await ws.send_str('{"type":"listen","state":"detect","text":"打开客厅的灯"}')
+            while True:
+                msg = await asyncio.wait_for(ws.receive(), 6)
+                if msg.type == WSMsgType.TEXT and json.loads(msg.data).get("state") == "end":
+                    break
+            await ws.close()
+            assert ctx.pipeline.calls
+            assert ctx.pipeline.calls[-1][1] == "127.0.0.1"   # request.remote 回落
+    _run(go())
+
+
+def test_llm_hello_device_garbage_ignored(server):
+    """device 空白/非串 → 不污染 origin，维持 request.remote 回落（畸形键 fail-open）。"""
+    port, ctx = server
+
+    async def go():
+        async with ClientSession() as sess:
+            ws = await _connect(sess, port, "llm")
+            await ws.send_str(json.dumps({"type": "hello", "device": "   "}))
+            await ws.send_str('{"type":"listen","state":"detect","text":"打开客厅的灯"}')
+            while True:
+                msg = await asyncio.wait_for(ws.receive(), 6)
+                if msg.type == WSMsgType.TEXT and json.loads(msg.data).get("state") == "end":
+                    break
+            await ws.close()
+            assert ctx.pipeline.calls
+            assert ctx.pipeline.calls[-1][1] == "127.0.0.1"
     _run(go())
 
 

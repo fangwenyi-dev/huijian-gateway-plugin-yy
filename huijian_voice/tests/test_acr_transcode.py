@@ -132,6 +132,53 @@ def test_request_exhausts_and_raises():
         assert "重试 6 次" in str(e)
 
 
+# ── Registry.get：401 刷新重试（run 35681170094 签名）──────────
+
+def _http_get_script(codes):
+    """返回 (callable, calls)：按队列吐 200/抛 HTTPError(code)。"""
+    calls = []
+
+    def fake(url, headers=None, timeout=60, binary=False):
+        calls.append(dict(headers or {}))
+        c = codes.pop(0)
+        if c == 200:
+            return b"body", {}
+        raise urllib.error.HTTPError(url, c, "e", {}, None)
+    return fake, calls
+
+
+def test_get_401_refreshes_token_and_succeeds(monkeypatch):
+    r, _, fresh = _reg([])
+    fake, calls = _http_get_script([401, 200])
+    monkeypatch.setattr(ac, "http_get", fake)
+    body, _ = r.get("/v2/x/blobs/sha", "x")
+    assert body == b"body"
+    assert fresh == [False, True], "401 后必须 fresh 重取"
+    assert calls[1]["Authorization"] == "Bearer TOK2"
+
+
+def test_get_non401_raises_without_retry(monkeypatch):
+    r, _, fresh = _reg([])
+    fake, calls = _http_get_script([404])
+    monkeypatch.setattr(ac, "http_get", fake)
+    try:
+        r.get("/v2/x/blobs/sha", "x")
+        raise AssertionError("404 必须原样抛（秒传分支语义）")
+    except urllib.error.HTTPError as e:
+        assert e.code == 404
+    assert len(calls) == 1, "非 401 不得重试"
+
+
+def test_push_blob_instant_skip_after_401_recovery(monkeypatch):
+    # 集成钉：秒传探测先 401→token 刷新→命中 200 → 跳过上传（不再走 POST）
+    fake, _calls = _http_get_script([401, 200])
+    monkeypatch.setattr(ac, "http_get", fake)
+    r, conn, _ = _reg([])
+    r._conn = lambda timeout=300: conn
+    ac.push_blob(r, "x", "sha256:d", b"data", "layer7")
+    assert conn.reqs == [], "401 恢复后秒传命中，不得进上传路径"
+
+
 # ── push_blob：秒传 / 换 session 重启 ──────────────────────────
 
 class _Store:

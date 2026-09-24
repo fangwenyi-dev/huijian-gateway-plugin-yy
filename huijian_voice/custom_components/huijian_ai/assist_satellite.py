@@ -434,6 +434,15 @@ class EsphomeAssistSatellite(
         # 溢出计数——两者归因完全不同（前者=设备无开轮推流，后者=消费停顿）
         self._audio_orphan_chunks: int = 0
         self._tts_streaming_task: asyncio.Task | None = None
+        # v1.0.100（播报孤儿流根修）：announce 腿的推流句柄。会话腿自 v1.0.49 起
+        # 就把句柄交给 _dl_takeover/_abort_pipeline/新开轮三处吊销，而 **播报腿
+        # （v1.0.93 起复用同一条 _stream_tts_audio）从未登记** —— 三处 cancel 全部
+        # 够不着它。设备 barge-in 收口只回 AnnounceFinished（且按 v2.1.50 裁决故意
+        # 不发 start=0），于是孤儿流按 28.8ms/帧继续把剩余音频推到耗尽：台架实锤
+        # 单轮丢弃 201~281 帧＝6.4~8.9 秒音频（=该文本 56%）、HA 白烧 TTS 算力、
+        # 与新一轮 uplink 抢同一条 API socket。修法＝把会话腿既有那套句柄纪律补到
+        # 播报腿，不改归属闸 I-1/I-2/I-3。
+        self._announce_stream_task: asyncio.Task | None = None
         # ── v1.0.88：TTS 下行流所有权（Hop B「旧 run 晚到音频混入新流头部」根修）──
         # 设备侧世代 s_va_epoch 绑的是 play_reset 现值（固件 CHANGELOG v2.1.50
         # 未收口条），**认不清一帧属于 HA 哪一次推流**；而每条下行流自己的
@@ -666,7 +675,30 @@ class EsphomeAssistSatellite(
                 "慧尖卫星: 下行流接管，旧推流已吊销（新 seq=%s，累计丢残帧 %d）",
                 self._dl_seq, self._dl_drop_total,
             )
+        # v1.0.100：播报孤儿流同处吊销（本方法是同步函数，不引入 await，I-1 不破）。
+        self._revoke_announce_stream("下行流接管")
         return self._dl_seq
+
+    def _revoke_announce_stream(self, reason: str) -> None:
+        """v1.0.100：掐掉播报腿的孤儿推流。
+
+        只吊销句柄 + cancel，**不代发 TTS_STREAM_END、不替任何流落状态**（I-2/I-3
+        原样适用：被吊销的播报流既不该掐死别人的流，也不该把别的轮收口）。归属闸
+        （`_stream_tts_audio` 逐帧验 `_dl_seq`）已是第一道自停防线，本方法是第二道，
+        故最坏情况残留 ≤1 帧（32 ms），不再是 6~9 秒。幂等：句柄为 None 或已 done 即空转。
+        """
+        task = self._announce_stream_task
+        if task is None or task.done():
+            self._announce_stream_task = None
+            return
+        self._announce_stream_task = None
+        task.cancel()
+        _LOGGER.info("慧尖卫星: 播报推流已吊销（%s，累计丢残帧 %d）", reason, self._dl_drop_total)
+
+    def _clear_announce_stream_task(self, task: asyncio.Task) -> None:
+        """播报流自然耗尽后清句柄；被替换过的陈旧回调不动当前句柄。"""
+        if self._announce_stream_task is task:
+            self._announce_stream_task = None
 
     def _clear_tts_streaming_task(self, task: asyncio.Task) -> None:
         """v1.0.83（修#3）：推流任务自然收口后清句柄。
@@ -978,12 +1010,17 @@ class EsphomeAssistSatellite(
                     )
                     tts_stream.async_set_message(announcement.message)
                     dl_seq = self._dl_takeover()
-                    self.config_entry.async_create_background_task(
+                    # v1.0.100：登记句柄 + done-callback，与会话腿 :767-775 同构。
+                    # 上一行 _dl_takeover() 已把任何在前运行的播报/会话流吊销过，
+                    # 此处覆盖句柄是安全的（同一条无 await 段内完成，I-1 保持）。
+                    announce_task = self.config_entry.async_create_background_task(
                         self.hass,
                         self._stream_tts_audio(tts_stream, dl_seq,
                                                announce=True),
                         "huijian_announce_tts",
                     )
+                    announce_task.add_done_callback(self._clear_announce_stream_task)
+                    self._announce_stream_task = announce_task
                     _LOGGER.info(
                         "[Announce] API 音频卫星：文本已转合成推流（engine=%s，"
                         "%d 字，seq=%s）", engine_id,
@@ -1004,6 +1041,12 @@ class EsphomeAssistSatellite(
             start_conversation=run_pipeline_after,
             preannounce_media_id=preannounce_media_id or "",
         )
+        # v1.0.100（本修的收口点）：本 await 在设备回 AnnounceFinished（含 barge-in
+        # 提前收口，固件 v2.1.55 起该事件也覆盖打断轮）或超时后才返回。返回即意味着
+        # "这条播报在设备侧已经结束"——此刻任何仍在推的播报流都是孤儿，当场掐掉。
+        # 放在这里而不是 handle_announcement_finished：后者与会话 TTS 共用
+        # （同一事件也代表会话应答播完），在那儿吊销会牵动会话腿收口，风险不对等。
+        self._revoke_announce_stream("播报已收口")
 
     def _pick_wake_word_pipeline_index(self, wake_word_phrase: str | None) -> int:
         """按唤醒词挑激活的 pipeline 索引（0=默认）。

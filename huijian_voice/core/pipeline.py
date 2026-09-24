@@ -322,7 +322,13 @@ class Reply:
 DEDUP_MAX_ENTRIES = 512              # P1-7 去重表有界
 CONTEXT_TTL_S = 90.0                 # P2-10 目标继承/历史窗口
 CONTEXT_MAX_TURNS = 8                # 每 origin 环形缓冲（4 回合 ×2 条）
-CONFIRM_TTL_S = 30.0                 # P2-13 待确认存活
+CONFIRM_TTL_S = 30.0                 # P2-13 待确认存活（基线，无提示文本时回落此值）
+# v1.1.7（办公室实测：30s 固定 TTL 被长歧义提示播报吃光，剩 7.2s 应答窗 → 用户
+# 重唤醒+回答超时，「取消」被当改口走 fallback）：确认环 TTL 改**自适应**——基线
+# + 提示播报时长估算（中文 TTS ≈0.2s/字，封顶 +30s）。长提示自动获得更长应答窗，
+# 短提示维持基线。只放宽超时上限，不改是/否/改口三态语义。
+_CONFIRM_ANN_S_PER_CHAR = 0.2        # 中文 TTS 播报速率估算（秒/字）
+_CONFIRM_ANN_MAX_EXTRA = 30.0        # 播报补偿封顶（防超长提示把 TTL 拉到离谱）
 _VOCAB_SYNC_S = 30.0                 # P2-17 动态词表节流
 
 # P2-13 风险意图：解锁（含 D7 反转形态 TurnDeviceOff×锁）与删除族。
@@ -1752,6 +1758,15 @@ class Pipeline:
                 return True                       # D7 反转语义：关锁=解锁
         return False
 
+    def _confirm_ttl(self, text: str) -> float:
+        """确认环自适应存活窗：基线 TTL + 提示播报时长估算（见 CONFIRM_TTL_S 注）。
+
+        基线取 settings（用户可调），无提示文本时即基线本身。播报补偿按字数估，
+        封顶 _CONFIRM_ANN_MAX_EXTRA，防超长提示把窗口拉到离谱。"""
+        base = float(self.settings.get("dialog.confirm_ttl_s", CONFIRM_TTL_S))
+        return base + min(len(text or "") * _CONFIRM_ANN_S_PER_CHAR,
+                          _CONFIRM_ANN_MAX_EXTRA)
+
     def _confirm_ask(self, plan: Plan, origin: str) -> Optional[Reply]:
         if not self._risky(plan):
             return None
@@ -1778,9 +1793,11 @@ class Pipeline:
             what = "、".join(_target_names(rargs) or _target_areas(rargs)
                              or ["该设备"])
             act = f"解锁{what}"
-        self._confirm[origin] = {"plan": plan, "ts": time.time()}
+        text = f"接下来要{act}，说「确认」执行，或说「取消」放弃"
+        self._confirm[origin] = {"plan": plan, "ts": time.time(),
+                                 "ttl": self._confirm_ttl(text)}
         self._origin_ts[origin] = time.time()
-        return Reply(f"接下来要{act}，说「确认」执行，或说「取消」放弃", "confirm",
+        return Reply(text, "confirm",
                      ok=True, trace=list(getattr(plan, "trace", [])) + ["确认环:挂起"])
 
     # ── v1.1.4 第 3 步：歧义目标确认（复用 P2-13 的 是/否/改口三态）────────
@@ -1821,14 +1838,16 @@ class Pipeline:
                 return None
             pick = self._best_candidate(cands, tgt)
             self._narrow_target(args, pick)
-            self._confirm[origin] = {"plan": plan, "ts": time.time()}
-            self._origin_ts[origin] = time.time()
             others = "、".join(distinct[:3]) + ("…" if len(distinct) > 3 else "")
+            text = (f"家里有 {len(distinct)} 台设备名字相近（{others}）。"
+                    f"我先对「{pick}」执行，说「确认」就这么办，说「取消」先不动。")
+            self._confirm[origin] = {"plan": plan, "ts": time.time(),
+                                     "ttl": self._confirm_ttl(text)}
+            self._origin_ts[origin] = time.time()
             logger.info("[级联] 歧义目标 %d 台（%s）→ 收窄到「%s」并挂确认环",
                         len(distinct), others, pick)
             return Reply(
-                f"家里有 {len(distinct)} 台设备名字相近（{others}）。"
-                f"我先对「{pick}」执行，说「确认」就这么办，说「取消」先不动。",
+                text,
                 "confirm", ok=True,
                 trace=list(getattr(plan, "trace", [])) + [f"确认环:歧义{len(distinct)}"])
         except Exception:  # noqa: BLE001 判定故障=照旧执行，绝不新增哑口
@@ -1868,7 +1887,8 @@ class Pipeline:
         if pend is None:
             return None
         if time.time() - pend["ts"] > float(
-                self.settings.get("dialog.confirm_ttl_s", CONFIRM_TTL_S)):
+                pend.get("ttl")
+                or self.settings.get("dialog.confirm_ttl_s", CONFIRM_TTL_S)):
             self._confirm.pop(origin, None)
             return None
         token = _strip_punct(text).lower()

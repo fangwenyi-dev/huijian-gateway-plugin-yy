@@ -166,3 +166,58 @@ def test_web_provider_options_and_whitelist():
     assert '<option value="local_melo">' in html
     assert '"local_kokoro","local_matcha","local_melo","cloud","cloud_openai_compat"' in html
     assert "tts_single_hint" in html and "tv_row" in html
+
+
+def test_web_voice_table_rebuilt_per_engine():
+    """2026-09-22：音色表随引擎档重建。旧形态=一张 Kokoro 103 项表走天下，
+    切到 Matcha/Melo/云档只盖一句"该引擎单女声（音色表与自定义音色仅 Kokoro
+    可用）"——用户看到的下拉内容与真正发声的引擎对不上。
+
+    两侧事实都钉：
+    - 正向：Kokoro 主表仍 103 项；Matcha/Melo 各列本档唯一内置女声
+      （实测 num_speakers=1，包内无 voices.bin，无追加载体）；
+      云档只列固定回落嗓（tts.sid 在云档不生效，core/tts.py:1323）。
+    - 反向：非 Kokoro 表不得复用 VOICES、不得混入 zf_*/zm_* 音色名；
+      旧一刀切文案必须消失；tts.sid 不得再被无条件提交——否则切到单音色档
+      保存一次就会把 Kokoro 档的嗓静默改写成 0。
+    """
+    html = (_ROOT / "www" / "index.html").read_text(encoding="utf-8")
+
+    # ① Kokoro 主表仍是 103 项（计数钉：防被单音色表顶掉或截断）
+    kok = re.search(r"const VOICES = \[(.*?)\n\];", html, re.S)
+    assert kok, "VOICES 主表缺失"
+    assert len(re.findall(r"\[\d+,", kok.group(1))) == 103
+
+    # ② 四档各有一张表，非 Kokoro 档均 1 项且不复用主表
+    tbl = re.search(r"const VOICE_TABLES = \{(.*?)\n\};", html, re.S)
+    assert tbl, "VOICE_TABLES 缺失"
+    rows = {}
+    for eng in ("local_kokoro", "local_matcha", "local_melo", "cloud"):
+        m = re.search(rf"^\s*{eng}:\s*(.+)$", tbl.group(1), re.M)
+        assert m, f"{eng} 缺引擎原生音色表（不得复用 Kokoro 表）"
+        rows[eng] = m.group(1)
+    assert rows["local_kokoro"].startswith("VOICES"), "Kokoro 档未指向主表"
+    for eng, sid in (("local_matcha", "0"), ("local_melo", "0")):
+        row = rows[eng]
+        assert row.count("[") == 2, f"{eng} 表应恰 1 项（该档唯一内置女声）"
+        assert f"[{sid}," in row, f"{eng} 表 sid 应为 {sid}"
+        assert "VOICES" not in row, f"{eng} 表不得复用 Kokoro 全表"
+        assert "zf_" not in row and "zm_" not in row, f"{eng} 表混入 Kokoro 音色名"
+    assert rows["cloud"].count("[") == 2, "云档表应恰 1 项（固定回落嗓）"
+    assert "KOKORO_DEFAULT_SID," in rows["cloud"], "云档未列固定回落嗓"
+    assert "VOICES" not in rows["cloud"], "云档表不得复用 Kokoro 全表"
+    assert "KOKORO_DEFAULT_SID = 28" in html, "回落/默认嗓常量与后端 _DEFAULT_SID 脱钩"
+
+    # ③ 渲染按引擎取表与提示；旧一刀切文案必须消失
+    assert "VOICE_TABLES[eng]" in html and "VOICE_HINTS[eng]" in html, \
+        "渲染未按引擎取表/取提示"
+    assert "音色表与自定义音色仅 Kokoro 可用" not in html, "旧一刀切提示词仍在"
+
+    # ④ tts.sid 写权只属 Kokoro 档（切档不提交 → Kokoro 的选择不被静默改写）
+    assert 'TTS_SID_OWNER = "local_kokoro"' in html
+    fn = re.search(r"function ttsSidPatch\(\)\{(.*?)\n\}", html, re.S)
+    assert fn, "ttsSidPatch 缺失（sid 提交未条件化）"
+    assert "TTS_SID_OWNER" in fn.group(1), "sid 提交未按引擎档设闸"
+    seg = re.search(r"tts:\{ provider:.*?speed:", html, re.S)
+    assert seg and "ttsSidPatch()" in seg.group(0), "保存体未走 ttsSidPatch"
+    assert "sid:" not in seg.group(0), "保存体仍有无条件 sid 写入"
