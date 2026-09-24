@@ -1,5 +1,16 @@
 # 变更日志
 
+## [1.1.8] - 2026-09-24 固件 v2.1.65 与加载项同步登记（OTA 下发打通）
+- 固件同步：`firmware.lock.json` 登记 **v2.1.65** 出货档（共享单 AFE·SE 关 + 设备侧 AEC + 双麦 MMR +
+  端点闸 1500，即 SenseVoice 台架复测所用档）。固件仓 gujian-esp32-ha-V3 为**私仓**，其 release 资产
+  匿名不可达（gh-proxy/Gitee 均 404），故 bin 镜像至本公开 release v1.1.8（`huijian-s3-2.1.65.bin`，
+  sha256 `f95514e2…0fcd`，8786984B，与固件仓 v2.1.65 r1 factory bin 逐字节同），urls 按
+  gh-proxy→GitHub→Gitee 容灾序。设备自此可经加载项 OTA 到与 v1.1.8 配套的固件，补齐「加载项升级须同步
+  固件」缺口（此前 lock 最新仅 2.1.48）。
+- 台架复测背书（办公室 32b8 + SenseVoice-Small + v1.1.7）：0dB 多叫法逐字 8/8（尾字丢消失）、−12dB
+  远场动作 7/8（Paraformer 基线 1/8）、播报期打断 4/4 且打断后识别安静 4/4 / 粉噪 SNR10 2/4；执行器
+  availability 闸真机生效（离线实体如实报「不可用」不再谎报成功）。
+
 ## [1.1.7] - 2026-09-24 NLU 诚实执行 + 确认环健壮性 + 多卫星分桶（办公室台架 32b8 实证驱动）
 - 执行器诚实闸（问题1根修）：klar grounded `entity_id` 计划执行前查目标实体可用态——HA 对
   `unavailable` 实体的 service call **照样回 success**（空操作），而 klar 直调走 call_service、
