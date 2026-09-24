@@ -31,7 +31,7 @@ for i in $(seq 1 600); do
         | "$PY" -c 'import json,sys
 try:
     j=json.load(sys.stdin); m=j.get("models_ready") or {}
-    need=["asr_sensevoice_small","tts_kokoro_multilang"]  # 运行期主档 need（回落档不主动下载），与 run_e2e.sh 同步维护
+    need=["asr_sensevoice_small","tts_melo_zh_en"]  # 运行期主档 need（回落档不主动下载），与 run_e2e.sh 同步维护；v1.1.10 默认 TTS=melo
     print("yes" if all(m.get(k) for k in need) else "")
 except Exception: print("")' | tr -d '\r' || true)
     [ "$ready" = "yes" ] && break

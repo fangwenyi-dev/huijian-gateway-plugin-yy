@@ -229,5 +229,5 @@ def test_e2e_scripts_wait_on_need_not_full_lock():
         src = (root / rel).read_text(encoding="utf-8")
         m = re.search(r'need=\["([^"]+)",\s*"([^"]+)"\]', src)
         assert m, f"{rel}: 找不到显式 need 等待集（改动疑似回退成 all(values) 旧式？）"
-        assert set(m.groups()) == {KEY_SV, "tts_kokoro_multilang"}, \
-            f"{rel}: need 集 {m.groups()} 与代码主档 {KEY_SV}/Kokoro 漂移"
+        assert set(m.groups()) == {KEY_SV, "tts_melo_zh_en"}, \
+            f"{rel}: need 集 {m.groups()} 与代码主档 {KEY_SV}/默认TTS(melo) 漂移"
