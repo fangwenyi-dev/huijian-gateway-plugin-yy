@@ -338,7 +338,8 @@ jobs:
     name: Push ACR CN mirror
     needs: [prepare, manifest]
     runs-on: ubuntu-latest
-    timeout-minutes: 40   # 转码=260MB 下载+重压+上传，留足带宽波动余量
+    timeout-minutes: 90   # 转码=260MB 下载+重压+上传；2026-09-25 跨境上传劣化，40min 两连
+                          # 被 cancel（run 36019335781 两次）⇒ Release 跳过，放宽到 90min
     env:
       ACR: crpi-92gcrmsz8v7vvdy1.cn-shanghai.personal.cr.aliyuncs.com
       ACR_REPO: fangwenyi-dev/huijian-gateway-plugin-yy
