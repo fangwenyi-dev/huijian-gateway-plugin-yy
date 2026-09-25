@@ -1,5 +1,38 @@
 # 变更日志
 
+## [1.1.12] - 2026-09-25 注释纠偏 + 孤儿端点反向钉 + 固件 v2.1.66 同步上架
+- **注释纠偏（纯注释，运行路径零改动）**：v1.1.11 删掉两个孤儿端点后，三处注释仍在给
+  已不存在的对象指路——`const.py` 说 `CONF_*_ENDPOINT` 由 "huijian/http.py device-info 返回"
+  共用、`config_flow.py` 把运行期台账写成已删的 `satellite_ledger`（存活的是
+  `satellite_ledger_by_speakid`）、`http.py` 的卫星过滤注释说 "与 device-info 同判定"。
+  指错路的注释比没注释更贵：下一个人会照着它去找一个不存在的 View。
+- **新增反向钉 `test_orphan_endpoints_stay_deleted`**：钉 `/device-info`、`/update/speakname`
+  不得复活——判**语法**（`class` 定义与 `register_view()` 调用），不判裸名字有没有出现过，
+  否则连本 CHANGELOG 里记述这次删除的文字都会把钉弄红，红过一次钉就会被删掉。同时**双向判**：
+  存活 6 个 View 逐个仍在注册块、注册总数正好 6（防"删一个偷偷加一个"抵消，也防把 http.py
+  清空骗过单向钉）。5 条变异自证有牙，含"注释提及不误红"这条对照。
+- **固件 v2.1.66 上架**（`firmware.lock.json` + 随附 `huijian-s3-2.1.66.bin`，8,786,984 B）。三件事：
+  - **播报吞首字根修**（V1）：cherry-pick 固件仓 `4cd7ad5` 的 v2.1.60「#7 播报接管窗」到出货线
+    `rel/v2.1.64`——该线为躲 2.1.60 上行回归回挂 2.1.59 基线时把这个修复一起丢了 ⇒
+    **已发布的 2.1.65 会吞播报首字**（HA 先推流、AnnounceRequest 晚到，IDLE 期头部帧被丢）。
+    只取播报接管 6 处，**刻意不带** `session_hold_probe`/`CONFIG_VAD_SILENCE_MS`/打点重构
+    （2.1.60 上行回归的风险面）；bin 内这两个符号零命中为证。
+  - **删死改名链**（A3）：`r_postDeviceName` + CMD30 `PROPERTY_DEVICE_NAME` + 专用
+    `generateRandomString`——与本加载项 v1.1.11 删掉的 `/update/speakname` 是同一条链的固件那一头。
+  - **版本号自报纠正**（P4）：`PROJECT_VER` 2.1.64→2.1.66。**在已发布物料上实测坐实**：
+    `huijian-s3-2.1.65.bin` 的 `esp_app_desc.version` 是 `'2.1.64'`——所有装着 2.1.65 的设备
+    一直自报 2.1.64，面板版本账与升级判据错位一号。
+- **台架实测**（COM25 / 板 …32b8 / 家里 HA .18 跑 v1.1.11）：播报接管 7 轮 ARM **7/7**、
+  旧吞头签名 `IDLE -> ignored` **0/7**、野流撤单 **0/7**、每轮字节结清。两种时序形态都验到：
+  请求晚 440ms 时留住 **50176 B ≈1.57s** 播报头（修复吃重）；请求只晚 10~30ms 时 `0 bytes kept`
+  （此时 `play_reset` 照旧调用＝与改前逐值同行为，零回归）。**上行识别 8/8 不回退**（8 条不重复
+  指令，`VAD start rms=` 121~772 全过，上行收口账产=消、残留 0、溢出 0）。
+- **发布件与 tag 严格同源**：bin 出自 tag `v2.1.66`(fde87a6) 的树；与台架验过那份逐字节对比只差
+  **65 B / 8.79 MB**，且全部落在两处 ELF 哈希字段（`app_elf_sha256` 与镜像尾校验摘要）⇒
+  可执行代码与 rodata **完全相同**，台架结论对发布件成立。
+- 全量 pytest 与基线差分**零新增**（9 项环境红 / 1947 passed，多的 1 项即本次新增的反向钉）；
+  固件结构守卫 305/0/2、上行守卫 62/62、共享 AFE 守卫 43/43 复跑不变。
+
 ## [1.1.11] - 2026-09-25 删两个孤儿 HTTP 端点 + 卫星版本回退三级收敛两级
 - 删 `HuijianDeviceInfoView`（`/api/huijian-ai/device-info`）与 `HuijianSetNameView`
   （`/api/huijian-ai/update/speakname`）：两端点**全仓零调用方**。device-info 当年为小程序

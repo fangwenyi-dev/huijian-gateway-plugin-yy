@@ -17,7 +17,7 @@ CONF_STT_ENTITY_ID = "stt_entity_id"
 
 # ── assist 语音引擎条目（config_type="assist"）端点键 ──
 # 统一字符串常量：config_flow 建/更条目、__init__ 装配三平台、huijian/*_transport
-# 读端点、huijian/http.py device-info 返回，多处共用；改动键名必须同步本文件。
+# 读端点，多处共用；改动键名必须同步本文件。
 CONF_LLM_ENDPOINT = "llm_endpoint"
 CONF_STT_ENDPOINT = "stt_endpoint"
 CONF_TTS_ENDPOINT = "tts_endpoint"

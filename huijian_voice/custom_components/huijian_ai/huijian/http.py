@@ -148,7 +148,7 @@ class HuijianSatellitesView(HuijianHttpView):
         out = []
         for entry in hass.config_entries.async_loaded_entries(DOMAIN):
             if not entry.data.get("host"):
-                continue  # assist 引擎类条目不是卫星（与 device-info 同判定）
+                continue  # assist 引擎类条目无 host＝不是卫星，不进台账
             mac = str(entry.data.get("mac", "") or "").lower()
             rd = getattr(entry, "runtime_data", None)
             ota_services = []

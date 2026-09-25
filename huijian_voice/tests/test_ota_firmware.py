@@ -464,6 +464,46 @@ def test_ledger_fw_version_chain(tmp_path):
     assert '"fw_version":' in cf, "config_flow 建账时持久化 fw_version"
 
 
+def test_orphan_endpoints_stay_deleted():
+    """v1.1.11（A1）反向钉：删掉的孤儿端点不得复活，存活的 View 一个不得少。
+
+    `/api/huijian-ai/device-info`（当年为小程序 queryHaDevice 而加，但该云函数本身
+    已在小程序 v1.4.29 删除）与 `/api/huijian-ai/update/speakname`（固件触发点 CMD30
+    PROPERTY_DEVICE_NAME 已随固件 A3 删除）三端零调用方。
+
+    **钉语法、不钉裸标识符**：判"类是否真被定义 / URL 是否真被挂上去"，而不是判名字
+    有没有在文件里出现过——否则一句记录本次删除的注释（CHANGELOG 里就有这两条路由）
+    会把钉弄红；红过一次，下一个人就会把钉删掉，钉等于没有。
+    **必须双向判**：只钉"不得复活"的话，把整个 http.py 清空也能全绿——所以同时钉
+    存活 6 个 View 逐个仍在注册块里，且注册总数正好 6（防"删一个偷偷加一个"抵消）。
+    """
+    import re
+
+    src = HTTP_PY.read_text(encoding="utf-8")
+    for cls in ("HuijianDeviceInfoView", "HuijianSetNameView"):
+        assert not re.search(rf"^\s*class\s+{cls}\b", src, re.M), \
+            f"class {cls} 是 v1.1.11 删掉的孤儿端点，不得复活"
+        assert f"register_view({cls})" not in src, f"{cls} 不得被重新注册"
+    for route in ('url = "/api/huijian-ai/device-info"',
+                  'url = "/api/huijian-ai/update/speakname"'):
+        assert route not in src, f"{route} 是 v1.1.11 删掉的孤儿路由，不得复活"
+    # mac 维度台账随死改名链一并移除：唯一写点在被删的 speakname 口，且它只带
+    # speak_name/speak_id、从不带 fw_version ⇒ 该 tier 恒空（留着还会以 `or` 短路
+    # 屏蔽掉真有版本的 speak_id 台账）。钉的是**取用语法**，注释里提它不算。
+    assert not re.search(r'get\(\s*"satellite_ledger"\s*[,)]', src), \
+        "mac 台账已删，运行期只剩 satellite_ledger_by_speakid"
+
+    alive = ["HuijianSetupView", "HuijianRemoveView", "HuijianTtsSttView",
+             "HuijianSatellitesView", "HuijianSatelliteOtaView",
+             "HuijianSatelliteContinuousView"]
+    setup = src[src.index("async def async_setup_https"):src.index("class HuijianHttpView")]
+    for v in alive:
+        assert f"hass.http.register_view({v})" in setup, f"{v} 必须仍被注册"
+    assert setup.count("register_view") == len(alive), (
+        f"注册数应为 {len(alive)}，实得 {setup.count('register_view')}——"
+        "多出来的是谁？新端点必须先证明有调用方（A1 的教训：两个口挂了多年零调用）")
+
+
 # ── v1.0.77 仓库真 lock 完整性钉（发布账本手滑防线）──────────────────
 
 REPO_LOCK = Path(__file__).resolve().parents[1] / "firmware.lock.json"
