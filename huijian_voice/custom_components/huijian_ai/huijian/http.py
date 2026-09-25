@@ -24,9 +24,7 @@ async def async_setup_https(hass: HomeAssistant):
     this_data["https_setup"] = True
     hass.http.register_view(HuijianSetupView)
     hass.http.register_view(HuijianRemoveView)
-    hass.http.register_view(HuijianSetNameView)
     hass.http.register_view(HuijianTtsSttView)
-    hass.http.register_view(HuijianDeviceInfoView)
     hass.http.register_view(HuijianSatellitesView)
     hass.http.register_view(HuijianSatelliteOtaView)
     hass.http.register_view(HuijianSatelliteContinuousView)
@@ -122,99 +120,12 @@ class HuijianRemoveView(HuijianHttpView):
         return self.json_message("ok")
 
 
-class HuijianSetNameView(HuijianHttpView):
-    url = "/api/huijian-ai/update/speakname"
-    name = "api:huijian-ai:update:speakname"
-
-    async def post(self, request: web.Request):
-        hass = request.app[KEY_HASS]
-        entry = await self.check_sign(request)
-        if not entry:
-            return self.json_message("params error", 400)
-        data = await request.json() or {}
-        # OTA 设备台账·mac 维度（预留演进位，v1.0.65 注释纠偏）：本口 body
-        # 现网只有 speak_name/speak_id（固件 r_postDeviceName，ble_manager.cc:540
-        # 附近）——**不带** fw_version；带版本的 CMD20 入驻 POST 落 SetupView，
-        # 台账写点在彼处（契约 F-02 修复）。此处保留 schema-free 写入分支：
-        # 未来固件若随改名重报版本，自动入账，无需改集成。
-        _ledger = hass.data.setdefault(DOMAIN, {}).setdefault("satellite_ledger", {})
-        _mac = str(entry.data.get("mac", "") or "").lower()
-        if _mac:
-            _rec = _ledger.setdefault(_mac, {})
-            _rec["ts"] = time.time()
-            if v := str(data.get("fw_version") or "").strip():
-                _rec["fw_version"] = v
-            if sn := str(data.get("speak_name") or "").strip():
-                _rec["speak_name"] = sn
-        if not (name := data.get("speak_name")):
-            return self.json_message("speak_name missing", 400)
-        mac = entry.data.get("mac")
-        device_registry = dr.async_get(hass)
-        device_entry = device_registry.async_get_device(
-            connections={(dr.CONNECTION_NETWORK_MAC, mac)},
-        )
-        if not device_entry:
-            return self.json_message("device not found", 400)
-        device_registry.async_update_device(device_entry.id, name=name)
-        hass.config_entries.async_update_entry(entry, title=name)
-        return self.json_message("ok")
-
-
-class HuijianDeviceInfoView(HuijianHttpView):
-    """按 mac（或 speak_id）查卫星设备入驻信息——小程序 queryHaDevice 的缺失路由。
-
-    三项目适配判定书缺口4：小程序 ha-connect/setup 配网后需拿设备
-    host:port（6053，供显示设备网页配置入口/后续 mcp 跳转），但集成
-    历史上没有这个 View → queryHaDevice 404 静默失败（setup.js 只置空
-    host，不炸但功能缺）。
-    数据真源=config entry data（_async_make_config_data 写入的
-    CONF_HOST/CONF_PORT + speak_id/mac/mcp_endpoint/device_name）。
-    安全：requires_auth=True——返回内网拓扑，必须 HA 长期令牌。调用对象
-    是「已持有 HA token 的小程序/客户端」（扫码入驻本身靠 /setup/qrcode 的
-    uuid 通道、不经此 View，token 为空是正常态）；mac 匹配不区分大小写
-    （entry 存小写，设备上报可能大写）。assist 类（语音引擎服务）entry 无
-    host 被跳过——本 View 只回答卫星设备，引擎端点走 assist 条目自身配置。
-    """
-
-    requires_auth = True
-    url = "/api/huijian-ai/device-info"
-    name = "api:huijian-ai:device-info"
-
-    async def get(self, request: web.Request):
-        hass = request.app[KEY_HASS]
-        mac = (request.query.get("mac") or "").lower().strip()
-        speak_id = request.query.get("speak_id") or ""
-        if not mac and not speak_id:
-            return self.json_message("mac or speak_id required", 400)
-        for entry in hass.config_entries.async_loaded_entries(DOMAIN):
-            hit = (mac and str(entry.data.get("mac", "")).lower() == mac) or (
-                speak_id and entry.data.get("speak_id") == speak_id
-            )
-            if not hit:
-                continue
-            host = entry.data.get("host")          # CONF_HOST 字面值
-            port = entry.data.get("port", 6053)   # CONF_PORT；卫星 API 默认 6053
-            if not host:
-                continue                          # assist 类 entry 无 host，跳过
-            return self.json({
-                "ok": True,
-                "host": host,
-                "port": port,
-                "mac": entry.data.get("mac", ""),
-                "speak_id": entry.data.get("speak_id", ""),
-                "device_name": entry.data.get("device_name", entry.title),
-                "mcp_endpoint": entry.data.get("mcp_endpoint", ""),
-                "config_type": entry.data.get("config_type", "device"),
-            })
-        return self.json_message("device not found", 404)
-
-
 class HuijianSatellitesView(HuijianHttpView):
     """卫星台账（OTA 方案 Phase 2 集成侧，2026-09-23；加载项面板数据源）。
 
     每行=一个已加载的卫星 config entry：身份(mac/speak_id/host:port)、展示名
     与区域（device registry 单一事实源）、在线态（RuntimeEntryData.available，
-    API 连接真源）、固件版本（三级回退：mac 台账→speak_id 台账（CMD20 入驻
+    API 连接真源）、固件版本（两级回退：speak_id 台账（CMD20 入驻
     POST，本运行期）→entry.data（建账时版本，可能陈旧，fw_source 标「入驻时」）
     全缺=""=未上报）、以及设备端 OTA 接收口探测（entry_data.services 里带 ota
     字样的 user service——现网 v2.1.35 恒空，固件 Phase 1 落地后自动点亮，面板
@@ -231,7 +142,6 @@ class HuijianSatellitesView(HuijianHttpView):
     async def get(self, request: web.Request):
         hass = request.app[KEY_HASS]
         domain_data = hass.data.setdefault(DOMAIN, {})
-        ledger = domain_data.get("satellite_ledger", {})
         sid_ledger = domain_data.get("satellite_ledger_by_speakid", {})
         device_registry = dr.async_get(hass)
         areas = ar.async_get(hass)
@@ -256,10 +166,10 @@ class HuijianSatellitesView(HuijianHttpView):
                     if dev.area_id and (a := areas.async_get_area(dev.area_id)):
                         area_name = a.name or ""
             speak_id = str(entry.data.get("speak_id", "") or "")
-            # 固件版本三级回退（v1.0.65·契约 F-02）：mac 台账（speakname 口，
-            # 预留演进）→ speak_id 台账（CMD20 入驻，本运行期实时）→ entry.data
-            # （建账时持久化，跨重启可显但可能陈旧，如实标源）。
-            rec = ledger.get(mac, {}) or sid_ledger.get(speak_id, {})
+            # 固件版本两级回退（v1.0.65·契约 F-02）：speak_id 台账（CMD20 入驻
+            # POST，本运行期实时）→ entry.data（建账时持久化，跨重启可显但可能
+            # 陈旧，如实标源）。原 mac 台账（speakname 口）随死改名链一并移除。
+            rec = sid_ledger.get(speak_id, {})
             fw_live = str(rec.get("fw_version", "") or "")
             fw_source = "实时" if fw_live else ""
             fw = fw_live or str(entry.data.get("fw_version", "") or "")

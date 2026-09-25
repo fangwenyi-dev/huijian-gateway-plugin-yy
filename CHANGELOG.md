@@ -1,5 +1,17 @@
 # 变更日志
 
+## [1.1.11] - 2026-09-25 删两个孤儿 HTTP 端点 + 卫星版本回退三级收敛两级
+- 删 `HuijianDeviceInfoView`（`/api/huijian-ai/device-info`）与 `HuijianSetNameView`
+  （`/api/huijian-ai/update/speakname`）：两端点**全仓零调用方**。device-info 当年为小程序
+  `queryHaDevice` 而加，但小程序从无该调用（配网只调 `/setup/qrcode`）；speakname 的固件触发点
+  CMD30 `PROPERTY_DEVICE_NAME` 小程序从不下发（device.js 只发属性 0/1/2/4）。三端审计 2026-09-25 定。
+- `HuijianSatellitesView` 固件版本回退**三级收敛为两级**：mac 台账（`satellite_ledger`）的唯一写点
+  在被删的 speakname 口、且现网从不带 fw_version ⇒ 该 tier 恒空，移除；留 speak_id 台账（CMD20 入驻
+  实时）→ entry.data（建账时持久化）两级，行为不变。
+- 配套固件批（**待构建+台架验证后发布**，HA 不可达暂卡）：删 `r_postDeviceName`+CMD30 `PROPERTY_DEVICE_NAME`
+  +V1 播报吞头 cherry-pick（出货 v2.1.65 因 rel/v2.1.64 不含 4cd7ad5 而吞播报头）+`PROJECT_VER` 2.1.64→2.1.66 纠正。
+- 纯死码清理，运行路径零改动；全量 pytest 与基线 stash 差分**逐条一致**（9 项环境红 / 1946 passed，零新增）。
+
 ## [1.1.10] - 2026-09-24 默认 TTS 改 MeloTTS + 语音 Web UI 三修
 - 默认 TTS 档改 **local_melo**（tts_melo_zh_en，单女声 sid0）：settings/tts.py 读侧默认与未知档回落、
   models.lock default_provider 同步翻转（melo=true、kokoro=false）。台架横评 melo RTF 0.197 优于

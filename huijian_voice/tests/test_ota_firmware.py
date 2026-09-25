@@ -445,7 +445,7 @@ def test_satellites_view_registered_and_authed():
 def test_ledger_fw_version_chain(tmp_path):
     """v1.0.65 契约 F-02 断链修复的形态钉：固件唯一带 fw_version 的 POST 落
     SetupView（/setup/qrcode）→ speak_id 台账；建账时版本进 entry.data 持久化；
-    SatellitesView 三级回退输出。speakname 口保留 mac 台账（schema-free 演进位）。
+    SatellitesView 两级回退输出（speak_id 台账→entry.data；死改名链移除后 mac 台账已删）。
     集成文件不可在本 venv import HA，按仓内先例走源码形态钉。"""
     src = HTTP_PY.read_text(encoding="utf-8")
     i = src.index("class HuijianSetupView")
@@ -458,7 +458,7 @@ def test_ledger_fw_version_chain(tmp_path):
     j = src.index("class HuijianSatellitesView")
     view_block = src[j:j + 4200]
     assert "satellite_ledger_by_speakid" in view_block and \
-        'entry.data.get("fw_version"' in view_block, "视图必须三级回退（实时→入驻→建账）"
+        'entry.data.get("fw_version"' in view_block, "视图必须两级回退（入驻→建账）"
     assert '"fw_source"' in view_block, "陈旧版本必须如实标源，面板不作假"
     cf = (HTTP_PY.parents[1] / "config_flow.py").read_text(encoding="utf-8")
     assert '"fw_version":' in cf, "config_flow 建账时持久化 fw_version"
