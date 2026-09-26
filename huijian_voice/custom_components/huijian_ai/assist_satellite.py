@@ -976,6 +976,28 @@ class EsphomeAssistSatellite(
                 "[Announce] API 音频卫星：弃 core 默认前置音（本板无 URL 自取能力，"
                 "放不出来），正文继续自合成推流接管（message=%d字）",
                 len(announcement.message or ""))
+        # ── A 修（2026-09-26 台架定位）：announce 请求必须**先于推流**上线路 ──
+        # 旧次序＝"先起 _stream_tts_audio 后台任务 → 再 await 请求"。设备从**第一帧**
+        # 就开始出声（v2.1.60 #7 流先行臂），而 HA 会先把 socket 一口气灌满
+        # ~50,176B（＝1.568s @16k/16bit）再等请求落位；请求一旦晚于 1.57s，设备已经把
+        # 这段缓冲放干 → 播报开头约 1.5s 处一顿。同句连播 8 次实测：唯一
+        # delay=1820ms 的那次卡，其余 580~860ms 全顺，且 gapmax 与卡不卡无关（113ms 的
+        # 也顺、533ms 的也顺）——锅就在次序，不在链路、不在合成速度。
+        # 为什么"先建任务"就够：aioesphomeapi 的 send_messages_await_response_complex
+        # 在**任何 await 之前**就把帧写出（connection.py:935 "Send the message right
+        # away … we are not awaiting between sending the message and registering the
+        # handler"），故请求任务的第一个调度步必然早于推流任务的首包。
+        req_task = self.config_entry.async_create_background_task(
+            self.hass,
+            self.cli.send_voice_assistant_announcement_await_response(
+                media_id,
+                _ANNOUNCEMENT_TIMEOUT_SEC,
+                announcement.message,
+                start_conversation=run_pipeline_after,
+                preannounce_media_id=preannounce_media_id or "",
+            ),
+            "huijian_announce_request",
+        )
         if skip:
             _LOGGER.warning(
                 "[Announce] 播报未走文本自合成推流：%s（message=%d字, preannounce=%s, "
@@ -1034,13 +1056,7 @@ class EsphomeAssistSatellite(
                     "[Announce] 域内无 %s 的 TTS 引擎（加载项未运行/条目未启用"
                     "）——API 音频播报无源可推，回旧形态", DOMAIN)
 
-        await self.cli.send_voice_assistant_announcement_await_response(
-            media_id,
-            _ANNOUNCEMENT_TIMEOUT_SEC,
-            announcement.message,
-            start_conversation=run_pipeline_after,
-            preannounce_media_id=preannounce_media_id or "",
-        )
+        await req_task
         # v1.0.100（本修的收口点）：本 await 在设备回 AnnounceFinished（含 barge-in
         # 提前收口，固件 v2.1.55 起该事件也覆盖打断轮）或超时后才返回。返回即意味着
         # "这条播报在设备侧已经结束"——此刻任何仍在推的播报流都是孤儿，当场掐掉。

@@ -225,6 +225,12 @@ def _readiness(ctx) -> dict:
     asr = getattr(ctx, "asr", None)
     primary = str(getattr(asr, "model_key", "") or "")
     loaded = str(getattr(asr, "loaded_kind", lambda: "")() or "") if asr else ""
+    # 所选引擎的资产态：在盘优先判 ready。快照里的 state 是**下载进度台账**，
+    # 只有后台循环真去 ensure() 过那个键才会被写成 ready——而 `_loop_models` 对
+    # "已在盘"的键根本不进 pend，于是引擎明明载好了、state 却永远停在初值
+    # "pending"（1.1.13 上线当天家里实测就是这个形状）。只读 state 会把健康报成待取。
+    row = snap.get(primary) or {}
+    state = "ready" if row.get("ready") else (row.get("state") or "unknown")
     out = {
         "ok": not fatal,
         "asr_ready": bool(ctx.asr and ctx.asr.ready()),
@@ -233,7 +239,7 @@ def _readiness(ctx) -> dict:
         "models_fatal": fatal,
         "models": {k: v.get("state") for k, v in sorted(snap.items())},
         "asr_model": primary,
-        "asr_model_state": (snap.get(primary) or {}).get("state", "unknown") if primary else "n/a",
+        "asr_model_state": state if primary else "n/a",
         "asr_loaded_model": loaded,
         # 回落在载＝在载档 ≠ 配置主档；判据复用 asr.stale_kind()（它比的是档名，
         # 这里 primary 是存储键，不能直接拿 loaded 去等值比较）。

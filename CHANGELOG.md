@@ -1,5 +1,32 @@
 # 变更日志
 
+## [1.1.14] - 2026-09-26 播报请求先于推流上线路（开头那一顿的根因）+ healthz 引擎态不再误报 pending
+- **播报请求先行（A 修，`custom_components/huijian_ai/assist_satellite.py::_do_announce`）**：旧次序是
+  「起推流后台任务 → 再 await announce 请求」。设备从**第一帧**就开始出声（v2.1.60 #7 流先行臂），
+  而 HA 会先把 socket 一口气灌满 ~50,176 B（＝1.568s @16k/16bit 单声道）再等请求落位；请求一旦晚于
+  1.57s 到达，设备已经把这段缓冲放干 ⇒ 播报**开头约 1.5 秒处一顿**。同句连播 8 次实测：唯一
+  delay=1820ms 的那次卡，其余 580~860ms 全顺——且 gapmax 与卡不卡无关（113ms 的顺、533ms 的也顺），
+  所以锅在**次序**，不在链路、不在本地 TTS 合成速度。
+  改法：先把请求建成后台任务、再起推流任务、最后 `await req_task`。顺序成立有依据——
+  `aioesphomeapi/connection.py:935` 明确"在任何 await 之前就把帧写出"（注释自证 "Send the message
+  right away … we are not awaiting between sending the message and registering the handler"），
+  故先创建的任务必然先把请求送上线路。收口点（`_revoke_announce_stream`）、异常传播、
+  preannounce 弃音裁决（请求读**救援后**的值）三项全部原样。
+- **`/healthz` 的 `asr_model_state` 不再把健康报成待取**：v1.1.13 上线当天家里实测就是假形——
+  `asr_loaded_model: "paraformer"`（引擎好好载着）却 `asr_model_state: "pending"`。根因是快照里的
+  `state` 是**下载进度台账**，只有后台循环真去 `ensure()` 过那个键才会写成 ready，而 `_loop_models`
+  对"已在盘"的键根本不进 pend ⇒ 永远停在构造初值。现改为**在盘优先判 ready**，不在盘才谈进度。
+- **测试**：新增 1 条次序钉（含反向：不许退回就地 await；含"必须读救援后的 preannounce"）；
+  2 条变异各自把对应钉弄红（把请求任务挪回推流之后 → 红；改回就地 await → 红）。另修一条会被误读的
+  老钉：`test_v1096::test_caller_warns_every_skip` 原本用 `+1400` **定长字符窗口**（历史上已从 900
+  撑到 1400，本次注释一加又爆窗），改成**锚到锚**且锚点用函数既有收口调用，不再与新变量名互相绑死。
+  全量回归 **1959 passed / 9 failed**，红集与本机 Windows 环境基线逐 ID 一致（无 SIGALRM ×5、
+  css 母本分叉、三处大小写/键位既有红）＝零新增。
+- **未随本批发版（如实记）**：固件 `v2.1.68`（F7 上行尾包挂账续发：弱网下 `STT_VAD_END` 与 end 帧
+  被一次性丢弃 ⇒ HA 录到超时 ⇒ 整轮"说了没反应"）已编好并烧在台架板上，守卫 70/70、台架 7 轮无回归，
+  但**弱网正证未拿到**——造塞复测 5 轮 `上行丢帧 0 / 尾包挂账 0`，链路当时是干净的，所以不拿
+  "全 PASS"冒充修复证据；等真出现拥塞的那一轮收完 `[UPLINK-TAIL]` 证据再发。
+
 ## [1.1.13] - 2026-09-26 OTA 载荷口径纠正 + 接管窗按实测放宽 + 模型缺失不再静默 20 秒
 - **OTA 载荷容量闸（F1）**：`core/firmware_store.py` 新增 `OTA_SLOT_BYTES = 0x3F0000`
   （4,128,768 B＝设备 `ota_0/ota_1` 分区实测，IDF 同源）与 `OTA_MAX_BYTES`（留 10% 余量

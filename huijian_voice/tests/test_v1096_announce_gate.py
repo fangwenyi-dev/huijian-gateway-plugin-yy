@@ -75,12 +75,37 @@ def test_keyword_only_signature_pinned():
 def test_caller_warns_every_skip():
     src = SRC.read_text(encoding="utf-8")
     i = src.index("taken, skip = _announce_gate(")
-    # v1.0.99：gate 与 if skip 之间多了 preannounce 救援块（窗口 900→1400）；
-    # 救援自身语义由 tests/test_v1099_preannounce_rescue.py 钉，本钉只守分因必 WARN。
-    seg = src[i:i + 1400]
+    # 窗口改**锚到锚**（旧版是 +1400 定长，v1.0.99 加救援块时已从 900 撑到 1400，
+    # v1.1.14 请求先行块一加就爆窗）：定长窗口的失败方式是"实现没错、钉先红"，
+    # 而那种红会被当成改动有问题。锚点=门控起、本函数收口点（_revoke_announce_stream）
+    # 止——用它而非本次新加的变量名，免得两条钉互相绑死、改名即误红。
+    seg = src[i:src.index("_revoke_announce_stream(", i)]
     assert "if skip:" in seg, "分因必须进 WARN——静默跳过回潮"
     assert '"[Announce] 播报未走文本自合成推流' in seg
     assert "elif taken:" in seg, "命中门→引擎块"
+
+
+def test_announce_request_goes_on_wire_before_stream():
+    """A 修（2026-09-26 台架定位）：播报请求必须**先于**推流上线路。
+
+    旧次序"先起推流任务→再 await 请求"下，HA 会先把 socket 灌满 ~50,176B
+    （=1.568s @16k/16bit）再等请求落位；设备从第一帧就开始出声，请求一旦晚于
+    1.57s 到达，头部缓冲已被放干 → 播报开头约 1.5s 处一顿。同句连播 8 次实测：
+    唯一 delay=1820ms 的那次卡，其余 580~860ms 全顺（gapmax 与卡不卡无关）。
+    判据取**次序**而非注释/常量，并把"不许退回直接 await"钉成反向。
+    """
+    src = SRC.read_text(encoding="utf-8")
+    i_req = src.index("req_task = self.config_entry.async_create_background_task(")
+    i_stream = src.index("self._stream_tts_audio(tts_stream", i_req)
+    assert i_req < i_stream, "请求任务必须先于推流任务创建（否则头部有 1.57s 真空窗）"
+    blk = src[i_req:src.index("\n        )", i_req)]
+    assert "send_voice_assistant_announcement_await_response" in blk, "请求任务本体必须就是它"
+    assert "preannounce_media_id=preannounce_media_id or \"\"" in blk, \
+        "请求必须读**救援后**的 preannounce（弃前置音的裁决不得被旧值覆盖）"
+    # 反向钉：旧的"就地 await 直调"形态不得回来（那等于把顺序又排回推流之后）
+    assert "await self.cli.send_voice_assistant_announcement_await_response" not in src, \
+        "退回就地 await = 请求又排在推流之后，本缺陷原样复发"
+    assert "await req_task" in src, "请求任务必须仍被 await（收口点与异常传播不变）"
 
 
 def test_device_info_race_fallback_wired():

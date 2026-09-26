@@ -605,6 +605,30 @@ def test_readiness_unknown_engine_key_is_not_a_crash():
     assert body["asr_model_state"] == "n/a" and body["ok"] is True
 
 
+def test_readiness_state_prefers_on_disk_over_download_ledger():
+    """快照的 state 是**下载进度台账**，只有 `_loop_models` 真去 ensure() 过某个键才会
+    写成 ready；而它对"已在盘"的键根本不进 pend ⇒ 引擎载得好好的、state 却永远停在
+    初值 "pending"。1.1.13 上线当天家里实测正是这个形状（paraformer 在载 + 全部 pending），
+    只读 state 会把健康报成待取。判据：在盘＝ready，不在盘才谈进度。"""
+    from core.ws_server import _readiness
+    class _Store:
+        def snapshot(self):
+            return {"asr_paraformer_bilingual":
+                    {"state": "pending", "ready": True, "pct": 0}}
+    ctx = AppContext(asr=_ReadyASR(key="asr_paraformer_bilingual", loaded="paraformer"),
+                     tts=_Tts(), store=_Store())
+    body = _readiness(ctx)
+    assert body["asr_model_state"] == "ready", "在盘必须判 ready，不许报 pending"
+    # 对照：同一条台账把 ready 撤掉 ⇒ 必须立刻回到如实的 pending（钉不是恒答 ready）
+    class _Store2:
+        def snapshot(self):
+            return {"asr_paraformer_bilingual":
+                    {"state": "pending", "ready": False, "pct": 0}}
+    ctx2 = AppContext(asr=_ReadyASR(key="asr_paraformer_bilingual", loaded="paraformer"),
+                      tts=_Tts(), store=_Store2())
+    assert _readiness(ctx2)["asr_model_state"] == "pending"
+
+
 # ── /discover 端点自描述（三项目适配判定书缺口2 的服务器侧修法）──────────
 
 
