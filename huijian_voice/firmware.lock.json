@@ -2,16 +2,16 @@
   "_doc": "ESP32 卫星固件发布锁（OTA 方案 Phase 2）。releases 每条=一个可下发版本：version(x.y.z)/file(public 目录内落盘名)/urls(按容灾顺序 GitHub→Gitee，私有仓须内嵌一次性访问串)/sha256(64hex 必填，缺=拒下载)/size/notes_zh(对外话术，受内部文档禁发约束)/min_compatible。镜像内置文件之外，/data/firmware/firmware.lock.json 同名整文件优先（现场热修不重打镜像）。版本值以固件仓 release 实测为准，禁止凭记忆填写。",
   "releases": [
     {
-      "version": "2.1.66",
-      "file": "huijian-s3-2.1.66.bin",
+      "version": "2.1.67",
+      "file": "huijian-s3-2.1.67.bin",
       "urls": [
-        "https://gh-proxy.com/https://github.com/fangwenyi-dev/huijian-gateway-plugin-yy/releases/download/v1.1.12/huijian-s3-2.1.66.bin",
-        "https://github.com/fangwenyi-dev/huijian-gateway-plugin-yy/releases/download/v1.1.12/huijian-s3-2.1.66.bin",
-        "https://gitee.com/fangwenyi-dev/huijian-gateway-plugin-yy/releases/download/v1.1.12/huijian-s3-2.1.66.bin"
+        "https://gh-proxy.com/https://github.com/fangwenyi-dev/huijian-gateway-plugin-yy/releases/download/v1.1.13/huijian-s3-2.1.67.bin",
+        "https://github.com/fangwenyi-dev/huijian-gateway-plugin-yy/releases/download/v1.1.13/huijian-s3-2.1.67.bin",
+        "https://gitee.com/fangwenyi-dev/huijian-gateway-plugin-yy/releases/download/v1.1.13/huijian-s3-2.1.67.bin"
       ],
-      "sha256": "ff820fc18b61bc573009385699381d48751cf2de33ae043334122c9f70be7ee2",
-      "size": 8786984,
-      "notes_zh": "播报不再吞首字（设备侧接管 HA 先到的播报流，台架实测留住约 1.6s 头部）+ 固件版本号自报纠正（2.1.65 的 bin 一直自报 2.1.64，面板与升级判据错位一号）+ 删除已无调用方的 BLE 改名上报链；建议升级。bin 由固件仓 v2.1.66(私仓) 镜像至本公开 release",
+      "sha256": "d44b22962667c0c2e80f399c7e9a80501ba9ea08c12f7f06777eb552923bc9c2",
+      "size": 2578192,
+      "notes_zh": "播报不吞首字（设备侧接管 HA 先到的播报流；台架实测请求可晚到 2.67s，接管窗已由 2s 放宽到 5s，冷启动首轮不再丢约 1.1s 头部）+ 固件版本号自报纠正（2.1.65 的 bin 一直自报 2.1.64，面板与升级判据错位一号）+ 删除已无调用方的 BLE 改名上报链；建议升级。本条目起 OTA 载荷改为 **app 镜像**（2.1.66 登记的是产线用的合并出厂镜像，超设备槽容量、下发必被拒，故不入账）。bin 由固件仓 v2.1.67(私仓) 镜像至本公开 release",
       "min_compatible": "2.1.36"
     },
     {

@@ -106,15 +106,21 @@ class AsrEngine:
         return rec
 
     def _load_one(self, kind: str) -> bool:
-        """单引擎加载：目录缺失先同步 ensure（升级过渡/首启兜底），失败 False。"""
+        """单引擎加载：**只查在盘**，缺失则丢给后台补下载并立即失败（快败）。
+        2026-09-26 改：这里原本是同步 `store.ensure(key)`——在请求热路径（executor
+        线程）里跑三级跨境下载，一挂就是分钟级；而 `main.py::_loop_models` 本来就在
+        后台带退避补下同一批模型，同步那次既冗余又与它抢线程。后果实测：家网 SenseVoice
+        未落盘时，每轮语音都被挂死在该线程，设备侧 `T_AWAITING=20s` 先超时 ⇒ **无应答
+        也无报错**，面板与语音侧完全看不出是模型缺失。改快败后同一故障变成带因的可读失败。"""
         key = _KIND_KEY[kind]
         d = self.store.model_dir_for(key)
         if d is None:
-            self.store.ensure(key)
-            d = self.store.model_dir_for(key)
-        if d is None:
-            logger.warning("[STT] 模型未就绪(%s)", key)
-            self.last_reason = f"模型资产缺失({key})，下载未完成或 /data 不可写"
+            try:
+                self.store.ensure_async(key)      # 交给后台循环去下，不占死会话线程
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[STT] 触发后台补下载失败(%s): %s", key, e)
+            logger.warning("[STT] 模型未就绪(%s)，已交后台补取——本轮快败", key)
+            self.last_reason = f"模型资产缺失({key})，已转后台补下载（本轮不等待）"
             return False
         try:
             rec = self._build_recognizer(kind, d)
@@ -143,8 +149,12 @@ class AsrEngine:
             primary = self._primary_kind()
             if self._load_one(primary):
                 return True
+            primary_reason = self.last_reason
             if primary == "sensevoice" and self._load_one("paraformer"):
                 return True
+            # 两档都起不来时说的是**所选**那档：现场要听到"你配的 SenseVoice 没下来"，
+            # 不是回落尝试链的最后一条。
+            self.last_reason = primary_reason or self.last_reason
             return False
         finally:
             with self._lock:

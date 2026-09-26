@@ -46,6 +46,25 @@ _URL_SCHEMES = ("http://", "https://")                # 拒 file:// 等本地读
 _DL_MAX_BYTES = 256 << 20                             # 下载绝对硬顶（/data 是 HA 共享卷）
 _DL_OVERSIZE_RATIO = 1.2                              # 声明 size 的浮动上限
 _IMPORT_SETTLE_S = 2.0                                # 投递包静止闸：mtime 距今 <2s 视为拷贝中
+# ── OTA 载荷容量闸（2026-09-26 补）─────────────────────────────────
+# 设计文档 esp32固件OTA升级方案-2026-09-23.md L88「size ≤ 槽容量-10% 服务端预检 +
+# B3 双保险」与 L92「CI 加 bin 尺寸闸(>3.7MB 红)」两条**从未实现**。后果实测：lock 把
+# 产线用的**合并出厂镜像**当 OTA 载荷登记（2.1.65/2.1.66 均 8,786,984B），面板点「升级」
+# 后设备在分区闸上确定性拒绝——`Ota: Firmware 8786984 bytes exceeds OTA partition
+# 4128768 bytes -> rejected`——原因只躺在设备串口里，面板侧只显示"已下发"。
+# OTA 载荷必须是 **app 镜像**（合并镜像含 bootloader/分区表/assets，永远装不进 app 槽）。
+OTA_SLOT_BYTES = 0x3F0000                 # 4,128,768B：ota_0/ota_1 实测值（IDF 同源）
+OTA_MAX_BYTES = OTA_SLOT_BYTES * 9 // 10  # 留 10% 余量＝3,715,891B（≈文档的 3.7MB）
+
+
+def ota_capacity_error(version: str, size: int) -> str:
+    """纯函数：返回 ""＝可下发；否则＝拒下发具名原因（API/面板可直接展示）。"""
+    sz = _to_int(size, f"capacity v{version}")
+    if sz > OTA_MAX_BYTES:
+        return (f"v{version} 载荷 {sz}B 超 OTA 槽可用上限 {OTA_MAX_BYTES}B"
+                f"（槽 {OTA_SLOT_BYTES}B 留 10% 余量）——登记错了：OTA 要的是 app 镜像，"
+                f"不是产线 flash_tool 用的合并出厂镜像")
+    return ""
 
 
 def _clip(s, n: int = 120) -> str:
@@ -382,6 +401,12 @@ class FirmwareStore:
                 self._downloading.discard(version)
 
     # ── 一次性领取令牌 ──────────────────────────────────────────────
+    def capacity_error(self, version: str) -> str:
+        """按账目 size 查容量闸；""＝可下发。给 API 层出**精确**拒因用（issue() 已自拦，
+        但那里只能回 None，面板会糊成「不在盘」）。"""
+        row = next((r for r in self.versions() if r["version"] == version), None)
+        return "" if row is None else ota_capacity_error(version, row.get("size"))
+
     def issue(self, version: str, mac: str = "") -> dict | None:
         row = next((r for r in self.versions() if r["version"] == version and r["on_disk"]
                     and not r.get("sha_mismatch")), None)
@@ -403,6 +428,11 @@ class FirmwareStore:
         if len(quote(row["file"])) > _FN_URL_BUDGET:
             logger.warning("[固件] v%s 文件名超 URL 预算（%sB），不可 BLE 代发：%s",
                            version, _FN_URL_BUDGET, _clip(row["file"]))
+            return None
+        # 载荷容量闸：超槽的包签出去也必被设备拒（见 OTA_SLOT_BYTES 处注释），这里先拦，
+        # 免得白烧一枚 10min 令牌并让面板以为"已下发"。
+        if (cap := ota_capacity_error(version, row.get("size"))):
+            logger.warning("[固件] %s", cap)
             return None
         tok = secrets.token_hex(16)
         now = time.time()

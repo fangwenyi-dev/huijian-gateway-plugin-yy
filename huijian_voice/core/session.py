@@ -257,6 +257,7 @@ class SttSession(BaseSession):
 
     async def _run(self, pcm: bytes, rid: int = 0) -> None:
         text = ""
+        reason = ""
         try:
             if pcm:
                 text = await asyncio.wait_for(
@@ -265,6 +266,7 @@ class SttSession(BaseSession):
                 text = ""       # 静音：契约要求仍回一条 text:""
         except asyncio.TimeoutError:
             logger.warning("[STT] 识别超预算 %ss", const.STT_RESULT_BUDGET_S)
+            reason = f"识别超预算 {const.STT_RESULT_BUDGET_S}s"
         except asyncio.CancelledError:
             # 收束已由抢占方（_transcribe_and_reply）或断连（on_close）负责，
             # 这里不再补发，避免双帧（2026-09-12 竞态修复配套）。
@@ -272,13 +274,23 @@ class SttSession(BaseSession):
             raise
         except Exception:
             logger.exception("[STT] 识别异常")
-        await self._reply_stt(text, rid)
+            reason = "识别异常（详见加载项日志）"
+        await self._reply_stt(text, rid, reason)
 
-    async def _reply_stt(self, text: str, rid: int = 0) -> None:
+    def _asr_reason(self) -> str:
+        """空文本时的具名分因。此前"引擎没就绪"与"用户没说话"在设备侧逐字节同形
+        （asr.py:199 注释自认只能靠翻日志猜时间戳对齐），现场无从区分。"""
+        return str(getattr(getattr(self.ctx, "asr", None), "last_reason", "") or "")
+
+    async def _reply_stt(self, text: str, rid: int = 0, reason: str = "") -> None:
         # v1.0.92：rid>0 才带键（legacy 客户端回执逐字节不变，fail-open）。
         msg = {"type": "stt", "text": text or ""}
         if rid:
             msg["rid"] = rid
+        # 只在"空文本且确有分因"时带 reason，避免给正常轮次添噪声键（契约新增可选键，
+        # 老客户端忽略即可；有它设备/集成才能把"没听懂"与"服务没就绪"说成两句话）。
+        if not text and (reason or self._asr_reason()):
+            msg["reason"] = (reason or self._asr_reason())[:160]
         await self.send_json(msg)
 
     async def on_close(self) -> None:

@@ -216,14 +216,32 @@ def _readiness(ctx) -> dict:
             snap = {}
     fatal = sorted(k for k, v in snap.items()
                    if v.get("state") in _FATAL_MODEL_STATES and not v.get("ready"))
-    return {
+    # ── 所选引擎真相（2026-09-26 补）───────────────────────────────
+    # asr_ready 只回答"有没有 recognizer 在载"，回落档在载也是 true。家网那次实测
+    # 就是这个形状骗过了所有人：asr_ready:true / tts_ready:true / models_fatal:[]，
+    # 而配置主档 asr_sensevoice_small 一直 pending ⇒ 每轮语音都起不来、设备 20s
+    # 超时无应答，健康面却全程绿灯。这里把"所选引擎"的真实状态单列出来，
+    # ok/asr_ready 的既有语义一字不动（Supervisor 重启判定依赖它）。
+    asr = getattr(ctx, "asr", None)
+    primary = str(getattr(asr, "model_key", "") or "")
+    loaded = str(getattr(asr, "loaded_kind", lambda: "")() or "") if asr else ""
+    out = {
         "ok": not fatal,
         "asr_ready": bool(ctx.asr and ctx.asr.ready()),
         "tts_ready": bool(ctx.tts and ctx.tts.ready()),
         "sessions": len(ctx.sessions),
         "models_fatal": fatal,
         "models": {k: v.get("state") for k, v in sorted(snap.items())},
+        "asr_model": primary,
+        "asr_model_state": (snap.get(primary) or {}).get("state", "unknown") if primary else "n/a",
+        "asr_loaded_model": loaded,
+        # 回落在载＝在载档 ≠ 配置主档；判据复用 asr.stale_kind()（它比的是档名，
+        # 这里 primary 是存储键，不能直接拿 loaded 去等值比较）。
+        "asr_fallback_in_use": bool(getattr(asr, "stale_kind", lambda: False)()) if asr else False,
     }
+    if not out["asr_ready"]:
+        out["asr_reason"] = str(getattr(asr, "last_reason", "") or "") or "引擎未加载（懒加载或补下载中）"
+    return out
 
 
 async def _health(request: web.Request) -> web.Response:

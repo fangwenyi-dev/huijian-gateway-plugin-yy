@@ -532,6 +532,56 @@ def test_repo_lock_integrity():
     assert cur["size"] == 2859488
 
 
+# 历史例外：2.1.65 登记成了产线用的合并出厂镜像（8,786,984B），装不进 app 槽。
+# 不改写已发布历史，但由运行时容量闸挡住并回精确拒因；新条目一律不得超限。
+OTA_LEGACY_OVERSIZE = {"2.1.65"}
+
+
+def test_ota_capacity_gate():
+    """F1（2026-09-26）：OTA 载荷尺寸闸。设计文档 L88「size ≤ 槽容量-10% 服务端预检」
+    与 L92「CI 加 bin 尺寸闸(>3.7MB 红)」两条**从未实现**，于是 lock 把合并出厂镜像
+    登记成 OTA 载荷（2.1.65/2.1.66 均 8,786,984B）；设备侧唯一在岗的 B3 分区闸把它
+    确定性拒绝（`exceeds OTA partition 4128768`），而面板只会显示"已下发"。
+    本钉同时充当文档要求的那道 CI 闸（Lint job 跑全量 pytest）。"""
+    from core import firmware_store as fs
+    assert fs.ota_capacity_error("9.9.9", fs.OTA_MAX_BYTES) == "", "恰好等于上限必须放行"
+    r = fs.ota_capacity_error("9.9.9", fs.OTA_MAX_BYTES + 1)
+    assert r and "app 镜像" in r, "超 1B 必须拒，且拒因要点名「登记错了载荷类型」"
+    assert fs.ota_capacity_error("9.9.9", "脏值") == "", "size 脏值折叠为 0 时不得误拒"
+    data = json.loads(REPO_LOCK.read_text(encoding="utf-8"))
+    for rel in data["releases"]:
+        v, sz = str(rel.get("version")), int(rel.get("size") or 0)
+        if v in OTA_LEGACY_OVERSIZE:
+            assert v == "2.1.65" and sz > fs.OTA_MAX_BYTES, f"历史例外表跑偏：{v} size={sz}"
+            continue
+        assert sz <= fs.OTA_MAX_BYTES, (
+            f"v{v} 登记了 {sz}B > OTA 槽可用上限 {fs.OTA_MAX_BYTES}B：OTA 载荷必须是 app "
+            f"镜像，合并出厂镜像只给产线 flash_tool 用（超槽会被设备 B3 闸拒绝）")
+
+
+def test_ota_capacity_refusal(tmp_path, monkeypatch):
+    """issue() 真拒签超槽包。最后那条"同尺寸放行"是对照——没有它，前面红的可能只是
+    on_disk/sha_mismatch 之类更早的分支，容量闸等于没被验过。"""
+    import hashlib
+
+    from core import firmware_store as fs
+    blob = b"z" * 40
+    lock = tmp_path / "firmware.lock.json"
+    lock.write_text(json.dumps({"releases": [
+        {"version": "2.9.9", "file": "huijian-s3-2.9.9.bin",
+         "urls": ["http://127.0.0.1:1/a.bin"], "sha256": hashlib.sha256(blob).hexdigest(),
+         "size": 40, "notes_zh": "容量闸测试"}]}), encoding="utf-8")
+    st = fs.FirmwareStore(root=tmp_path / "data", lock_path=lock)
+    st.import_dir.mkdir(parents=True, exist_ok=True)
+    _drop(st, "huijian-s3-2.9.9.bin", blob)      # 走投递口（含 mtime 静止闸适配）
+    assert st.scan_import() == 1, "测试夹具没把包收编进 public，后面全是空转"
+    monkeypatch.setattr(fs, "OTA_MAX_BYTES", 39)
+    assert st.issue("2.9.9") is None, "超槽载荷必须拒签（白烧一次性令牌没意义）"
+    assert "超 OTA 槽可用上限" in st.capacity_error("2.9.9"), "API 层拿到的必须是容量原因"
+    monkeypatch.setattr(fs, "OTA_MAX_BYTES", 40)
+    assert st.issue("2.9.9"), "同尺寸必须放行——否则上面的红不是容量闸造成的"
+
+
 # ── v1.0.74 OTA 真下发：/api/firmware/dispatch + 集成中继视图 + 面板接线 ──
 
 def _dispatch_ctx(store, ha):
@@ -591,6 +641,38 @@ def test_dispatch_relay_reject_collapse(store, monkeypatch):
     port = next(srv)
     st, j = _jpost(port, "/api/firmware/dispatch", {"mac": "aa"})
     assert st == 200 and j["success"] is False and "接收口" in j["error"]
+
+
+def test_dispatch_capacity_refusal_names_reason(store, monkeypatch):
+    """HTTP 层双向钉（F1 的另一半）：容量闸在 store 里拒了签，但**面板看到的**是
+    `/api/firmware/issue|dispatch` 的回执文字——此前两者一律折叠成"该版本不在盘"，
+    把"登记错了载荷类型（合并出厂镜像超槽）"说成"包没放对地方"，两头指错路。
+    对照分支（抬上限后放行）证明红的那次真是容量闸造成的。"""
+    from core import firmware_store as fs
+    monkeypatch.setattr("core.ota_api.local_ip", lambda: "10.0.0.9")
+    _drop(store, "huijian-s3-2.9.7.bin", b"d" * 9)
+
+    srv = _serve(make_admin_app(_dispatch_ctx(store, FakeHAClient(rest=_sat_ledger()))))
+    port = next(srv)
+    monkeypatch.setattr(fs, "OTA_MAX_BYTES", 8)
+    st, j = _jpost(port, "/api/firmware/issue", {"version": "2.9.7", "mac": "aa"})
+    assert st == 400 and j["success"] is False
+    assert "超 OTA 槽可用上限" in j["error"], f"issue 未回具名拒因：{j}"
+    assert "不在盘" not in j["error"], "不得再拿『版本不在盘』掩盖容量拒因"
+
+    ha = FakeHAClient(rest=_sat_ledger())
+    srv2 = _serve(make_admin_app(_dispatch_ctx(store, ha)))
+    port2 = next(srv2)
+    st, j = _jpost(port2, "/api/firmware/dispatch", {"version": "2.9.7", "mac": "aa"})
+    assert st == 400 and j["success"] is False and "超 OTA 槽可用上限" in j["error"]
+    assert not ha.written, "超槽载荷不得进中继（发了也是设备侧确定性拒绝）"
+
+    # 对照：把上限抬到真实尺寸 ⇒ 两条口都应正常放行（否则上面的红不是容量闸）
+    monkeypatch.setattr(fs, "OTA_MAX_BYTES", 9)
+    st, j = _jpost(port, "/api/firmware/issue", {"version": "2.9.7", "mac": "aa"})
+    assert st == 200 and j["success"] and j["url"], j
+    st, j = _jpost(port2, "/api/firmware/dispatch", {"version": "2.9.7", "mac": "aa"})
+    assert st == 200 and j["success"] and ha.written, j
 
 
 def test_ota_relay_view_form():

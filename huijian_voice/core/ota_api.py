@@ -127,6 +127,16 @@ def setup(app, ctx):
             logger.warning("[OTA] 签发异常: %s", e)
             res = None
         if not res:
+            # 容量闸单独出精确拒因：糊成「不在盘」会让人反复重新投递/重拉，而真因是
+            # 账上登记的载荷类型错了（合并出厂镜像 ≠ app 镜像），重投多少次都没用。
+            cap = ""
+            try:
+                cap = store.capacity_error(version) if version else ""
+            except Exception:  # noqa: BLE001
+                cap = ""
+            if cap:
+                logger.warning("[OTA] 签发被容量闸拦下：%s", cap)
+                return web.json_response({"success": False, "error": cap}, status=400)
             return web.json_response({
                 "success": False,
                 "error": "该版本不在盘（投递口放包或先「拉取」；或尚无已登记版本）"}, status=400)
@@ -176,6 +186,15 @@ def setup(app, ctx):
             logger.warning("[OTA] dispatch 签发异常: %s", e)
             res = None
         if not res:
+            cap = ""
+            try:
+                cap = store.capacity_error(version) if version else ""
+            except Exception:  # noqa: BLE001
+                cap = ""
+            if cap:
+                logger.warning("[OTA] dispatch 被容量闸拦下 v%s mac=%s：%s", version, mac, cap)
+                return web.json_response({"success": False, "error": cap,
+                                          "version": version}, status=400)
             return web.json_response(
                 {"success": False, "error": "该版本不在盘（投递口放包或先「拉取」）"}, status=400)
         host = local_ip()

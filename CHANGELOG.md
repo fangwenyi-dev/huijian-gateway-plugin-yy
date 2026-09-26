@@ -1,5 +1,45 @@
 # 变更日志
 
+## [1.1.13] - 2026-09-26 OTA 载荷口径纠正 + 接管窗按实测放宽 + 模型缺失不再静默 20 秒
+- **OTA 载荷容量闸（F1）**：`core/firmware_store.py` 新增 `OTA_SLOT_BYTES = 0x3F0000`
+  （4,128,768 B＝设备 `ota_0/ota_1` 分区实测，IDF 同源）与 `OTA_MAX_BYTES`（留 10% 余量
+  ＝3,715,891 B），`issue()` 签发前拒超限，`/api/firmware/issue`、`/dispatch` 回**具体原因**
+  而不是"该版本不在盘"。起因：v1.1.12 登记的 2.1.66 是**产线 flash_tool 用的合并出厂镜像**
+  （8,786,984 B，含 bootloader + 分区表 + otadata），设备侧 B3 容量闸直接判负
+  （`exceeds OTA partition 4128768`）——面板显示"已登记"，下发即失败，而失败信息长得像
+  "包没放对地方"，两头都指错路。lock 已把 2.1.66 **撤账**，改登记同一次构建的 **app 镜像**
+  `huijian-s3-2.1.67.bin`（2,578,192 B）；2.1.65 是同型历史遗留，显式记名进
+  `OTA_LEGACY_OVERSIZE` 并注明"其 urls 只作近场领取/产线烧录，OTA 下发会被闸拦下"，
+  不再靠"没人下发所以不出事"。
+- **播报接管窗 2000→5000 ms（固件 v2.1.67，F2）**：台架实测加载项 reload 后的**首轮**播报
+  （冷合成、media 走 `.wav` 而非 `.mp3`）请求比 `STREAM_START` 晚 **2670 ms** 落位 ⇒
+  2000 ms 窗先到期，已收的 34,816 B(≈1.09 s) 被撤单支路 `play_reset` 丢弃，**吞头照旧**。
+  也就是说 v1.1.12 随附的 2.1.66 带着一个按原值不够用的窗出了货。
+- **模型缺失不再挂死请求线程（F3）**：`asr._load_one` 此前对缺失目录跑**同步** `store.ensure`
+  ——在请求热路径的 executor 线程里做分钟级跨境下载，设备侧 `T_AWAITING=20 s` 先超时 ⇒
+  **无应答也无报错**，面板与语音侧同哑。现只查在盘，缺失转交后台补取（`main._loop_models`
+  本就带退避在重下同一批模型，同步那次既冗余又与它抢线程），当轮快败。
+- **空结果与就绪面从此说得出原因（F3/F4）**：`{"type":"stt","text":""}` 此前对"真静音 /
+  引擎没载 / 模型在补下 / 识别抛异常"四种情形逐字节同形（`asr.py` 自己的注释就写着只能
+  翻日志猜时间戳对齐）。现在空结果带 `reason`（非空轮次不带 ⇒ 老客户端逐字节不变），
+  两档都起不来时报的是**所选**那档而不是回落链的最后一条。`/healthz` 补真相字段
+  `asr_model` / `asr_model_state` / `asr_loaded_model` / `asr_fallback_in_use` / `asr_reason`；
+  `ok` 与 `asr_ready` 的语义**一字不动**（懒加载不是故障，改成"没载就 503"会让一台十分钟
+  没人说话的正常客户机被 Supervisor 无限重启）。家网那次实测正是被 `asr_ready:true /
+  models_fatal:[]` 的绿灯骗过去：配置主档 `asr_sensevoice_small` 一直 pending。
+- **未修（如实记，不假装收口）**：① 下发中继只带 `url`，`sha256` 到不了设备（设备自算哈希
+  只能日志自证）——补它要同时动固件用户服务签名 `ota_upgrade(url)`、vendored 集成、加载项
+  三端，不是本批一刀；② CMD20 只在 BLE 通道发（`ble_manager.cc:647`），OTA 后面板版本号
+  不刷新，建议走 ESPHome `DeviceInfoResponse.project_version`，同样跨端。
+- **测试**：本批新增 11 项钉（F1 容量 3＝store 层 2 + `/api/firmware/issue|dispatch` HTTP 层 1、
+  F3 引擎快败 3、F3 `reason` 上链路 2、F4 就绪真相 3），改写 1 项旧钉——它的断言
+  （`ensure_calls[0] == KEY_SV`）钉的正是这次要根除的同步下载形态，留着它就是一份把旧病
+  写成契约的文档。6 条变异自证有牙：摘 `issue()` 闸 / 容量函数恒过 / HTTP 层不回具名拒因 /
+  `reason` 键不发 / 热路径接回同步下载 / 删 healthz 真相字段，各自把对应钉弄红；反向钉用
+  "同步 ensure 睡 5 秒 + 1 s 时限"的形态，变异没落地时不可能假绿。全量回归 1957 passed /
+  9 failed，失败集与本机 Windows 环境红基线（无 SIGALRM ×5、css 母本分叉、两处大小写/键位既有
+  红）逐 ID 一致＝零新增。
+
 ## [1.1.12] - 2026-09-25 注释纠偏 + 孤儿端点反向钉 + 固件 v2.1.66 同步上架
 - **注释纠偏（纯注释，运行路径零改动）**：v1.1.11 删掉两个孤儿端点后，三处注释仍在给
   已不存在的对象指路——`const.py` 说 `CONF_*_ENDPOINT` 由 "huijian/http.py device-info 返回"

@@ -11,6 +11,7 @@
 import json
 import re
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -31,6 +32,7 @@ class Store:
     def __init__(self, ready_keys=(), ensure_noop=True):
         self.ready = set(ready_keys)
         self.ensure_calls = []
+        self.async_calls = []
         self.base = Path("/models")
 
     def model_dir_for(self, key):
@@ -39,6 +41,9 @@ class Store:
     def ensure(self, key):
         self.ensure_calls.append(key)
         return key in self.ready
+
+    def ensure_async(self, key, force=False):
+        self.async_calls.append(key)
 
 
 class PfStream:
@@ -150,12 +155,39 @@ def test_fallback_to_paraformer_when_sv_broken():
     assert eng.stale_kind() is True
 
 
-def test_fallback_load_triggers_ensure_for_missing_dir():
+def test_missing_primary_dir_defers_download_and_fails_open():
+    """v1.1.13（F3 根修）：主档目录缺失此前走**同步** ensure——在请求热路径的
+    executor 线程里跑分钟级跨境下载，设备侧 T_AWAITING=20s 先超时 ⇒ 无应答也无报错。
+    现只查在盘，缺失转交后台补取（main._loop_models 本就在带退避重下），当轮快败。
+    fail-open 到 Paraformer 的既有行为必须原样保住。"""
     store = Store(ready_keys={KEY_PF})          # sv 目录缺
     eng = make_engine(S(), store)
-    assert eng.ensure_loaded() is True
-    assert store.ensure_calls[0] == KEY_SV, "主档目录缺失必须先走同步 ensure（升级过渡）"
+    assert eng.ensure_loaded() is True, "主档缺失仍要能识别（fail-open 不回归）"
+    assert store.ensure_calls == [], "热路径不得再触发同步下载（分钟级挂死的根因）"
+    assert store.async_calls == [KEY_SV], "缺失必须转交后台补取，否则永远没人下"
     assert eng.loaded_kind() == "paraformer"
+
+
+def test_hot_path_does_not_block_on_slow_download():
+    """反向钉（比调用序列更贴近"别挂死"这个真实诉求）：把同步 ensure 换成"睡 5 秒"，
+    主档+回落档目录都缺 ⇒ 快败路径必须远早于 5s 返回。若有人把同步下载接回热路径，
+    本钉在时限处直接红（家网实锤形态：每轮语音挂在该线程，面板与语音侧同哑）。"""
+    store = Store(ready_keys=set())
+    store.ensure = lambda key: (time.sleep(5.0), key in store.ready)[1]
+    eng = make_engine(S(), store)
+    t0 = time.perf_counter()
+    assert eng.ensure_loaded() is False, "两档都不在盘＝本轮无结果"
+    took = time.perf_counter() - t0
+    assert took < 1.0, f"热路径被同步下载挂死（{took:.1f}s）——F3 回归"
+    assert store.async_calls == [KEY_SV, KEY_PF], "快败仍要把两档都推给后台补下"
+
+
+def test_both_dirs_missing_sets_named_reason():
+    """空结果必须带得出具名分因：设备侧此前只能看到 text:""，与真静音逐字节同形。"""
+    store = Store(ready_keys=set())
+    eng = make_engine(S(), store)
+    assert eng.ensure_loaded() is False
+    assert "模型资产缺失" in eng.last_reason and KEY_SV in eng.last_reason
 
 
 def test_rebind_primary_after_main_arrives():

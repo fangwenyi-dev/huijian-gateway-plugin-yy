@@ -19,8 +19,12 @@ from core.ws_server import AppContext, make_ws_app
 
 
 class FakeASR:
-    def __init__(self, text="打开客厅的灯"):
+    def __init__(self, text="打开客厅的灯", reason=""):
         self.text = text
+        # v1.1.13（F3）：真 asr 每轮进 transcribe 先清 last_reason，只有"引擎没就绪/
+        # 推理中途被卸载"这类分因路径才留下文案。替身同形：非空结果＝无分因。
+        self.reason = reason
+        self.last_reason = ""
         self.last_used = 0
         self.calls = []
 
@@ -29,6 +33,7 @@ class FakeASR:
 
     async def transcribe_pcm(self, pcm):
         self.calls.append(len(pcm))
+        self.last_reason = "" if self.text else self.reason
         return self.text
 
 
@@ -178,7 +183,66 @@ def test_stt_silence_replies_empty(server):
             texts, _ = await _collect(ws, 1)
             await ws.close()
             assert texts and texts[0]["type"] == "stt" and texts[0]["text"] == ""
+            # 真静音没有任何分因 ⇒ 不得凭空冒出一个 reason 键（否则"没说话"被说成故障）
+            assert "reason" not in texts[0]
     _run(go())
+
+
+# ── C1-b STT 空结果具名分因（v1.1.13 F3/F4：四种同形拆成四种说法）──────────
+def test_stt_empty_reply_carries_reason_but_success_does_not(server):
+    """台架/家网实锤：text:"" 此前对"真静音 / 引擎没载 / 模型还在补下 / 识别抛异常"
+    四种情形逐字节同形，设备只能回一句"没听懂"，现场与远程都无从区分。
+    现在空结果带 reason，非空结果不带（老客户端逐字节不变）。"""
+    port, ctx = server
+    ctx.asr.text = ""
+    ctx.asr.reason = "模型资产缺失(asr_sensevoice_small)，已转后台补下载（本轮不等待）"
+
+    async def go():
+        async with ClientSession() as sess:
+            ws = await _connect(sess, port, "stt")
+            await ws.send_str('{"type":"listen","state":"start"}')
+            await ws.send_bytes(b"\xfe\xfe" * 40)        # 有上行音频才会真的调识别
+            await ws.send_str('{"type":"listen","state":"stop"}')
+            texts, _ = await _collect(ws, 1)
+            await ws.close()
+            return texts[0]
+
+    msg = _run(go())
+    assert ctx.asr.calls, "识别未被调用 ⇒ 本钉判的是替身不是路径"
+    assert msg["type"] == "stt" and msg["text"] == ""
+    assert "模型资产缺失" in msg.get("reason", ""), f"空结果未带分因：{msg}"
+
+    # 对照：同一连接换成一轮成功的识别 ⇒ reason 键必须消失
+    ctx.asr.text = "打开客厅的灯"
+    msg2 = _run(go())
+    assert msg2["text"] == "打开客厅的灯"
+    assert "reason" not in msg2, f"成功轮次带了噪声键：{msg2}"
+
+
+def test_stt_exception_reply_carries_reason(server):
+    """识别抛异常的一轮：契约要求"每 stop 恰回一条"不破（不得双帧），同时该条必须
+    说清是异常而不是没说话。"""
+    port, ctx = server
+
+    class BoomASR(FakeASR):
+        async def transcribe_pcm(self, pcm):
+            self.calls.append(len(pcm))
+            raise RuntimeError("boom")
+
+    ctx.asr = BoomASR()
+
+    async def go():
+        async with ClientSession() as sess:
+            ws = await _connect(sess, port, "stt")
+            await ws.send_str('{"type":"listen","state":"start"}')
+            await ws.send_bytes(b"\xfe\xfe" * 40)
+            await ws.send_str('{"type":"listen","state":"stop"}')
+            texts, _ = await _collect(ws, 1)
+            await ws.close()
+            return texts
+    texts = _run(go())
+    assert len(texts) == 1, f"异常轮必须恰好收束一条（契约 C1），实得 {len(texts)}"
+    assert texts[0]["text"] == ""
 
 
 def test_stt_ping_pong(server):
@@ -463,6 +527,82 @@ def test_healthz(server):
                 obj = await r.json()
                 assert obj["ok"] and obj["asr_ready"]
     _run(go())
+
+
+# ── 就绪面真相：配置的那台引擎到底怎么了（v1.1.13 F4）───────────────────
+class _ReadyASR:
+    """asr 替身：只给 _readiness 读的四个面（ready/model_key/loaded_kind/stale_kind）。"""
+
+    def __init__(self, key="asr_sensevoice_small", loaded="", stale=False, reason=""):
+        self._key, self._loaded, self._stale = key, loaded, stale
+        self.last_reason = reason
+
+    def ready(self):
+        return bool(self._loaded)
+
+    @property
+    def model_key(self):
+        return self._key
+
+    def loaded_kind(self):
+        return self._loaded
+
+    def stale_kind(self):
+        return self._stale
+
+
+class _Tts:
+    def ready(self):
+        return True
+
+
+def _ready_ctx(asr, states):
+    class _Store:
+        def snapshot(self):
+            return {k: {"state": v} for k, v in states.items()}
+    return AppContext(asr=asr, tts=_Tts(), store=_Store())
+
+
+def test_readiness_names_the_configured_engine_not_just_any_engine():
+    """家网实锤形状：/healthz 全程 asr_ready:true / models_fatal:[] 而配置主档一直
+    pending ⇒ 每轮语音 20s 超时无应答，健康面却绿灯。ok/asr_ready 语义一字不动
+    （懒加载不是故障，改成 503 会被 Supervisor 无限重启），另立真相字段。"""
+    from core.ws_server import _readiness
+    body = _readiness(_ready_ctx(
+        _ReadyASR(reason="模型资产缺失(asr_sensevoice_small)，已转后台补下载（本轮不等待）"),
+        {"asr_sensevoice_small": "pending", "tts_melo_zh_en": "ready"}))
+    assert body["asr_model"] == "asr_sensevoice_small"
+    assert body["asr_model_state"] == "pending", "必须报出**所选**引擎的资产状态"
+    assert body["asr_ready"] is False and body["ok"] is True, "懒加载≠故障，判负面不得松动"
+    assert "模型资产缺失" in body["asr_reason"]
+
+    # 对照：主档就绪并已在载 ⇒ 真相字段全绿，且不凭空出现 asr_reason
+    ok_body = _readiness(_ready_ctx(
+        _ReadyASR(loaded="sensevoice"), {"asr_sensevoice_small": "ready"}))
+    assert ok_body["asr_model_state"] == "ready"
+    assert ok_body["asr_fallback_in_use"] is False and ok_body["asr_ready"] is True
+    assert "asr_reason" not in ok_body
+
+
+def test_readiness_exposes_fallback_that_old_green_light_hid():
+    """回落档在载＝asr_ready 依旧 true（不改语义），但 asr_fallback_in_use 必须为真——
+    这是"面板看着一切正常、实际跑的不是所选嗓/引擎"的唯一机器可读出口。"""
+    from core.ws_server import _readiness
+    body = _readiness(_ready_ctx(
+        _ReadyASR(loaded="paraformer", stale=True),
+        {"asr_sensevoice_small": "pending", "asr_paraformer_bilingual": "ready"}))
+    assert body["asr_ready"] is True, "回落也算在载：watchdog 判据不回退"
+    assert body["asr_fallback_in_use"] is True
+    assert body["asr_loaded_model"] == "paraformer"
+    assert body["asr_model_state"] == "pending"
+
+
+def test_readiness_unknown_engine_key_is_not_a_crash():
+    """settings 写了个 lock 里没有的 local_model（脏配置）：探针不得 500，
+    状态须落到 "unknown"，ok 仍按模型判负面算。"""
+    from core.ws_server import _readiness
+    body = _readiness(_ready_ctx(_ReadyASR(key=""), {}))
+    assert body["asr_model_state"] == "n/a" and body["ok"] is True
 
 
 # ── /discover 端点自描述（三项目适配判定书缺口2 的服务器侧修法）──────────
