@@ -167,6 +167,14 @@ _ACTION_PATTERNS: list[tuple[re.Pattern, str, Any]] = [
     (re.compile(r"^(亮度|调亮到)\s*百分之\s*([零一二三四五六七八九十百]+)"), "AdjustDeviceAttribute", {"attribute": "brightness", "delta": "cn:$2"}),
     (re.compile(r"^(调到百分之)\s*(\d+)"), "AdjustDeviceAttribute", {"attribute": "brightness", "delta": "$2"}),
     (re.compile(r"^(调到百分之)\s*([零一二三四五六七八九十百]+)"), "AdjustDeviceAttribute", {"attribute": "brightness", "delta": "cn:$2"}),
+    # 裸中文数词的亮度绝对值（2026-09-27 办公实锤）：「办公室射灯亮度调到一百」在表里
+    # 够不到任何规则 ⇒ 整句掉给 klar，而引擎的 zh_cn 数词表是 ListedOnly、多字合并分支
+    # 只有德语/英语，「一百」被拆成 [1,100] 后 first_number 取 1 ⇒ `brightness:'1'`
+    # 并如实播报"办公室 1%"（用户要的是 100%）。温度族早有裸 CN 形（上方两行），亮度族漏配。
+    # ⚠ 必须排在两条「百分之」规则**之后**：否则「亮度调到百分之五十」会被本行咬成
+    #   百=100（真值 50）。(?!半) 防「亮度调到一半」被剥成 一=1（一半由上方绝对档专表管）。
+    (re.compile(r"^(亮度设到|亮度调到|调亮到|调暗到|亮度)\s*([零一二三四五六七八九十百]+)(?!半)\s*[%％]?"),
+     "AdjustDeviceAttribute", {"attribute": "brightness", "delta": "cn:$2"}),
     (re.compile(r"^(亮一点|亮一些|调亮|亮些)"), "AdjustDeviceAttribute", {"attribute": "brightness", "delta": "+20"}),
     (re.compile(r"^(暗一点|暗一些|调暗|暗些)"), "AdjustDeviceAttribute", {"attribute": "brightness", "delta": "-20"}),
     (re.compile(r"^(brighter|brighten)"), "AdjustDeviceAttribute", {"attribute": "brightness", "delta": "+20"}),
@@ -286,6 +294,9 @@ _DELTA_SCANNERS: dict[str, list[tuple[re.Pattern, Any]]] = {
         (re.compile(r"(?:调到|设到|调高到|调低到|提高|降低)?\s*亮度[^\d]{0,2}(\d+)"), "$1"),
         (re.compile(r"亮度\s*(?:到|至)?\s*(\d+)"), "$1"),
         (re.compile(r"百分之\s*([零一二三四五六七八九十百]+)"), "cn:$1"),
+        # 裸中文数词形（同 _ACTION_PATTERNS 里那条，2026-09-27 办公实锤「亮度调到一百」
+        # 被 klar 读成 1%）。排在「百分之」之后，且 (?!半) 不吃「一半」。
+        (re.compile(r"(?:调?到|设到|设为|调成|至)\s*([零一二三四五六七八九十百]+)(?!半)"), "cn:$1"),
         (re.compile(r"(?:开到|打开到|调到|设到|设为|关到|调高到|调低到)\s*(\d+)\s*[%％]?"), "$1"),
         (re.compile(r"调到\s*(\d+)\s*%?"), "$1"),
         (re.compile(r"(?:一半|半数)"), "50"),

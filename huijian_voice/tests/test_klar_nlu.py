@@ -129,7 +129,10 @@ def test_multi_clause_all_or_nothing():
                            ("HassLock", {"name": ["门锁"]})])
     p = c.to_plan(obj, "关灯并且锁上门")
     assert p is not None and p.intent == "HassTurnOff"
-    assert p.extra_steps == [{"name": "HassLock", "args": {"name": ["门锁"]}}]
+    # v1.1.15 D6：每腿自带 source（执行层按"本步来源"决定直调服务还是走 intent，
+    # 不再整链只看首分句的裁决结果）。本钉按新契约形制等值比对。
+    assert p.extra_steps == [{"name": "HassLock", "args": {"name": ["门锁"]},
+                              "source": "klar"}]
     obj2 = execute_payload([("HassTurnOff", {"name": ["灯"]}),
                             ("HassGetState", {"name": ["空调"]})])
     assert c.to_plan(obj2, "关灯并且看下空调状态") is None

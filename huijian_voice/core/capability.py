@@ -78,6 +78,10 @@ def resolve_candidates(states: dict, entity_area: dict, target: list) -> list:
                         out.append(e)
     except Exception:  # noqa: BLE001 解析故障=空表（调用方按信息不足放行）
         return []
+    # 可用性优先（2026-09-27 办公实锤 D4）：同名实体里离线孪生不得排在可用台之前。
+    # 稳定排序，只把 unavailable 沉底——'unknown'（未首 poll 的瞬态）不算离线，与
+    # executor._availability_refuse 同口径，否则会把刚重启的实体误判成离线。
+    out.sort(key=lambda e: str((e or {}).get("state")) == "unavailable")
     return out
 
 

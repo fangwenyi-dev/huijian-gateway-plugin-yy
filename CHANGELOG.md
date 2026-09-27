@@ -1,5 +1,66 @@
 # 变更日志
 
+## [1.1.15] - 2026-09-27 办公 .91 实锤九修：幻听句值写否决、链式逐腿留痕并点名假形、混形链每腿按本步来源选通道、中文数词亮度、同名离线孪生改指、同音字补变体、entity_id 腿也可证伪、闸拦也报步序、逐台点名回执
+- **D1 幻听句不得执行动作（`core/pipeline.py::_klar_value_without_attr_evidence`）**：办公实测两条
+  电视人声轮（13:23『赵下令第士边后一片人…』、13:32『传的铠价最华贵…』）被 klar 落成
+  `HassLightSet brightness:'1'` 并真下发，播报「办公室 1%」。旧闸只判"有没有 grounded 目标"，
+  值写类意图（亮度/位置/温度）无人话语里的**属性词**（亮/暗/度/百分/光/最/暖/冷…）时同样该否决。
+  两车道（fp∥klar 汇合与主选）各挂一处，并有结构钉判调用恰好 2 次。契约变更：
+  `test_v1092_klar_write_target_evidence::test_failopen_shapes` 由"未 grounded 即放行"改为"值写仍拦"。
+- **D2 链式逐腿留痕 + 假形点名（`core/executor.py::_leg_truth`）**：`[执行] …(+1步) → 成功`
+  只印首步 intent/args，第二腿在账上**不存在**，且三种假形都混在「好的，都办妥了」里：
+  ①目标查无此名；②目标本来就在要求的状态上（09-27 13:55 办公「打开办公室射灯」打在已 on 的灯、
+  HA 顶层 success 而 history 零变化）；③快照为空无从证伪。现逐腿打
+  `[执行] 第 i/n 步 …`，并把 ①② 在播报里点名（判不了就不判：单步、空快照、非 on/off 域一律不动话术）。
+- **D3 中文数词亮度归一（`core/nlu/fast_path.py`）**：klar 中文数词表 `ListedOnly` 不做多字合并，
+  「调到一百」被吃成 `brightness:'1'` ⇒ 真机把灯设成 1%。新增裸中文数词绝对档与 delta 扫入，
+  位置排在两条「百分之」规则**之后**（顺序＝优先级，排错会把「百分之五十」判成 100），`(?!半)` 护住「一半」。
+- **D4 同名候选按可用性排 + 确证离线唯一在线孪生改指（`core/capability.py`、`core/executor.py::_repoint_offline_twin`）**：
+  办公有两台同名「射灯」，其中 `light.she_deng` 自 09-27 00:00 前即 unavailable；同名解析在
+  离线/在线之间顺序不稳，链式第二腿由此空转。候选末尾稳定排序把确证 unavailable 沉底，
+  执行前在可用性闸**之前**改指同名·同域·唯一·在线孪生并留痕。
+- **D5 同音字表补变体（`core/nlu/corrector.py`）**：新增「平台商→平开窗」（表 69→70）。
+  本会话一度误判"同音字没挂点"——实为 `[级联]` 打的是**纠错前**原句，判纠错要看 `[执行]` 的目标名；已自纠。
+  取舍记录：三字键会误纠「平台商城」，办公实测该词不在指令面内，接受。
+- **D6 链式每一步按"本步来源"选外发通道（`core/executor.py::Executor.run`、`core/pipeline.py::_try_compound`、
+  `core/nlu/klar_client.py::to_plan`）**：这是 14:04 那条「首腿真动、第二腿不落地却报成功」的**根因**，
+  比 D4 更深一层。链的分句是**逐路裁决**的（`select_primary_plan`：窗户句恒由字面表胜出，因为
+  `HUIJIAN_ONLY_INTENTS` 不含 `TurnDevice*`；灯句只要 klar 命中就让给 klar），可执行层过去整链只看
+  **首分句**的来源——`_klar_direct(...) if plan.source == "klar"`。于是"慧尖首腿 + klar 次腿"的混形链
+  里，次腿那份已由引擎 grounded 的 `entity_id` 失去直调服务，被原样丢进 `/api/intent/handle`；
+  而 `HassTurnOn/HassTurnOff` 不在慧尖集成注册面内（`custom_components/huijian_ai/intent.py` 只登记
+  `TurnDevice*`/`PauseDevice`/`SetDeviceMode`/`AdjustDeviceAttribute`/`ControlWindow`/`HassLock(Unlock)`/场景/自动化），
+  HA 内置 handler 又不吃这个形制 ⇒ 第二腿"发出去了没人按"，顶层 success 照收。现 `steps` 携带每步自己的
+  `source`（装配侧两腿各标自己来源，klar 多步同标），直调与失败归因话术（`zh_error(klar=…)`）一并转按本步
+  来源判。反向钉存续：**非 klar 来源（含 LLM 工具通道 `source="llm"`）不得因本改动获得直调权**——那是
+  D7 锁语义下少一道确认环的可达面。逐腿日志同步带通道名（`第 i/n 步 … → 成功（直调服务/intent）`），
+  旧病灶正是被"看不出走了哪条"藏住的。契约变更：`test_klar_nlu::test_multi_clause_all_or_nothing`
+  的 `extra_steps` 等值形制随之加 `"source"` 键。
+- **E1 逐腿真伪判据补上 `entity_id` 形分句（`core/executor.py::_leg_truth_by_entity`）**：D2 的
+  `_leg_truth` 只认 `args['target']`，而 D6 之后走直调的正是 klar grounded 的 `entity_id` 形——
+  也就是说 D2 对新打通的那条路**完全不设防**。现按同一口径专判：快照非空却查无这台 → 计入"找不到
+  对应的设备"（**只报数量不报名字**，`light.bedside_lamp` 念进播报只是噪音）；目标全部已在指令要求的
+  状态上 → 点名"本来就在要求的状态上"。照旧不判：非 on/off 域（cover/climate 状态词不同）、
+  `'unknown'`（未首 poll 瞬态，同 `_availability_refuse` 口径）、列表形里有一台还没到位。
+- **E2 三道前置闸早退也报步序（`core/executor.py::_step_say`）**：P2-12 的"前面 N 步已完成"定位原先
+  只挂在执行失败支上，开关族能力闸 / 能力预裁 / 可用态闸命中时**首腿往往已经真落地**，播报却只剩
+  "没有把握找到要开关的设备"——用户听不出窗已经动过，等于把部分执行说成整句没做，他补一句就是重复动作。
+  四支共用同一文案，不为闸另立口径。单步计划话术一字不改（反向钉存续）。
+- **E3 慧尖意图逐台点名回执（`core/executor.py::_unanswered`）**：`_receipt`（v1.1.4 逐实体回执）对
+  `TurnDevice*`/`ControlWindow` 是**死码**——集成这两族的返回里根本没有逐实体 `states`
+  （`custom_components/huijian_ai/intent_turn.py:184-187` 只回 `{success, control_targets}`），
+  而集成侧成败口径是"control_targets 非空即成功"（同文件 :179-183）⇒ 点名两台只落一台从任何通道都
+  看不出来。改内置集成＝全客户群的爆炸半径（它随镜像内置），故在加载项侧把**我们点过的名**与
+  **回执里的名**对一遍：只对带名字的 target 槽（泛称/区域-only 无可比对象，跳过），命中按互相包含判
+  （集成回的是解析后的实体名，可能更长如「平开窗 开窗器」），全都对不上才点名"没拿到执行回执"。
+  成败口径不动（与 D2 同：证伪只改播报，不把已成功的一律判失败）。
+
+测试：新增 6 个钉桩文件 62 条（数词 15 / 孪生改指 9 / 逐腿 8 含 09-27 13:55 真实形状回钉 / 属性词证据 10 /
+混形链通道 8 / 逐腿判据与点名回执覆盖 13），三条各自变异验证：运行时打桩回退到"该条未修"状态，
+分别当场红 3 / 2 / 1 条且不误伤他钉；判据退回"整链只看首腿来源"时通道钉当场 3 红。
+全量复跑（本机同环境差分，采集 2030 项 / 1 skip）：**30 failed / 1999 passed，红 ID 与改前基线逐条相同、零新增**
+（本环境 `opus` 不在 PATH ⇒ 21 项云 TTS 计入红；挂上 opus 的口径为 9 failed / 2020 passed，
+两口径红集同集：www 星尘资源、TTS 折叠撞名、写状态孤儿、卫星冻结 5 条、合并大小写）。
 ## [1.1.14] - 2026-09-26 播报请求先于推流上线路（开头那一顿的根因）+ healthz 引擎态不再误报 pending
 - **播报请求先行（A 修，`custom_components/huijian_ai/assist_satellite.py::_do_announce`）**：旧次序是
   「起推流后台任务 → 再 await announce 请求」。设备从**第一帧**就开始出声（v2.1.60 #7 流先行臂），

@@ -87,9 +87,14 @@ def test_other_domains_evidence():
 
 # ── ③ fail-open 边界 ────────────────────────────────────────────
 def test_failopen_shapes():
-    # 未 grounded（无 entity_id/domain）
+    # v1.1.15 契约变更（办公 .91 实锤 D1）：未 grounded（无 entity_id/domain）以前
+    # 意味着"完全不过闸"，于是「讲个故事」+brightness:1 仍被放行——那正是 v1.0.92
+    # 病灶的残余形态。现在值型意图另有**属性字面证据**一道（不带实体也算写值），
+    # 故本例改为断言拦下；fail-open 的口径移到下面两条（非值意图 / 无原话）。
     assert select_primary_plan(None, _kl("HassLightSet", "讲个故事",
-                                         {"brightness": "1"}), AREAS)
+                                         {"brightness": "1"}), AREAS) is None
+    # 非值意图（不带值参数）完全不归值闸管——fail-open 的口径搬到这里，见
+    # tests/test_klar_value_attr_evidence.py::test_non_value_intents_untouched
     # utterance 缺失（链/回放轮）
     assert select_primary_plan(None, _kl("HassLightSet", None), AREAS)
     # 无区域名可用（known_areas 空）→ 仍靠设备词判据：闲聊句照拦

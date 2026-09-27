@@ -6,8 +6,21 @@
 from core.nlu import corrector
 
 
-def test_table_has_69_entries():
-    assert len(corrector.BASE_CORRECTIONS) == 69
+def test_table_has_70_entries():
+    assert len(corrector.BASE_CORRECTIONS) == 70
+
+
+def test_pingchuang_window_char_replaced_entirely():
+    """2026-09-27 办公实锤：连"窗"都被听成"商"，泛称字不在表内 ⇒ 救援够不到，只能入表。"""
+    raw = "关闭办公室平台商打开办公室射灯"
+    assert corrector.apply(raw) == "关闭办公室平开窗打开办公室射灯"
+    # 与既有 平×窗 族互不截胡（长键优先，同长不重叠）
+    assert corrector.apply("关闭办公室平台窗") == "关闭办公室平开窗"
+    assert corrector.apply("关闭办公室平盖窗") == "关闭办公室平开窗"
+    # 已知代价（与「平台窗」同口径：表内注释已声明，出口是 corrections_extra）：
+    # 三字整词键会命中"平台商城"这类正常词。控窗语音域里不会出现该词；
+    # 本断言是把取舍钉在案上，不是藏起来。
+    assert corrector.apply("平台商城打开") == "平开窗城打开"
 
 
 def test_opener_near_sound_pairs():

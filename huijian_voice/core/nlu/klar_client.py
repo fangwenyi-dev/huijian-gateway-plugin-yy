@@ -216,7 +216,7 @@ class KlarClient:
             return None
         speech = fix_zh_pinyin(str(obj.get("speech") or ""))
         first_name, first_args = picked[0]
-        extra = [{"name": n, "args": a} for n, a in picked[1:]]
+        extra = [{"name": n, "args": a, "source": "klar"} for n, a in picked[1:]]
         trace = [f"klar:conf={conf:.2f}" if conf is not None else "klar:conf=?",
                  f"klar:steps={len(picked)}"]
         if speech:

@@ -222,6 +222,47 @@ _DOMAIN_EVIDENCE = {
 _ANAPHORA_WORDS = ("它", "这", "那", "该", "刚才", "之前", "上面")
 
 
+_VALUE_WRITE_INTENTS = ("HassLightSet", "HassSetPosition", "HassClimateSetTemperature")
+# 属性字面证据（v1.1.15 办公实锤 D1）：写"值"的 klar 计划，原话里必须有属性字样。
+_ATTR_EVIDENCE = {
+    "HassLightSet": ("亮度", "亮", "暗", "色温", "百分", "半", "度", "%", "％",
+                     "最", "光", "暖", "冷"),
+    "HassSetPosition": ("位置", "开度", "百分", "半", "度", "%", "％", "帘", "窗",
+                        "开", "关", "摇"),
+    "HassClimateSetTemperature": ("度", "温度", "摄", "冷", "暖", "热", "℃"),
+}
+_VALUE_ARG = {"HassLightSet": ("brightness", "color_temp"),
+              "HassSetPosition": ("position",),
+              "HassClimateSetTemperature": ("temperature",)}
+
+
+def _klar_value_without_attr_evidence(kl: Optional[Plan]) -> bool:
+    """True = klar 这条在**写值**（亮度/开度/温度），但原话里一个属性字样都没有。
+
+    2026-09-27 办公实锤：5.28s 长句被识别成
+    「家财百万打开办公室射灯和关闭办公室灯器皿茶叶等等日用都是等」（前后都是幻听），
+    目标证据闸放行了（用户确实说了"射灯/灯"），可 klar 仍从幻听里挑出「百万」当数值，
+    产出 `HassLightSet brightness:100` 并**真把亮度改了**——与 v1.0.92 记的
+    「给我讲一个三百字左右的睡前故事」→亮度 1% 是同一族病灶（draft.rs：未知目标 +
+    任意数字 → 硬套上一台可见灯）。目标有证据不等于"这句在要求这个属性"，故再加一道：
+    值型意图必须在全句里回捞出属性字（亮/暗/度/百分/光…），捞不到就整条弃用，
+    落回降级链（宁可对闲聊说「我还不会」，绝不动用户没要求的档位）。
+    永不抛；无值参数、无原话、不认识的意图一律放行（fail-open）。
+    """
+    try:
+        if kl is None or kl.intent not in _VALUE_WRITE_INTENTS:
+            return False
+        args = kl.args or {}
+        if not any(args.get(k) not in (None, "") for k in _VALUE_ARG[kl.intent]):
+            return False                          # 只开关不带值：不归本闸管
+        t = kl.utterance or ""
+        if not t:
+            return False                          # 合成/回放轮无原话：放行
+        return not any(w in t for w in _ATTR_EVIDENCE[kl.intent])
+    except Exception:  # noqa: BLE001 —— 守卫自身故障不得拦正常句
+        return False
+
+
 def _klar_write_without_target_evidence(kl: Optional[Plan],
                                         known_areas=()) -> bool:
     """True = klar grounded 控制步在**原话里找不到任何目标证据**，主裁决弃用。
@@ -270,7 +311,8 @@ def select_primary_plan(fp: Optional[Plan], kl: Optional[Plan],
         if _klar_window_lamp_conflict(kl):
             return None
         # v1.0.92：说故事说出开灯——控制步必须先在原话里拿出目标证据。
-        if _klar_write_without_target_evidence(kl, known_areas):
+        if _klar_write_without_target_evidence(kl, known_areas) or \
+                _klar_value_without_attr_evidence(kl):
             return None
         return kl
     return fp
@@ -289,7 +331,8 @@ def select_fallback_plan(primary: Optional[Plan], fp: Optional[Plan],
             return None
         # v1.0.92：降级支同样过目标证据闸——v1.0.90 假成功案根因就是
         # 「主路被拦、降级通道不再复检」；只闸主裁决=半道闸。
-        if _klar_write_without_target_evidence(kl, known_areas):
+        if _klar_write_without_target_evidence(kl, known_areas) or \
+                _klar_value_without_attr_evidence(kl):
             return None
         # v1.0.12 窗户误动作闸（2026-09-08 实机：ControlWindow 未注册时
         # 「打开 办公室平开窗」降级 klar 命中办公室灯，真把灯点亮——比
@@ -1467,7 +1510,12 @@ class Pipeline:
         merged = Plan(intent=first.intent, args=first.args, source=first.source,
                       utterance=text,
                       trace=list(first.trace) + chain_notes + [f"复合x{len(plans)}"],
-                      extra_steps=[{"name": p.intent, "args": p.args} for p in plans[1:]])
+                      # 每腿带自己的 source：分句逐路裁决（窗户类恒让字面表、标准开关
+                      # 类优先 klar），一条链本就可能是混形的。执行层若只看首腿来源，
+                      # 次腿的 grounded entity_id 就失去直调（v1.1.15 D6，见
+                      # executor.run 的 steps 构造与 _klar_direct 取值处）。
+                      extra_steps=[{"name": p.intent, "args": p.args, "source": p.source}
+                                   for p in plans[1:]])
         ok, speech = await self.executor.run(merged)
         if ok:
             for p in plans:
