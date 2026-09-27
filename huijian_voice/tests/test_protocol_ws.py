@@ -259,8 +259,9 @@ def test_stt_ping_pong(server):
 
 
 def test_llm_hello_device_sets_origin(server):
-    """v1.1.7：hello 携带 device（卫星 MAC）→ origin 按卫星分桶（多机不再共用宿主 IP）。
-    origin 经 LLM 通道 pipeline.handle 落地（集成把识别文本走 llm detect 送进来）。"""
+    """v1.1.7：hello 携带 device → 作为**连接级默认** origin（降级路径的兜底）。
+    连接级=device 与 HA 实例同粒度（一条 WS 连接服务全屋卫星），卫星粒度见
+    tests/test_origin_per_turn.py 的每轮 device 钉——本钉只守回落链不断。"""
     port, ctx = server
 
     async def go():

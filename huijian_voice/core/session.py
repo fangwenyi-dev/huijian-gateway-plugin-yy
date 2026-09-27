@@ -555,12 +555,29 @@ class LlmSession(BaseSession):
             gen = self._gen
             if self._task and not self._task.done():
                 self._task.cancel()
-            self._task = asyncio.create_task(self._turn(text, gen))
+            origin = self._turn_origin(obj)
+            if origin != self.device_hint:
+                # 分桶改真（v1.1.7 收口批）：WS 连接是集成不是卫星，一条连接服务全屋
+                # 所有卫星；卫星身份只能随每轮 detect 帧带进来。留痕便于台上直接核。
+                logger.info("[LLM] 本轮 origin=%s（连接默认 %s）", origin,
+                            self.device_hint or "?")
+            self._task = asyncio.create_task(self._turn(text, gen, origin))
+
+    def _turn_origin(self, obj: dict) -> str:
+        """本轮 origin：帧自带 `device`（卫星身份，集成每轮注入）优先；
+        缺键/空白/非串 → 回落连接级默认（hello 值 / request.remote）。
+
+        **不写回** `device_hint`：上一轮的身份不得成为下一轮的默认——同一连接上
+        换台卫星说话时，粘粘会把两台的确认环/上下文并成一颗桶。"""
+        dev = obj.get("device")
+        if isinstance(dev, str) and dev.strip():
+            return dev.strip()
+        return self.device_hint
 
     async def on_binary(self, data: bytes) -> None:
         pass    # llm 通道禁 binary（契约 §4）
 
-    async def _turn(self, text: str, gen: int) -> None:
+    async def _turn(self, text: str, gen: int, origin: str = "") -> None:
         await self.send_json({"type": "text", "state": "start"})
         reply_text = const.FALLBACK_TEXT
         streamed = False
@@ -577,7 +594,7 @@ class LlmSession(BaseSession):
 
         try:
             reply = await asyncio.wait_for(
-                self.ctx.pipeline.handle(text, origin=self.device_hint,
+                self.ctx.pipeline.handle(text, origin=(origin or self.device_hint),
                                          on_sentence=_on_sentence),
                 timeout=const.LLM_TURN_BUDGET_S)
             reply_text = reply.text or const.FALLBACK_TEXT

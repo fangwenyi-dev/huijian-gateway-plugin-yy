@@ -23,13 +23,14 @@ from core.nlu.fast_path import Plan
 class Ha(FakeHAClient):
     """FakeHAClient 补 call_service：模拟 HA 对 unavailable 实体照样回 success。"""
 
-    def __init__(self, **kw):
+    def __init__(self, svc_results=None, **kw):
         super().__init__(**kw)
         self.svc_calls = []
+        self._svc_results = svc_results or {}
 
     async def call_service(self, domain, service, data, timeout=10.0):
         self.svc_calls.append((domain, service, data))
-        return {"success": True}
+        return self._svc_results.get(f"{domain}.{service}", {"success": True})
 
 
 def _klar(intent, args, utterance):
@@ -60,12 +61,16 @@ def _targets_ok(ha, good: str, offline: str) -> bool:
 
 
 def test_repoints_to_unique_available_twin():
-    """唯一同名可用台 → 改指并真执行，不再回"离线"。"""
+    """唯一同名可用台 → 改指并真执行，不再**拒答**"离线"。
+
+    口径随收口批更新：播报现在会**主动交代**改指（"（注：「射灯」离线，已改指同名的
+    另一台）"），故旧钉"回执里不得出现'离线'二字"已不成立——真正要守的是"不再是拒绝
+    口吻"（无"抱歉/不可用"）。逐字断言条见 test_repoint_is_announced。"""
     ha = Ha(states={"light.she_deng": OFFLINE_TWIN,
                     "light.ban_gong_shi_she_deng": GOOD_LAMP})
     ok, msg = _run(ha, _klar("HassTurnOn", {"entity_id": "light.she_deng"}, "打开客厅的灯"))
     assert ok is True, msg
-    assert "离线" not in msg and "不可用" not in msg, msg
+    assert "抱歉" not in msg and "不可用" not in msg, msg
     assert _targets_ok(ha, "light.ban_gong_shi_she_deng", "light.she_deng"), _sent(ha)
 
 
@@ -124,6 +129,55 @@ def test_entity_id_list_form_repoints_in_place():
     assert args["entity_id"] == ["light.ban_gong_shi_she_deng", "fan.f"], args
 
 
+# ── 改指必须在播报里点名（收口批）──────────────────────────────
+# 收敛前：用户说「打开客厅的灯」，被 klar 落到离线的 light.she_deng，执行层静默改指到
+# 同名的 light.ban_gong_shi_she_deng，播报只说"客厅的灯开了"——**换了一台物理设备却
+# 一个字都不交代**（办公 .91 的射灯孪生正是这个形状；两台的 friendly_name 全等，
+# 名字本身给不出区域信息，所以"没告知"等于让人以为客厅那台动了）。
+def test_repoint_is_announced():
+    """改指成功 ⇒ 播报必须带注：说的那台离线、动的是同名另一台；原话术不得被吞。"""
+    ha = Ha(states={"light.she_deng": OFFLINE_TWIN,
+                    "light.ban_gong_shi_she_deng": GOOD_LAMP})
+    ok, msg = _run(ha, _klar("HassTurnOn", {"entity_id": "light.she_deng"}, "打开客厅的灯"))
+    assert ok is True, msg
+    assert "客厅的灯开了" in msg, msg              # 既有回执保住
+    assert "「射灯」" in msg and "离线" in msg and "同名" in msg, msg
+    assert _targets_ok(ha, "light.ban_gong_shi_she_deng", "light.she_deng"), _sent(ha)
+
+
+def test_no_repoint_gets_no_note():
+    """反向钉：本就可用（没改指）⇒ 一个字都不加，既有话术零扰动。"""
+    ha = Ha(states={"light.ban_gong_shi_she_deng": GOOD_LAMP})
+    ok, msg = _run(ha, _klar("HassTurnOn",
+                             {"entity_id": "light.ban_gong_shi_she_deng"}, "打开客厅的灯"))
+    assert ok is True, msg
+    assert "离线" not in msg and "同名" not in msg, msg
+
+
+def test_repoint_note_resets_between_runs():
+    """留痕按 run 复位：第二句没改指，就不得带上一句的注（同一 Executor 连跑）。"""
+    ha = Ha(states={"light.she_deng": OFFLINE_TWIN,
+                    "light.ban_gong_shi_she_deng": GOOD_LAMP})
+    ex = Executor(ha, None)
+    ok1, msg1 = asyncio.run(ex.run(_klar("HassTurnOn", {"entity_id": "light.she_deng"},
+                                         "打开客厅的灯")))
+    assert ok1 is True and "同名" in msg1, msg1
+    ok2, msg2 = asyncio.run(ex.run(_klar("HassTurnOn",
+                                         {"entity_id": "light.ban_gong_shi_she_deng"},
+                                         "打开客厅的灯")))
+    assert ok2 is True and "同名" not in msg2 and "离线" not in msg2, msg2
+
+
+def test_repoint_note_on_failure_keeps_apology():
+    """改指后执行失败 ⇒ 注照留（交代了改指），失败话术照旧，注不得声称办妥。"""
+    ha = Ha(states={"light.she_deng": OFFLINE_TWIN,
+                    "light.ban_gong_shi_she_deng": GOOD_LAMP},
+            svc_results={"homeassistant.turn_on": {"success": False,
+                                                   "error": "Entity not found"}})
+    ok, msg = _run(ha, _klar("HassTurnOn", {"entity_id": "light.she_deng"}, "打开客厅的灯"))
+    assert ok is False, msg
+    assert "同名" in msg, msg
+    assert "办妥" not in msg, msg
 # ── 候选排序：离线不得排在可用之前（歧义环/能力预裁共用同一份表）──────
 def test_resolve_candidates_puts_offline_last():
     states = {"light.she_deng": OFFLINE_TWIN, "light.ban_gong_shi_she_deng": GOOD_LAMP}

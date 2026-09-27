@@ -159,6 +159,18 @@ def is_indeterminate(err: str) -> bool:
 # 链式分句真伪判定用（见 Executor._leg_truth）：只对"状态名就是 on/off"的域判空操作。
 _LEG_DESIRED_STATE = {"HassTurnOn": ("on",), "HassTurnOff": ("off",)}
 _LEG_NOOP_DOMAINS = {"light", "fan", "switch", "humidifier", "input_boolean"}
+# 开合类意图的目标态按 action 取（v1.1.15 收口批）：ControlWindow 不进上表是因为
+# 它的"要求状态"藏在参数里。只用于**查无此名/已在要求态**的证伪，空白 action（stop 等）
+# 一律不判。
+_LEG_WINDOW_DESIRED = {"open": ("open",), "close": ("closed",), "closed": ("closed",)}
+
+
+def _leg_want(name: str, args: dict):
+    """本步"要求的状态"集合；None＝该意图不判（口径见 _leg_truth 的 docstring）。"""
+    if name == "ControlWindow":
+        act = str((args or {}).get("action") or "").strip().lower()
+        return _LEG_WINDOW_DESIRED.get(act)
+    return _LEG_DESIRED_STATE.get(name)
 
 
 class Executor:
@@ -170,6 +182,9 @@ class Executor:
         self.last_run: dict = {"steps": 0, "applied": 0, "indeterminate": False}
         # 能力预检"整体放行"的分因闩锁（见 _capability_refuse）
         self._gate_blind_warned = False
+        # 本轮"代打"留痕（收口批）：目标离线→同名改指过的设备名，按轮复位，
+        # 由 _named() 落到播报——绝不静默换设备（见 _repoint_offline_twin）。
+        self._repointed: list[str] = []
 
     async def run_raw(self, plan: Plan) -> tuple[bool, dict]:
         """单步意图执行，返回 (success, 原始 result dict)——供列表类意图
@@ -310,6 +325,8 @@ class Executor:
                     args["entity_id"] = new
                 else:
                     args["entity_id"] = [new if e == old else e for e in (args.get("entity_id") or [])]
+                if nm not in self._repointed:
+                    self._repointed.append(nm)
                 logger.info("[执行] 目标离线·同名改指 %s → %s（%s）", old, new, nm)
         except Exception:  # noqa: BLE001 改指故障=不改（闸仍在后面兜底）
             logger.exception("[执行] 离线同名改指异常（不动目标）")
@@ -328,7 +345,7 @@ class Executor:
         只读、永不抛。
         """
         try:
-            want = _LEG_DESIRED_STATE.get(name)
+            want = _leg_want(name, args)
             tgt = (args or {}).get("target")
             has_tgt = isinstance(tgt, list) and bool(tgt)
             if want is None or (not has_tgt and not (args or {}).get("entity_id")):
@@ -341,13 +358,41 @@ class Executor:
                 # 恒返回"无从证伪"——14:04 那条混形链的第二腿正是这一形制，
                 # 于是 D2 的点名对新加的直调路完全不设防。走专用判据。
                 return self._leg_truth_by_entity(want, args, states)
-            cands = capability.resolve_candidates(
-                states, getattr(self.ha, "_entity_area", {}) or {}, tgt)
+            area_map = getattr(self.ha, "_entity_area", {}) or {}
+            # 区域表护栏（收口批）：区域表来自注册表刷新（ha_client._entity_area），
+            # 桥不通/未首刷时为空；而 resolve_candidates 对**句带区域**的槽在区域表
+            # 为空时恒返 []（实测）⇒ 会把屋里真有的设备说成"没找到"。区域都认不出
+            # 的时候，"查无此名"无从判——宁可不点名。
+            want_areas = {str((s or {}).get("area") or "").strip()
+                          for s in tgt if isinstance(s, dict)}
+            want_areas.discard("")
+            if want_areas and not want_areas.issubset(set(area_map.values())):
+                return "", ""
+            cands = capability.resolve_candidates(states, area_map, tgt)
             names = [str((d or {}).get("name") or "").strip()
                      for slot in tgt for d in (slot.get("devices") or [{}])]
             names = [n for n in names if n]
             if not cands:
-                return ("missing", "、".join(names)) if names else ("", "")
+                if not names:
+                    return "", ""
+                # HA 别名（{eid: [改名/原名/别名]}，ha_client._entity_alias）：本仓快照
+                # 里只有 friendly_name，按名字查候选对别名句恒空——那不是"查无此名"。
+                # 按 eid 补一次真判（用户明明说对了名字，绝不能报"没找到"）。
+                cands = self._alias_candidates(states, names)
+            if not cands:
+                if not names:
+                    return "", ""
+                # "此区没有"≠"屋里没有"（收口批反向判据）：区域表是注册表快照
+                # （ha_client._entity_area，可能陈旧/不全），resolve_candidates 按
+                # (名字, 区域, 域提示) 三重过滤 ⇒ 过滤空不代表查无此名。名字在快照里
+                # 别处存在（换区域或换域）时一律不点名——把"有"说成"没找到"是红线；
+                # 真实的"此区没有"口径由能力闸/可用态闸承担，不靠这句话术。
+                anywhere = [{"devices": [{"name": (d or {}).get("name"), "domains": []}
+                                         for d in ((s or {}).get("devices") or [])]}
+                            for s in tgt if isinstance(s, dict)]
+                if capability.resolve_candidates(states, {}, anywhere):
+                    return "", ""
+                return "missing", "、".join(names)
             # 空操作判定只对"状态名就是 on/off"的域成立；cover/climate/media_player
             # 等状态词不同（open/closed、hvac_action…），一律不判，宁可不点名。
             if any(str(eid).split(".", 1)[0] not in _LEG_NOOP_DOMAINS
@@ -394,6 +439,44 @@ class Executor:
             return "noop", (nm or "")
         return "", ""
 
+    def _named(self, ok: bool, reply: str) -> tuple[bool, str]:
+        """把本轮的"代打"留痕落进播报（收口批，run 的唯一出口）。
+
+        措辞只陈述**目标替换**这件事（"离线 / 已改指同名的另一台"），不陈述成败——
+        失败支的"抱歉"照旧由本句给出，注不得替它宣称办妥。按 run 复位，
+        上一句的留痕不得粘到下一句。
+        """
+        if not self._repointed:
+            return ok, reply
+        names = "、".join(dict.fromkeys(self._repointed))
+        note = f"（注：「{names}」离线，已改指同名的另一台）"
+        return ok, (reply.rstrip() + note if reply else note)
+
+    def _alias_candidates(self, states: dict, names: list[str]) -> list:
+        """按 HA 别名/改名把用户说的名字还原成实体（v1.1.15 收口批，只读、永不抛）。
+
+        `states` 只有 friendly_name；别名在注册表（`ha_client._entity_alias`，
+        {eid: [改名后的 name, original_name, …aliases]}）里。用户说的是别名时，
+        按名字查候选恒空，若不还原就会把"说对了名字"报成"没找到"。
+        返回与 `capability.resolve_candidates` 同形的实体行（entity_id/state/attributes）。
+        """
+        try:
+            amap = getattr(self.ha, "_entity_alias", {}) or {}
+            if not amap:
+                return []
+            want = {str(n).strip() for n in names if str(n).strip()}
+            out = []
+            for eid, als in amap.items():
+                ent = states.get(eid)
+                if not isinstance(ent, dict):
+                    continue
+                if any(str(a).strip() in want for a in (als or [])):
+                    out.append(ent)
+            return out
+        except Exception:  # noqa: BLE001 还原故障＝按"无候选"走原判据（不阻断）
+            logger.exception("[执行] 别名候选还原异常（不判）")
+            return []
+
     async def run(self, plan: Plan) -> tuple[bool, str]:
         """执行 Plan（klar 多分句/复合链逐步顺序执行）。返回 (success, 中文播报)。永不抛。"""
         # 每一步带**自己的**来源（src）：一条链由 select_primary_plan 逐分句裁决，
@@ -404,6 +487,7 @@ class Executor:
             (st.get("name"), st.get("args") or {}, st.get("source") or plan.source)
             for st in (getattr(plan, "extra_steps", None) or [])]
         self.last_run = {"steps": len(steps), "applied": 0, "indeterminate": False}
+        self._repointed = []                 # 本轮的"代打"留痕按轮复位（见 _named）
         results = []
         missing: list[str] = []              # 链中"这屋里查无此名"的分句（D2）
         noops: list[str] = []                # 链中"目标已在要求状态"的空操作分句（D2）
@@ -417,7 +501,7 @@ class Executor:
                                  "indeterminate": False}
                 logger.info("[执行] %s %s → 开关族能力闸拦下（防area扇出/假成功）",
                             name, args)
-                return False, self._step_say(idx, steps, gate)
+                return self._named(False, self._step_say(idx, steps, gate))
             cap = await self._capability_refuse(name, args)
             if cap is not None:
                 # v1.1.3：网关侧按本家实体真实能力当场如实回话（带可选档位），
@@ -425,7 +509,7 @@ class Executor:
                 self.last_run = {"steps": len(steps), "applied": len(results),
                                  "indeterminate": False}
                 logger.info("[执行] %s %s → 能力预裁拦下 | %s", name, args, cap)
-                return False, self._step_say(idx, steps, cap)
+                return self._named(False, self._step_say(idx, steps, cap))
             await self._repoint_offline_twin(args)
             avail = await self._availability_refuse(name, args)
             if avail is not None:
@@ -434,16 +518,19 @@ class Executor:
                                  "indeterminate": False}
                 logger.info("[执行] %s %s → 目标不可用闸拦下（防谎报成功）| %s",
                             name, args, avail)
-                return False, self._step_say(idx, steps, avail)
-            if len(steps) > 1:
-                kind, label = await self._leg_truth(name, args)
-                if kind == "missing":
-                    if label:
-                        missing.append(label)
-                    else:
-                        anon_missing += 1        # 只数不猜名：entity_id 念进播报是噪音
-                elif kind == "noop" and label:
-                    noops.append(label)
+                return self._named(False, self._step_say(idx, steps, avail))
+            # v1.1.15(收口批)：单步计划同样逐台证伪——旧的 `len(steps) > 1` 栅栏
+            # 让"电视声被听成单步 HassTurnOff 打在已关的灯上"永远回"关了"（审计实证：
+            # 17:02/17:03 两轮）。判据本身早就对单步成立（resolve_candidates 与
+            # _leg_truth_by_entity 都不依赖步数），栅栏只是话术侧的旧口径。
+            kind, label = await self._leg_truth(name, args)
+            if kind == "missing":
+                if label:
+                    missing.append(label)
+                else:
+                    anon_missing += 1        # 只数不猜名：entity_id 念进播报是噪音
+            elif kind == "noop" and label:
+                noops.append(label)
             # 直调与否按**本步来源**判（不是整链首腿来源）：klar 引擎 full 模式已把
             # 「办公室射灯」grounded 成 entity_id，这类步骤的归宿是 /api/services/*；
             # 按 plan.source 判会让"慧尖首腿 + klar 次腿"的混形链把次腿原样丢进
@@ -466,12 +553,12 @@ class Executor:
                 detail = reply[3:] if reply.startswith("抱歉，") else reply
                 reply = self._step_say(idx, steps, detail)
                 logger.info("[执行] %s %s → 失败 | %s", name, args, reply)
-                return False, reply
+                return self._named(False, reply)
             results.append(result)
-            if len(steps) > 1:
-                for nm in self._unanswered(args, result):
-                    if nm not in no_receipt:
-                        no_receipt.append(nm)
+            # 同栅栏收口：单步也要点名"点了名却没回执"的那台（此前只对链生效）。
+            for nm in await self._unanswered(args, result):
+                if nm not in no_receipt:
+                    no_receipt.append(nm)
             if len(steps) > 1:
                 # 逐腿留痕（D2 旧病：整链只印首步的 intent/args，第二腿在账上不存在，
                 # 现场无法对账"到底动了几台"）；通道名一并印——D6 的病灶正是"走了
@@ -491,7 +578,7 @@ class Executor:
             reply = "抱歉，" + zh_error(why, klar=plan.source == "klar")
             reply = reply if reply.startswith("抱歉") else "抱歉，" + reply
             logger.info("[执行] %s %s → 逐实体全失败 | %s", plan.intent, plan.args, reply)
-            return False, reply
+            return self._named(False, reply)
         partial = f"（另有 {bad_n} 台没成功）" if bad_n > 0 else ""
         klar_speech = (getattr(plan, "speech", "") or "").strip()
         if plan.source == "klar" and len(results) == 1:
@@ -542,7 +629,7 @@ class Executor:
         self.last_run = {"steps": len(steps), "applied": len(steps),
                          "indeterminate": False}
         logger.info("[执行] %s %s%s → 成功 | %s", plan.intent, plan.args, tag, reply)
-        return True, reply
+        return self._named(True, reply)
 
     @staticmethod
     def _step_say(idx: int, steps: list, reason: str) -> str:
@@ -558,8 +645,7 @@ class Executor:
             return f"抱歉，第 1 步没成功，后面的步骤先不执行了（{reason}）"
         return f"抱歉，前面 {idx} 步已完成，但第 {idx + 1} 步没成功——{reason}"
 
-    @staticmethod
-    def _unanswered(args: dict, result: dict) -> list[str]:
+    async def _unanswered(self, args: dict, result: dict) -> list[str]:
         """本腿点名的设备里，回执没提到哪几台（v1.1.15 E3，只读、永不抛）。
 
         为什么不走 `_receipt`：慧尖意图的返回形制里根本没有逐实体 `states`
@@ -572,6 +658,9 @@ class Executor:
         判据保守：只比带名字的 target 槽（泛称/区域-only 没有可比对象，跳过）；命中
         按互相包含判（集成回的是解析后的实体名，可能比请求名更长如「平开窗 开窗器」
         或更短），全都对不上才算没回执——宁漏报一次，绝不在真执行了的时候喊没执行。
+        **HA 别名**：用户可能说别名（v1.1.4 支持），集成回的是实体本名 ⇒ 比对前先把
+        别名翻成本名（注册表 `_entity_alias` + states 的 friendly_name）；翻不出来的
+        不判（名称比对法在别名在场时不可信）。
         """
         try:
             tgt = (args or {}).get("target")
@@ -581,12 +670,30 @@ class Executor:
             got = [str((t or {}).get("name") or "").strip()
                    for t in (result.get("control_targets") or [])]
             got = [g for g in got if g]
+            spoken = [str((d or {}).get("name") or "").strip()
+                      for slot in tgt for d in ((slot or {}).get("devices") or [])]
+            spoken = [n for n in spoken if n]
+            alias_map = {eid: {str(x).strip() for x in (als or []) if str(x).strip()}
+                         for eid, als
+                         in (getattr(self.ha, "_entity_alias", {}) or {}).items()}
+            states: dict = {}
+            if alias_map and any(nm in als for nm in spoken
+                                 for als in alias_map.values()):
+                # 仅当真的说了别名才读快照（常见无别名路径零新增开销）
+                states = await self.ha.states()
             out = []
-            for slot in tgt:
-                for d in ((slot or {}).get("devices") or []):
-                    nm = str((d or {}).get("name") or "").strip()
-                    if nm and not any(nm == g or nm in g or g in nm for g in got):
-                        out.append(nm)
+            for nm in spoken:
+                cand = {nm}
+                for eid, als in alias_map.items():
+                    if nm in als:
+                        ent = states.get(eid) or {}
+                        fn = str(((ent.get("attributes") or {}).get("friendly_name"))
+                                 or "").strip()
+                        if fn:
+                            cand.add(fn)         # 别名 → 本名，纳入同一比对
+                if not any(n == g or n in g or g in n
+                           for n in cand for g in got):
+                    out.append(nm)
             return out
         except Exception:  # noqa: BLE001 比对故障=不判（退回既有回执口径）
             logger.exception("[执行] 逐台点名回执比对异常（不判）")
@@ -604,7 +711,13 @@ class Executor:
         for r in results or []:
             if not isinstance(r, dict):
                 continue
+            # 三族逐台结果键名（v1.1.15 收口批）：`states`＝AdjustDeviceAttribute/
+            # Lock 族（intent_adjust_attribute.py 返回），`results`＝SetDeviceMode 族
+            # （intent_set_mode.py 只回这个键）。此前漏读 `results` ⇒ mode 族部分失败
+            # 永远不被点名，播报只剩裸「好的」。两形行内都用 `success` 键，同口径计数。
             rows = r.get("states")
+            if not isinstance(rows, list) or not rows:
+                rows = r.get("results")
             if not isinstance(rows, list) or not rows:
                 continue
             for st in rows:

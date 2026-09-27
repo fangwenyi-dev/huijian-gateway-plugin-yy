@@ -8,8 +8,9 @@
 顶层 success + `_receipt` 只在 result 带 per-entity `states` 时才计数（executor.py 里
 它自己的注释就承认这点），所以"都办妥了"是**结构性假形**，不是偶发。
 
-纪律：判不了就不判（快照空、非 on/off 域、单步计划一律不动话术），宁可不点名，
-也绝不把"做了"说成"没做"。
+纪律：判不了就不判（快照空、非 on/off 域、区域表认不出该区），宁可不点名，
+也绝不把"做了"说成"没做"。（收口批起单步计划同样受判——旧稿"单步一律不动话术"
+的栅栏已按审计结论撤除，见文件末的正向钉。）
 """
 import asyncio
 
@@ -70,11 +71,19 @@ def test_healthy_klar_chain_wording_untouched():
     assert ok is True and reply == "好的，都办妥了", reply
 
 
-def test_single_step_plan_gets_no_leg_truth():
-    """单步计划（len(steps)==1）不启用分句判定——本改动只管链。"""
+def test_single_step_plan_also_gets_leg_truth():
+    """**契约变更**（收口批）：单步计划同样逐台证伪。
+
+    旧钉 `test_single_step_plan_gets_no_leg_truth` 钉的正是本批要根除的形态：单步恒
+    "顶层 success＝成功"，电视声被听成单步 HassTurnOff 打在已关的灯上照样回"关了"
+    （2026-09-27 17:02/17:03 审计实证）。判据侧本就对单步成立（resolve_candidates 与
+    _leg_truth_by_entity 都不依赖步数），那道 `len(steps) > 1` 只是话术侧的旧口径。
+    留着旧钉＝把旧病写成契约文档，故改写为正向钉（同 v1.1.13 改写同步 ensure 钉的先例）。
+    """
     ok, reply, _ = _run({"light.ban_gong_shi_she_deng": LAMP_ON},
-                        [("HassTurnOn", _tgt("射灯"))])
-    assert "本来就在要求的状态上" not in reply, reply
+                        [("HassTurnOn", _tgt("射灯"))], entity_area=AREA)
+    assert ok is True
+    assert "本来就在要求的状态上" in reply, reply
 
 
 def test_empty_snapshot_does_not_invent_words():

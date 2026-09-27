@@ -91,15 +91,22 @@ class HuijianConversationEntity(BaseEntity):
         user_input: ConversationInput,
         chat_log: conversation.ChatLog,
     ):
-        await transport.send_message(
-            json.dumps(
-                {
-                    "type": "listen",
-                    "state": "detect",
-                    "text": user_input.text,
-                }
-            )
-        )
+        frame = {
+            "type": "listen",
+            "state": "detect",
+            "text": user_input.text,
+        }
+        # 每轮携带卫星身份（v1.1.7 分桶改真）：stt/tts/llm transport 挂在**全局唯一**
+        # 的 assist 条目上（config_flow.py "unique_id=haid"），一条 WS 连接服务全屋
+        # 所有卫星，hello 只在建连时发一次 ⇒ 只靠 hello 分不出"这句是谁在说"，
+        # 多卫星的确认环/跨轮上下文仍按一颗桶串台（bb28 的确认被 32b8 应答）。
+        # 真源是 HA 设备注册 id：`assist_pipeline.py:1214` 把发起本轮管道的卫星设备
+        # id 放进 `ConversationInput.device_id`，稳定、跨重连不变。取不到/空白 →
+        # **不加键**，帧形与旧版逐字节相同（加载项回落连接级默认），旧加载项零暴露。
+        device_id = getattr(user_input, "device_id", None)
+        if isinstance(device_id, str) and device_id.strip():
+            frame["device"] = device_id.strip()
+        await transport.send_message(json.dumps(frame))
 
         # v1.0.93 退下旗（信号线第一段）：应答流里出现 end_dialogue → 按
         # chat_log.conversation_id 记账。键必须**剥掉再交给 chat_log**：

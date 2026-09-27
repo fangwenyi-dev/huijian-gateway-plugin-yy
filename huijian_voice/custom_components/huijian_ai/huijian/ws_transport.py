@@ -385,9 +385,11 @@ class WsTransport:
                 "type": "hello",
                 "version": 1,
                 "transport": "websocket",
-                # v1.1.7：卫星身份（entry.unique_id = 设备 MAC）随 hello 上报，供
-                # 加载项按卫星分桶 origin（确认环/跨轮上下文不再多机串台）。MAC 稳定、
-                # 跨重连不变；加载项缺此字段回落 request.remote，向后兼容旧加载项。
+                # v1.1.7：**连接级默认** origin（本条目 unique_id＝HA instance_id）。
+                # 同一加载项被多台 HA 挂载时按实例分开；**卫星粒度**由每轮 detect 帧
+                # 的 device 提供（见 conversation.py）——一条 WS 连接服务全屋所有卫星，
+                # hello 只在建连时发一次，靠它分不出"这句是谁在说"。
+                # 加载项缺此字段回落 request.remote，向后兼容旧加载项。
                 "device": getattr(self.entry, "unique_id", "") or "",
                 "audio_params": {
                     "format": "opus",
