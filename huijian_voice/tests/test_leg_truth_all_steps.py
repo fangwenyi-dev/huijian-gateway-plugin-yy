@@ -187,6 +187,128 @@ def test_alias_spoken_name_never_accuses():
     assert "没找到" not in reply, reply        # 别名不是"查无此名"（快照侧同样要认）
 
 
+def test_entity_id_form_missing_non_noop_domain_is_counted():
+    """entity_id 形（klar grounded 腿）查无此台 ⇒ 也要计入"找不到对应的设备"。
+
+    旧序：`_leg_truth_by_entity` 先过域闸（非 on/off 域一律 return）再看快照 ⇒
+    **cover 腿根本走不到 missing 判定**，与 target 形（先判 missing 再过域闸）两种口径。
+    v1.1.17 收口：两条路同序——cover/climate 不判"空操作"，但"快照里没这台"照样点名。
+    """
+    ha = Ha(results={}, states={"light.desk": _ent("light.desk", "off", "台灯")})
+    plan = Plan(intent="HassTurnOn", source="klar", utterance="打开客厅的窗帘",
+                args={"entity_id": "cover.ghost", "domain": "cover", "area": "客厅"})
+    ok, reply = asyncio.run(Executor(ha).run(plan))
+    assert ok is True
+    assert "找不到对应的设备" in reply, reply
+
+
+def test_entity_id_form_present_cover_still_unjudged():
+    """反向：cover 在快照里（开着）⇒ 仍不判空操作（状态词不是 on/off，防把"开到头"说成没动）。"""
+    ha = Ha(results={}, states={"cover.w": _ent("cover.w", "open", "客厅窗帘")})
+    plan = Plan(intent="HassTurnOn", source="klar", utterance="打开客厅的窗帘",
+                args={"entity_id": "cover.w", "domain": "cover", "area": "客厅"})
+    ok, reply = asyncio.run(Executor(ha).run(plan))
+    assert ok is True
+    assert "找不到对应的设备" not in reply and "本来就在要求的状态上" not in reply, reply
+
+
+# ── 回执：逐台真原因 / 台而不是行 / 全失败支（B 批）─────────────────
+_SUPPORT_ERR = "does not support set_cover_position"
+
+
+def _attr_plan():
+    args = {"target": [{"area": "办公室",
+                        "devices": [{"name": "平开窗", "domains": ["cover"]}]}],
+            "attribute": "position", "delta": "60"}
+    return _one("AdjustDeviceAttribute", args, utterance="把平开窗开到60%")
+
+
+def test_failed_step_prefers_per_entity_reason():
+    """顶层失败但逐台回执带原因 ⇒ 播报必须用**逐台真原因**。
+
+    v1.1.4 的动机案就是这个形制（`success:true, success_count:1` 而点名那台返回
+    "does not support set_cover_position"），但顶层 success=false 时执行器在
+    `_receipt` 之前就早退了 ⇒ 原因被泛化成"换个说法再试"，用户永远不知道是**设备
+    不支持**（重说十遍也没用）。"""
+    (ok, reply), _ = _run_plan(
+        {"cover.w": _ent("cover.w", "open", "平开窗 开窗器")}, _attr_plan(),
+        results={"AdjustDeviceAttribute": {"success": False, "states": [
+            {"name": "平开窗 开窗器", "success": False, "error": _SUPPORT_ERR}]}},
+        entity_area={"cover.w": "办公室"})
+    assert ok is False
+    assert "不支持" in reply, reply
+
+
+def test_all_rows_false_with_top_success_is_named_once():
+    """顶层 success 与逐台行自相矛盾（旧集成方言）⇒ 走"全失败"支：带原因、且**只有一个"抱歉"**。"""
+    (ok, reply), _ = _run_plan(
+        {"cover.w": _ent("cover.w", "open", "平开窗 开窗器")}, _attr_plan(),
+        results={"AdjustDeviceAttribute": {"success": True, "states": [
+            {"name": "平开窗 开窗器", "success": False, "error": _SUPPORT_ERR}]}},
+        entity_area={"cover.w": "办公室"})
+    assert ok is False
+    assert "不支持" in reply, reply
+    assert "抱歉，抱歉" not in reply, reply
+
+
+def test_partial_failure_counts_devices_not_rows():
+    """部分失败按**台**计数（同一台的多行只算一台）：旧播报把行数念成台数。"""
+    (ok, reply), _ = _run_plan(
+        {"climate.ac": _ent("climate.ac", "off", "空调")},
+        _one("SetDeviceMode", {"target": [{"area": "办公室",
+                                           "devices": [{"name": "空调", "domains": ["climate"]}]}],
+                               "mode": "cool"}),
+        results={"SetDeviceMode": {"success": True, "results": [
+            {"name": "空调", "success": True},
+            {"name": "空调", "success": False, "error": "x"},
+            {"name": "空调", "success": False, "error": "y"}]}})
+    assert ok is True
+    assert "另有 1 台没成功" in reply, reply
+
+
+# ── 能力预裁：entity_id 形（v1.1.3 留下的缝，B 批）──────────────────
+def _klar_plan(intent, args):
+    return Plan(intent=intent, source="klar", utterance="打开那个东西", args=args)
+
+
+def test_capability_gate_covers_entity_id_form():
+    """entity_id 形（klar grounded 腿）也要过**能力矩阵**预裁。
+
+    旧形态：`_capability_refuse` 第一行 `tgt = args.get("target")`，不是 list 就 return None
+    ⇒ 引擎 grounded 的目标整条从能力矩阵旁边走过去（只读实体的开关已由开关族闸兜住，
+    但**属性能力**没人兜：纯 on/off 灯被"调到 50%"，target 形会当场如实拒，
+    entity_id 形却照样下发 → HA 报错/空操作）。
+    """
+    ha = Ha(results={}, states={"light.plain": {
+        "entity_id": "light.plain", "state": "on",
+        "attributes": {"friendly_name": "书房灯", "supported_color_modes": ["onoff"]}}})
+    plan = _klar_plan("AdjustDeviceAttribute",
+                      {"entity_id": "light.plain", "domain": "light",
+                       "attribute": "brightness", "delta": "50"})
+    ok, reply = asyncio.run(Executor(ha).run(plan))
+    assert ok is False, reply
+    assert "亮度" in reply, reply
+    assert ha.svc_calls == [], ha.svc_calls          # 拦在闸上，不外发
+
+
+def test_capability_gate_lets_normal_entity_through():
+    """反向：普通灯走 entity_id 形照旧执行（不得因为补闸把正常路拦死）。"""
+    ha = Ha(results={}, states={"light.desk": _ent("light.desk", "off", "台灯")})
+    plan = _klar_plan("HassTurnOn", {"entity_id": "light.desk", "domain": "light"})
+    ok, reply = asyncio.run(Executor(ha).run(plan))
+    assert ok is True, reply
+    assert ha.svc_calls, "正常目标被拦下=补闸过度"
+
+
+def test_capability_gate_fails_open_on_unknown_entity():
+    """反向（宁漏放不误拒）：目标不在快照 ⇒ 拿不到候选一律放行，绝不凭空拒。"""
+    ha = Ha(results={}, states={"light.desk": _ent("light.desk", "off", "台灯")})
+    plan = _klar_plan("HassTurnOn", {"entity_id": "light.ghost", "domain": "light"})
+    ok, reply = asyncio.run(Executor(ha).run(plan))
+    assert ok is True, reply
+    assert ha.svc_calls, "未知实体被凭空虚拒"
+
+
 def test_healthy_single_step_wording_untouched():
     """反向钉：真从 off→on 的单步，话术与既有口径逐字不变（防过度修正）。"""
     (ok, reply), _ = _run_plan(

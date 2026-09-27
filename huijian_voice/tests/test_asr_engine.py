@@ -251,15 +251,42 @@ def test_settings_defaults_local_model_present_for_merge():
     assert DEFAULTS["stt"]["provider"] == "local_paraformer", "provider 值空间兼容 pin 不得改"
 
 
+def test_e2e_need_is_derived_from_lock_not_hardcoded():
+    """两 e2e 脚本的 models 就绪等待集必须**从 models.lock 派生**（default_provider:true）。
+
+    v1.1.10 补把它写死成 melo 字面量，同一版的 CHANGELOG 却声称"对默认档翻转免疫"
+    ——换个默认档就又漂一次（本次审计实证）。派生后同时与代码主档对账：
+    ASR=KEY_SV、TTS=PROVIDER_MODEL_KEYS[DEFAULTS.tts.provider]。"""
+    import json
+    root = Path(__file__).resolve().parents[1]
+    from core.settings import DEFAULTS
+    from core.tts import PROVIDER_MODEL_KEYS
+    lock = json.loads((root / "models.lock.json").read_text(encoding="utf-8"))
+    want = {k for k, v in lock.items()
+            if isinstance(v, dict) and v.get("default_provider")}
+    assert want == {KEY_SV, PROVIDER_MODEL_KEYS[DEFAULTS["tts"]["provider"]]}, want
+    for rel in ("tests/e2e/run_e2e.sh", "tests/e2e/run_local.sh"):
+        src = (root / rel).read_text(encoding="utf-8")
+        assert "default_provider" in src, f"{rel}: need 集未从 lock 派生（写死的键会漂）"
+        for hard in (KEY_SV, "tts_melo_zh_en", "tts_kokoro_multilang"):
+            assert hard not in src, f"{rel}: need 集仍写死 {hard}"
+
+
 def test_e2e_scripts_wait_on_need_not_full_lock():
     """v1.0.28 CI 实红（run 34364440982，E2E 25min 超时）：两 e2e 脚本的 models
-    就绪等待集必须是「运行期 need」（主档 ASR + Kokoro）——paraformer 降回落档后
-    新装根本不主动下载，等 lock 全清单 all() 恒假。换主档引擎时脚本 need 必须
-    同步，漂移由本钉先红。"""
+    就绪等待集必须是「运行期 need」——paraformer 降回落档后新装根本不主动下载，
+    等 lock 全清单 all() 恒假。
+
+    v1.1.17 随脚本改派生形同步改写：need 由 models.lock 的 default_provider 派生
+    （见 test_e2e_need_is_derived_from_lock_not_hardcoded），本钉只守**不得退回全清单等待**。"""
     root = Path(__file__).resolve().parents[1]
     for rel in ("tests/e2e/run_e2e.sh", "tests/e2e/run_local.sh"):
         src = (root / rel).read_text(encoding="utf-8")
-        m = re.search(r'need=\["([^"]+)",\s*"([^"]+)"\]', src)
-        assert m, f"{rel}: 找不到显式 need 等待集（改动疑似回退成 all(values) 旧式？）"
-        assert set(m.groups()) == {KEY_SV, "tts_melo_zh_en"}, \
-            f"{rel}: need 集 {m.groups()} 与代码主档 {KEY_SV}/默认TTS(melo) 漂移"
+        assert "HJ_LOCK" in src and "models.lock.json" in src, \
+            f"{rel}: need 派生接线丢失（等待集又变成本地常量？）"
+        # 只判**代码行**：注释里记着这句历史（"all(models_ready.values()) 恒 false"），
+        # 扫到注释会把钉弄红一次、红过的钉就会被删掉（本仓 v1.1.12 的教训）。
+        code = "\n".join(ln for ln in src.splitlines()
+                         if not ln.lstrip().startswith("#"))
+        assert "models_ready.values()" not in code and "m.values()" not in code, \
+            f"{rel}: 退回『等 lock 全清单』旧式（新装永不就绪）"

@@ -24,7 +24,7 @@
       ],
       "sha256": "f95514e2bac03558f1acd3df2113aa9d9d815ecb3e6f04ded9b868eaec310fcd",
       "size": 8786984,
-      "notes_zh": "远场/嘈杂实测出货档：共享单AFE(SE关)+设备侧AEC+双麦MMR+端点闸1500；bin 由固件仓 v2.1.65(私仓) 镜像至本公开 release",
+      "notes_zh": "远场/嘈杂实测出货档：共享单AFE(SE关)+设备侧AEC+双麦MMR+端点闸1500。**本条是产线合并出厂镜像**（含 bootloader+分区表+otadata，8,786,984B 远超设备 OTA 槽 4,128,768B）——urls 只作**近场领取/产线烧录**用，OTA 下发会被容量闸当场拦下（OTA 请走 2.1.67 app 镜像）；bin 由固件仓 v2.1.65(私仓) 镜像至本公开 release",
       "min_compatible": "2.1.36"
     },
     {

@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Coroutine, Optional
 
 from . import const
+from .tts import _SPEED_MAX, _SPEED_MIN      # 语速钳位单点（确认环 TTL 与合成账同源）
 from .nlu.fast_path import (END_DIALOGUE_INTENT, FLAG_ANAPHORA_STRIPPED,
                             FLAG_CHAIN_ANAPHORA, FLAG_PRONOUN_TARGET,
                             TRACE_TAG_CHAIN, TRACE_TAG_CONTEXT,
@@ -368,9 +369,16 @@ CONTEXT_MAX_TURNS = 8                # 每 origin 环形缓冲（4 回合 ×2 �
 CONFIRM_TTL_S = 30.0                 # P2-13 待确认存活（基线，无提示文本时回落此值）
 # v1.1.7（办公室实测：30s 固定 TTL 被长歧义提示播报吃光，剩 7.2s 应答窗 → 用户
 # 重唤醒+回答超时，「取消」被当改口走 fallback）：确认环 TTL 改**自适应**——基线
-# + 提示播报时长估算（中文 TTS ≈0.2s/字，封顶 +30s）。长提示自动获得更长应答窗，
-# 短提示维持基线。只放宽超时上限，不改是/否/改口三态语义。
-_CONFIRM_ANN_S_PER_CHAR = 0.2        # 中文 TTS 播报速率估算（秒/字）
+# + 提示播报时长估算（封顶 +30s）。长提示自动获得更长应答窗，短提示维持基线。
+# 只放宽超时上限，不改是/否/改口三态语义。
+# v1.1.17 收口：播报时长估算改**实测口径**——旧式 0.2s/字（=5 字/s）是拍的，比仓内
+# 两个已测口径都乐观：
+#   · tts.py 的合成账 4.5 字/s（"账同固件 v2.1.44"，speed 自适应）＝**合成**时长；
+#   · v1.1.7 自己记的现场：~70 字歧义提示播报 ≈23s，且是在**默认 speed=1.25** 档
+#     测的 ⇒ 基准档(1.0) ≈2.4 字/s，默认档 ≈3.04 字/s（播报还含停顿与设备缓冲）。
+# TTL 是安全余量，取慢的一侧；并随 tts.speed 缩放（旧式完全不吃语速档）。
+_CONFIRM_ANN_CPS = 2.4               # 播报语速基准（字/秒，speed=1.0 档）
+_TTS_SPEED_DEFAULT = 1.25            # settings.py 出货默认（用户拍板 2026-09-19）
 _CONFIRM_ANN_MAX_EXTRA = 30.0        # 播报补偿封顶（防超长提示把 TTL 拉到离谱）
 _VOCAB_SYNC_S = 30.0                 # P2-17 动态词表节流
 
@@ -1809,11 +1817,16 @@ class Pipeline:
     def _confirm_ttl(self, text: str) -> float:
         """确认环自适应存活窗：基线 TTL + 提示播报时长估算（见 CONFIRM_TTL_S 注）。
 
-        基线取 settings（用户可调），无提示文本时即基线本身。播报补偿按字数估，
-        封顶 _CONFIRM_ANN_MAX_EXTRA，防超长提示把窗口拉到离谱。"""
+        基线取 settings（用户可调），无提示文本时即基线本身。播报补偿＝字数 ÷
+        （实测语速 × tts.speed，钳位与 tts 同源），封顶 _CONFIRM_ANN_MAX_EXTRA，
+        防超长提示把窗口拉到离谱。"""
         base = float(self.settings.get("dialog.confirm_ttl_s", CONFIRM_TTL_S))
-        return base + min(len(text or "") * _CONFIRM_ANN_S_PER_CHAR,
-                          _CONFIRM_ANN_MAX_EXTRA)
+        try:
+            speed = float(self.settings.get("tts.speed", _TTS_SPEED_DEFAULT) or 0.0)
+        except (TypeError, ValueError):
+            speed = _TTS_SPEED_DEFAULT
+        cps = _CONFIRM_ANN_CPS * max(_SPEED_MIN, min(speed, _SPEED_MAX))
+        return base + min(len(text or "") / cps, _CONFIRM_ANN_MAX_EXTRA)
 
     def _confirm_ask(self, plan: Plan, origin: str) -> Optional[Reply]:
         if not self._risky(plan):

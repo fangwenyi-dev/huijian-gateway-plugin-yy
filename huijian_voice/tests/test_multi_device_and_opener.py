@@ -587,10 +587,15 @@ def test_scene_coord_parallel_actions():
 
 
 def test_coord_source_pins():
-    """安全形态源头钉：拼音档属性词禁入 + 集成映射长词序。"""
+    """安全形态源头钉：拼音档属性词禁入 + 集成映射长词序。
+
+    容差钉随 v1.1.17 收口更新：旧式 `len(py_dev) <= 5` 只看拼音字母数，6~7 字母的
+    **两字**词仍容两个音之差（=两个音节各错一个），模式词因此糊成设备（摆风→台灯）。
+    新式按字数判：两字词 tol=1、其余维持（短拼音仍 tol=1）。"""
     tg = (HERE / "core" / "nlu" / "targets.py").read_text(encoding="utf-8")
     assert "_ATTR_NO_PINYIN" in tg and "coord_refuse" in tg
-    assert "tol = 1 if len(py_dev) <= 5 else 2" in tg   # 短拼音容差收紧钉
+    assert "tol = 1 if (len(d) <= 2 or len(py_dev) <= 5) else 2" in tg, \
+        "两字词容差收紧钉（近音幻觉类入口）"
     const = (HERE / "custom_components" / "huijian_ai" /
              "intent_window_const.py").read_text(encoding="utf-8")
     mapping = const[const.index("WINDOW_NAME_MAPPING = {"):const.index("WINDOW_ALL_NAMES")]

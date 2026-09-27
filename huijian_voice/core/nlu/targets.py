@@ -842,7 +842,12 @@ def parse_target(raw: str, action_match=None) -> tuple[str | None, str | None, i
                 if len(d) < 2:
                     continue
                 py_dev = "".join(lazy_pinyin(d))
-                tol = 1 if len(py_dev) <= 5 else 2
+                # v1.1.17 收口（同族第三刀）：容差改按**字数**判——两字设备词最多容
+                # 一个字母之差。旧规则只看拼音字母数（≤5 才 tol=1），6~7 字母的两字词
+                # 仍允许错两个音＝两个音节各错一个＝**等于另一个词**，于是模式词照样
+                # 糊成设备（实测「摆风」→台灯、「预冷」→夜灯、「透风」→投影）。三字
+                # 及以上维持 2（「催拉窗」那类整词救援仍需余量）。宁 MISS 不猜设备。
+                tol = 1 if (len(d) <= 2 or len(py_dev) <= 5) else 2
                 dist = 99
                 for i in range(max(0, len(py_raw) - len(py_dev) + 1)):
                     dist = min(dist, levenshtein(py_raw[i: i + len(py_dev)], py_dev))

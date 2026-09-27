@@ -145,6 +145,26 @@ def test_repoint_is_announced():
     assert _targets_ok(ha, "light.ban_gong_shi_she_deng", "light.she_deng"), _sent(ha)
 
 
+def test_repoint_note_names_the_area():
+    """注里要带上**改指目标所在区域**（v1.1.17）：两台同名、名字自己给不出房间信息，
+    不报区域时用户听不出动的是哪一间的那台（D4 的现场就是"客厅的灯"落到了办公室射灯）。"""
+    ha = Ha(states={"light.she_deng": OFFLINE_TWIN,
+                    "light.ban_gong_shi_she_deng": GOOD_LAMP},
+            entity_area={"light.ban_gong_shi_she_deng": "办公室"})
+    ok, msg = _run(ha, _klar("HassTurnOn", {"entity_id": "light.she_deng"}, "打开客厅的灯"))
+    assert ok is True, msg
+    assert "在办公室" in msg, msg
+
+
+def test_repoint_note_invents_no_area():
+    """反向：区域表没有这台 ⇒ 不得凭空编一个区域，退回既有措辞。"""
+    ha = Ha(states={"light.she_deng": OFFLINE_TWIN,
+                    "light.ban_gong_shi_she_deng": GOOD_LAMP})
+    ok, msg = _run(ha, _klar("HassTurnOn", {"entity_id": "light.she_deng"}, "打开客厅的灯"))
+    assert ok is True, msg
+    assert "在" not in msg.split("注：")[-1], msg
+
+
 def test_no_repoint_gets_no_note():
     """反向钉：本就可用（没改指）⇒ 一个字都不加，既有话术零扰动。"""
     ha = Ha(states={"light.ban_gong_shi_she_deng": GOOD_LAMP})

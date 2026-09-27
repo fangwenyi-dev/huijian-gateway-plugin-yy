@@ -375,7 +375,11 @@ def test_equal_length_ties_follow_authoring_order():
 # 动作，设备却去开传感器并回「办好了」= 误执行 + 谎报；「通风」→「筒灯」同型。
 # 与「亮度→浴霸」同族，修法同 _ATTR_NO_PINYIN：动作/模式语素禁入近音档（
 # targets._ACTION_NO_PINYIN），宁 MISS 也不猜设备（v1.0.69 宁如实失败红线）。
-HALLUCINATION_CASES = [("内倒", "雷达"), ("客厅内倒", "雷达"), ("通风", "筒灯")]
+HALLUCINATION_CASES = [("内倒", "雷达"), ("客厅内倒", "雷达"), ("通风", "筒灯"),
+                       # v1.1.17 收口：同一道禁区仍在漏——tol 规则只对"拼音≤5 字母"
+                       # 的两字词收紧，6~7 字母的两字残段仍容错 2 个音（=两个音节各错
+                       # 一个），于是"摆风/预冷/透风"这类**模式词**照样糊成设备：
+                       ("摆风", "台灯"), ("预冷", "夜灯"), ("透风", "投影")]
 
 
 @pytest.mark.parametrize(("frag", "banned"), HALLUCINATION_CASES)
@@ -386,11 +390,25 @@ def test_action_morphemes_never_become_device_names(frag, banned):
 
 @pytest.mark.parametrize(("sentence", "banned"), [
     ("打开内倒", "雷达"), ("打开客厅内倒", "雷达"), ("打开通风", "筒灯"),
+    ("打开摆风", "台灯"), ("打开预冷", "夜灯"), ("打开透风", "投影"),
 ])
 def test_hallucination_never_reaches_the_plan(fp, sentence, banned):
     """端到端：计划里绝不能出现被近音糊出来的设备名（那会被集成真的执行掉）。"""
     p = _match(fp, sentence)
     assert p is None or banned not in str(p.args), (sentence, p.args if p else None)
+
+
+def test_two_char_words_tolerate_at_most_one_bad_letter():
+    """两字设备词最多容一个字母之差（=最多一个音节听错）：两字词错两个音就等于
+    另一个词，正是"摆风→台灯"那一类幻觉的入口。三字及以上维持原容差（催拉窗
+    那类整词救援仍需 2 音余量）。
+
+    正向对照取真值：'泰腾'(taiteng) 与 '台灯'(taideng) 只差一个字母 ⇒ **必须仍被
+    救援**（防"修幻觉"修成"近音档整体失能"）。"""
+    _a, n, _s = T.parse_target("泰腾")
+    assert n == "台灯", f"单音节听错的两字词被一起打死了：{n!r}"
+    _a2, n2, _s2 = T.parse_target("摆风")
+    assert n2 != "台灯", f"两音节皆错仍被糊成设备：{n2!r}"
 
 
 def test_pinyin_blocklist_does_not_blind_literal_window_words(fp):

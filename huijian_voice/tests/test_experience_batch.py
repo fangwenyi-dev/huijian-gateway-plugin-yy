@@ -510,6 +510,29 @@ def test_confirm_ttl_expiry():
     assert "o" not in p._confirm
 
 
+def test_confirm_ttl_uses_measured_speak_rate():
+    """播报补偿用**实测口径**（不再拍 0.2s/字 = 5 字/s）。
+
+    台账（v1.1.7 自己的现场记录）：~70 字歧义提示播报约 23s，且那是在**默认
+    speed=1.25** 档测的——旧式 0.2s/字只给 14s，少给约 40%，正是"重唤醒+回答就超时、
+    取消被当改口"的成因。基准档(1.0)≈2.4 字/秒 × speed ⇒ 默认档 3.04 字/秒。"""
+    p = _pipe()
+    long_text = ("家里有 5 台设备名字相近（会议室空调、办公室空调、卧室空调、客厅空调、"
+                 "书房空调）。我先对「会议室空调」执行，说「确认」就这么办，说「取消」先不动。")
+    extra = p._confirm_ttl(long_text) - CONFIRM_TTL_S
+    assert 20.0 <= extra <= 26.0, f"70 字提示的播报补偿应≈23s（实测口径），实得 {extra:.1f}s"
+
+
+def test_confirm_ttl_scales_with_tts_speed():
+    """慢速档给更长窗（旧式完全不吃 tts.speed）：0.5 档补偿≈默认档两倍。"""
+    slow = _pipe(settings=PSettings({"tts.speed": 0.5}))
+    fast = _pipe(settings=PSettings({"tts.speed": 1.25}))
+    text = "我把「会议室空调」关掉好吗？客厅那台也关吗"
+    e_slow = slow._confirm_ttl(text) - CONFIRM_TTL_S
+    e_fast = fast._confirm_ttl(text) - CONFIRM_TTL_S
+    assert e_slow > e_fast * 1.8, (e_slow, e_fast)
+
+
 def test_confirm_ttl_legacy_pending_without_ttl_uses_base():
     """无 ttl 键的旧形态挂起（升级前持久化/手工塞）回落基线，不被自适应放宽。"""
     p = _pipe()

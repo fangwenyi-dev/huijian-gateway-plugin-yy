@@ -317,6 +317,67 @@ def test_llm_hello_device_garbage_ignored(server):
     _run(go())
 
 
+# ── /readyz 与 watchdog 分工（v1.1.17 补钉：接口上线 9 版无钉、无消费方）──
+def test_readyz_ok_when_assets_healthy(server):
+    """资产无判负 ⇒ 200 + ok:true（严格就绪探针的放行态）。"""
+    port, _ = server
+
+    async def go():
+        async with ClientSession() as sess:
+            async with sess.get(f"http://127.0.0.1:{port}/readyz") as r:
+                assert r.status == 200, r.status
+                assert (await r.json()).get("ok") is True
+    _run(go())
+
+
+def test_readyz_503_when_model_assets_fatal(server):
+    """模型资产确证判负（failed/incomplete/manual 且未 ready）⇒ 503。
+
+    这是 /readyz 与 /healthz 的唯一分工：healthz 恒 200（watchdog 用，懒加载不算故障），
+    readyz 才 503。钉住这条=钉住"两者语义不得互换"。"""
+    port, ctx = server
+
+    class _Store:
+        def snapshot(self):
+            return {"tts_kokoro_multilang": {"state": "incomplete", "ready": False}}
+
+    ctx.store = _Store()
+
+    async def go():
+        async with ClientSession() as sess:
+            async with sess.get(f"http://127.0.0.1:{port}/readyz") as r:
+                assert r.status == 503, r.status
+                assert (await r.json()).get("ok") is False
+    _run(go())
+
+
+def test_readyz_ready_model_is_not_fatal(server):
+    """反向：判负态但 ready:true（用户手动投放资产）⇒ 放行，不 503。"""
+    port, ctx = server
+
+    class _Store:
+        def snapshot(self):
+            return {"tts_kokoro_multilang": {"state": "manual", "ready": True}}
+
+    ctx.store = _Store()
+
+    async def go():
+        async with ClientSession() as sess:
+            async with sess.get(f"http://127.0.0.1:{port}/readyz") as r:
+                assert r.status == 200, r.status
+    _run(go())
+
+
+def test_supervisor_watchdog_stays_on_healthz():
+    """watchdog 仍指 /healthz（懒加载引擎不算故障；换 readyz=全体客户重启行为变更）。"""
+    from pathlib import Path
+    cfg = (Path(__file__).resolve().parents[1] / "config.yaml").read_text(encoding="utf-8")
+    # 只认**指令行**（注释里出现 watchdog 一词不算）
+    wd = [ln.strip() for ln in cfg.splitlines() if ln.strip().startswith("watchdog:")]
+    assert wd, "config.yaml 没有 watchdog: 指令行"
+    assert all("/healthz" in ln and "/readyz" not in ln for ln in wd), wd
+
+
 # ── C2 TTS ─────────────────────────────────────────────────────
 def test_tts_frames_order(server):
     port, _ = server

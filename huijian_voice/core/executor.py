@@ -56,6 +56,9 @@ _EN_ERR_MAP = [
     # in Y」旧表不认，播报被截成英文残句「（Could not find op」——现场实锤。
     ("could not find", "没找到要操作的窗户——请确认房间名和窗型叫法（如「办公室平开窗」）"),
     ("no available", "没找到符合条件的设备，试试带上房间名或换个叫法"),
+    # v1.1.17：逐台回执里的能力类真原因（"does not support set_cover_position"）此前
+    # 落进兜底模板，与"没听清"同形——用户重说十遍也没用。这类错是**设备做不到**。
+    ("does not support", "这台设备不支持这个操作，换个说法或换台设备试试"),
     ("ha 内部错误", "慧尖 AI 集成还没生效——若是首次使用，请先安装集成（设备与服务→添加集成）并完成一次设备配对；若是刚升级，请在 Supervisor 重启（或重载）HA Core 再试"),
     ("unknown intent", "还没安装或加载慧尖 AI 集成——设备执行能力由集成提供，请先安装集成并配对一台设备"),
     ("no match", "没找到符合条件的设备"),
@@ -182,9 +185,9 @@ class Executor:
         self.last_run: dict = {"steps": 0, "applied": 0, "indeterminate": False}
         # 能力预检"整体放行"的分因闩锁（见 _capability_refuse）
         self._gate_blind_warned = False
-        # 本轮"代打"留痕（收口批）：目标离线→同名改指过的设备名，按轮复位，
-        # 由 _named() 落到播报——绝不静默换设备（见 _repoint_offline_twin）。
-        self._repointed: list[str] = []
+        # 本轮"代打"留痕（收口批）：目标离线→同名改指过的 (设备名, 改指目标区域)，
+        # 按轮复位，由 _named() 落到播报——绝不静默换设备（见 _repoint_offline_twin）。
+        self._repointed: list[tuple[str, str]] = []
 
     async def run_raw(self, plan: Plan) -> tuple[bool, dict]:
         """单步意图执行，返回 (success, 原始 result dict)——供列表类意图
@@ -211,10 +214,20 @@ class Executor:
 
         只拒不改写；拿不到候选实体（注册表未同步/无匹配）一律放行，让集成端
         按它自己的口径判——网关不越权凭空拒掉本来能做的动作。永不抛。
+
+        v1.1.17 收口：**entity_id 形也进矩阵**。旧形态第一行 `tgt = args.get("target")`，
+        不是 list 即 return None ⇒ 引擎 grounded 的腿整条从能力预裁旁边走过去
+        （开关类由 _turn_gate 兜住，**属性能力**无人兜：纯 on/off 灯"调到 50%"照样下发）。
+        与 _availability_refuse / _leg_truth_by_entity 同口径：候选按 eid 直取快照，
+        取不到即放行。
         """
         try:
             tgt = (args or {}).get("target")
-            if not isinstance(tgt, list) or not tgt:
+            has_tgt = isinstance(tgt, list) and bool(tgt)
+            raw = (args or {}).get("entity_id")
+            eids = [raw] if isinstance(raw, str) and "." in raw else [
+                e for e in (raw or []) if isinstance(e, str) and "." in e]
+            if not has_tgt and not eids:
                 return None
             states = await self.ha.states()
             if not states:
@@ -229,9 +242,11 @@ class Executor:
                                    getattr(self.ha, "last_error", ""))
                 return None
             self._gate_blind_warned = False
-            cands = capability.resolve_candidates(
-                states, getattr(self.ha, "_entity_area", {}) or {},
-                (args or {}).get("target"))
+            if has_tgt:
+                cands = capability.resolve_candidates(
+                    states, getattr(self.ha, "_entity_area", {}) or {}, tgt)
+            else:
+                cands = [states[e] for e in eids if e in states]
             return capability.gate(name, args, cands)
         except Exception:  # noqa: BLE001 裁决故障=放行（宁多发一次，绝不少做）
             logger.exception("[执行] 能力预裁异常（放行）")
@@ -320,14 +335,17 @@ class Executor:
                     fixed[eid] = (cands[0], nm)
             if not fixed:
                 return
+            area_map = getattr(self.ha, "_entity_area", {}) or {}
             for old, (new, nm) in fixed.items():
                 if isinstance(raw, str):
                     args["entity_id"] = new
                 else:
                     args["entity_id"] = [new if e == old else e for e in (args.get("entity_id") or [])]
-                if nm not in self._repointed:
-                    self._repointed.append(nm)
-                logger.info("[执行] 目标离线·同名改指 %s → %s（%s）", old, new, nm)
+                rec = (nm, str(area_map.get(new) or "").strip())
+                if rec not in self._repointed:
+                    self._repointed.append(rec)
+                logger.info("[执行] 目标离线·同名改指 %s → %s（%s%s）", old, new, nm,
+                            f"·{rec[1]}" if rec[1] else "")
         except Exception:  # noqa: BLE001 改指故障=不改（闸仍在后面兜底）
             logger.exception("[执行] 离线同名改指异常（不动目标）")
 
@@ -423,10 +441,15 @@ class Executor:
             e for e in (raw or []) if isinstance(e, str) and "." in e]
         if not eids:
             return "", ""
-        if any(str(e).split(".", 1)[0] not in _LEG_NOOP_DOMAINS for e in eids):
-            return "", ""
+        # v1.1.17 收口：缺台判定**先于**域闸——与 target 形同序（那边 missing 也在域闸
+        # 之前）。旧序下 cover/climate 腿根本走不到这段，同一条"快照里没这台"的事实，
+        # entity_id 形静默成功、target 形点名，两条路两种口径。
+        # 域闸仍只管"空操作"：非 on/off 域状态词不同（open/closed、hvac_action…），
+        # 一律不判 noop，防把"开到头"说成没动。
         if any(e not in states for e in eids):
             return "missing", ""
+        if any(str(e).split(".", 1)[0] not in _LEG_NOOP_DOMAINS for e in eids):
+            return "", ""
         rows, nm = [], ""
         for e in eids:
             ent = states[e] or {}
@@ -445,11 +468,15 @@ class Executor:
         措辞只陈述**目标替换**这件事（"离线 / 已改指同名的另一台"），不陈述成败——
         失败支的"抱歉"照旧由本句给出，注不得替它宣称办妥。按 run 复位，
         上一句的留痕不得粘到下一句。
+        v1.1.17：改指目标有区域时一并念出（同名两台靠名字分不出房间，不报区域
+        等于让用户以为动的是他说的那间）；区域未知则不加，绝不编。
         """
         if not self._repointed:
             return ok, reply
-        names = "、".join(dict.fromkeys(self._repointed))
-        note = f"（注：「{names}」离线，已改指同名的另一台）"
+        segs = []
+        for nm, area in dict.fromkeys(self._repointed):
+            segs.append(f"「{nm}」离线，已改指同名的另一台" + (f"，在{area}" if area else ""))
+        note = "（注：" + "；".join(segs) + "）"
         return ok, (reply.rstrip() + note if reply else note)
 
     def _alias_candidates(self, states: dict, names: list[str]) -> list:
@@ -545,6 +572,13 @@ class Executor:
                 result = await self.ha.handle_intent(name, wire_args(name, args))
             if not result.get("success"):
                 raw_err = str(result.get("error") or result.get("message") or "")
+                # v1.1.17：逐台回执带原因且**全部失败**时，用逐台真原因——集成的顶层
+                # `error` 常为空（AdjustDeviceAttribute 全失败只回 success=false），
+                # 于是 v1.1.4 的动机案（"does not support set_cover_position"）被泛化
+                # 成"换个说法再试"，用户永远不知道是设备能力不足。
+                _ok, _bad, _errs = self._receipt([result])
+                if _bad and not _ok and _errs:
+                    raw_err = _errs[0]
                 self.last_run = {"steps": len(steps), "applied": len(results),
                                  "indeterminate": is_indeterminate(raw_err)}
                 reply = zh_error(raw_err, klar=(src == "klar"))
@@ -575,8 +609,10 @@ class Executor:
         if ok_n == 0 and bad_n > 0:
             why = errs[0] if errs else "设备没接受这条指令"
             self.last_run = {"steps": len(steps), "applied": 0, "indeterminate": False}
-            reply = "抱歉，" + zh_error(why, klar=plan.source == "klar")
-            reply = reply if reply.startswith("抱歉") else "抱歉，" + reply
+            # v1.1.17：zh_error 自带"抱歉，"字头，旧写法再拼一次 ⇒ 播报成「抱歉，抱歉，…」。
+            reply = zh_error(why, klar=plan.source == "klar")
+            if not reply.startswith("抱歉"):
+                reply = "抱歉，" + reply
             logger.info("[执行] %s %s → 逐实体全失败 | %s", plan.intent, plan.args, reply)
             return self._named(False, reply)
         partial = f"（另有 {bad_n} 台没成功）" if bad_n > 0 else ""
@@ -701,13 +737,20 @@ class Executor:
 
     @staticmethod
     def _receipt(results: list) -> tuple:
-        """逐实体回执：(成功台数, 失败台数, 去重失败原因)。
+        """逐实体回执：(成功行数, **失败台数**, 去重失败原因)。
 
-        只在 result 真带了 per-entity `states` 时才计数——没有该键（HA 内置意图
-        通道、老返回形态）就退回原有顶层 success 判定，不凭空判失败。永不抛。
+        只在 result 真带了 per-entity `states`/`results` 时才计数——没有该键（HA 内置
+        意图通道、老返回形态）就退回原有顶层 success 判定，不凭空判失败。永不抛。
+
+        失败按**台**去重（v1.1.17）：行是实体级、一台设备可能占多行，旧口径把行数直接
+        念成"另有 N 台没成功"。键取 (area,name)（SetDeviceMode 形带 area，最精确）或
+        name（AdjustDeviceAttribute 形只有 name，同名跨区会并成一台——已知近似，
+        比把行当台更贴近事实）；两键皆缺的行各自独立计数。
         """
         ok_n = bad_n = 0
         errs: list[str] = []
+        bad_keys: list[str] = []
+        anon = 0
         for r in results or []:
             if not isinstance(r, dict):
                 continue
@@ -726,10 +769,17 @@ class Executor:
                 if st.get("success"):
                     ok_n += 1
                 else:
-                    bad_n += 1
+                    nm = str(st.get("name") or "").strip()
+                    ar = str(st.get("area") or "").strip()
+                    if nm:
+                        bad_keys.append(f"{ar}|{nm}" if ar else nm)
+                    else:
+                        anon += 1
+                        bad_keys.append(f"#{anon}")
                     e = str(st.get("error") or "").strip()
                     if e and e not in errs:
                         errs.append(e)
+        bad_n = len(dict.fromkeys(bad_keys))
         return ok_n, bad_n, errs
 
     # ── klar grounded 步骤 → 直调服务映射 ────────────────────────

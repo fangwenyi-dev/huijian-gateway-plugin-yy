@@ -46,6 +46,41 @@ LAYER_GZIP = "application/vnd.oci.image.layer.v1.tar+gzip"
 CHUNK = 2 * 1024 * 1024   # 降级链路实测 8MB 块 300s 写不完（<30KB/s）；2MB 块=同速下 67s 稳过
 UA = {"User-Agent": "acr-transcode/1.0 (huijian_voice CI)"}
 
+# ── 墙钟预算（v1.1.17 收口）───────────────────────────────────────
+# 实测（v1.1.14 那轮逐块时间戳）：跨境中位 ≈37.9KB/s ⇒ 2MB 块 ≈54s。结构性坑是
+# **单个卡死块的最坏代价**＝3 轮 × 6 次 × 300s socket 超时 = 5400s，与 CI 的 90min
+# job 预算同量级 ⇒ 一块就能把整次发版耗死（run 36249197066：90.1min 被硬杀，日志
+# 停在 layer6 54.5/76.5MB，两头都看不出"是卡在某个块上"）。
+# 现加**推送阶段墙钟预算**：到期即抛具名 RuntimeError 退出，把失败原因留在日志里，
+# 也把 job 预算让给后续重试（`gh run rerun --failed` 可只补没传完的层）。
+# 默认 60min：健康轮整链 ~19min、job 上限 90min，留 ≥25min 余量（超期最多再多一次
+# socket 超时 300s 才轮到判断点）。操作员可用 ACR_PUSH_DEADLINE_S 覆盖。
+PUSH_DEADLINE_S = float(os.environ.get("ACR_PUSH_DEADLINE_S", "3600"))
+_deadline_at = 0.0        # 0＝未进入推送阶段（不施加预算；monotonic 基准）
+
+
+def push_deadline_reset(seconds=None):
+    """进入推送阶段时调用一次：从现在起 N 秒内必须推完（None=模块默认）。"""
+    global _deadline_at
+    _deadline_at = time.monotonic() + float(
+        PUSH_DEADLINE_S if seconds is None else seconds)
+
+
+def push_deadline_clear():
+    """退出推送阶段/测试收尾：撤销预算（不影响后续 manifest 等调用）。"""
+    global _deadline_at
+    _deadline_at = 0.0
+
+
+def _deadline_hit() -> bool:
+    return _deadline_at > 0 and time.monotonic() >= _deadline_at
+
+
+def _deadline_err() -> RuntimeError:
+    return RuntimeError(
+        f"ACR 推送墙钟预算耗尽（{PUSH_DEADLINE_S:.0f}s）：链路过慢或卡死，"
+        f"主动退出交上层重试（不再等 CI 硬杀）")
+
 
 def _cred(env_name, file_path):
     """CI：Secrets→env。本地：~/.acr_user / ~/.acr_pass（600 权限凭证文件，
@@ -172,6 +207,8 @@ class Registry:
         h = dict(headers or {})
         last = None
         for i in range(attempts):
+            if _deadline_hit():             # 推送阶段墙钟预算：到期即退（见 PUSH_DEADLINE_S）
+                raise _deadline_err()
             c = self._conn()
             try:
                 t = self.token(repo, list(actions), fresh=(i > 0))
@@ -210,10 +247,15 @@ def push_blob(dst: Registry, repo: str, digest: str, data: bytes, label: str):
     except urllib.error.HTTPError as e:
         if e.code != 404:
             raise
-    # blob 级重启（run 35676700243 实证）：跨境链路把已建立的 upload session
-    # 掐掉后，session 级重试（复用旧 Location）全部秒败 EOF——服务端只认新
-    # session。整块失败即重 POST 开新 session 从 0 重传，最多 3 轮。
+    # blob 级重启（run 35676700243 当时的判断）：跨境链路掐 session 后复用旧
+    # Location 秒败 EOF，于是整块失败即重 POST 开新 session 从 0 重传，最多 3 轮。
+    # v1.1.17 审计更正：该前提**未被后续证据支持**——两版发布的日志里"第N/3轮
+    # 整体失败"触发 0 次，而 run 35681170094 里同一 session/同一 Location 在三次
+    # SSL 异常后照样续传成功（真正救场的是 request() 的 fresh-token 重试）。保留
+    # 这一层是兜底（换 session 至少不会更糟），但**不要再把它当根因**。
     for round_no in range(1, 4):
+        if _deadline_hit():                 # 轮起点复检：别让 3 轮把预算撑爆
+            raise _deadline_err()
         try:
             if _push_blob_once(dst, repo, digest, data, label):
                 return
@@ -285,28 +327,32 @@ def cmd_transcode(a):
 
     log(f"源 {a.src_repo}@{a.src_ref[:19]}: {len(man['layers'])} 层，config {len(cfg_bytes)}B")
     new_layers = []
-    for i, (layer, want) in enumerate(zip(man["layers"], diff_ids)):
-        raw, _ = src.get(f"/v2/{a.src_repo}/blobs/{layer['digest']}", a.src_repo,
-                         binary=True, timeout=600)
-        mt = layer.get("mediaType", "")
-        if mt.endswith("+zstd") or raw[:4] == ZSTD_MAGIC:
-            plain = zstd_decompress(raw)
-            data = gzip.compress(plain, mtime=0)   # 确定性重压缩
-            got = sha256_hex(plain)
-            if got != want:
-                sys.exit(f"层{i} 解压 sha256={got[:20]}… ≠ config.diff_ids {want[:20]}…（层损坏/非标准帧）")
-            media = LAYER_GZIP
-        elif mt.endswith("+gzip") or raw[:2] == GZIP_MAGIC:
-            data, media = raw, layer.get("mediaType") or "application/vnd.oci.image.layer.v1.tar+gzip"
-        else:
-            sys.exit(f"层{i} 未知压缩形态 mediaType={mt!r}，拒绝盲转")
-        ann = layer.get("annotations")
-        nl = {"mediaType": media, "digest": sha256_hex(data), "size": len(data)}
-        if ann:
-            nl["annotations"] = ann
-        new_layers.append(nl)
-        push_blob(dst, a.dst_repo, nl["digest"], data, f"layer{i} {len(raw)//2**20}MB→{len(data)//2**20}MB")
-        del raw, data
+    push_deadline_reset()          # 推送阶段墙钟预算起算（见 PUSH_DEADLINE_S）
+    try:
+        for i, (layer, want) in enumerate(zip(man["layers"], diff_ids)):
+            raw, _ = src.get(f"/v2/{a.src_repo}/blobs/{layer['digest']}", a.src_repo,
+                             binary=True, timeout=600)
+            mt = layer.get("mediaType", "")
+            if mt.endswith("+zstd") or raw[:4] == ZSTD_MAGIC:
+                plain = zstd_decompress(raw)
+                data = gzip.compress(plain, mtime=0)   # 确定性重压缩
+                got = sha256_hex(plain)
+                if got != want:
+                    sys.exit(f"层{i} 解压 sha256={got[:20]}… ≠ config.diff_ids {want[:20]}…（层损坏/非标准帧）")
+                media = LAYER_GZIP
+            elif mt.endswith("+gzip") or raw[:2] == GZIP_MAGIC:
+                data, media = raw, layer.get("mediaType") or "application/vnd.oci.image.layer.v1.tar+gzip"
+            else:
+                sys.exit(f"层{i} 未知压缩形态 mediaType={mt!r}，拒绝盲转")
+            ann = layer.get("annotations")
+            nl = {"mediaType": media, "digest": sha256_hex(data), "size": len(data)}
+            if ann:
+                nl["annotations"] = ann
+            new_layers.append(nl)
+            push_blob(dst, a.dst_repo, nl["digest"], data, f"layer{i} {len(raw)//2**20}MB→{len(data)//2**20}MB")
+            del raw, data
+    finally:
+        push_deadline_clear()
     push_blob(dst, a.dst_repo, cfg_dgst, cfg_bytes, "config")
     nm = {"schemaVersion": 2, "mediaType": MEDIA_MANIFEST,
           "config": dict(man["config"]), "layers": new_layers}

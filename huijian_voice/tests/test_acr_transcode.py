@@ -253,3 +253,37 @@ def test_push_blob_session_death_restarts_with_new_session():
     patches = [p for m, p in s.calls if m == "PATCH"]
     assert all("/u/new" in p for p in patches[2:]), "重启轮 PATCH 走新 session"
     assert s.calls[-1][0] == "PUT"
+
+
+# ── v1.1.17 收口：墙钟预算自洽（单块卡死不得耗死整个发版）──────────────
+def test_push_deadline_is_within_job_budget():
+    """预算关系钉：墙钟预算必须显著小于 CI job 预算，且小于"单块卡死"的最坏代价
+    （3 轮 × 6 次 × 300s socket 超时 = 5400s）——否则就是 v1.1.14 那轮的形状：
+    90.1min 被 CI 硬杀、日志停在 layer6 54.5/76.5MB。"""
+    assert 0 < ac.PUSH_DEADLINE_S <= 75 * 60, ac.PUSH_DEADLINE_S
+    assert 3 * 6 * 300 > ac.PUSH_DEADLINE_S, "预算够不到最坏单块代价＝截断不了卡死"
+
+
+def test_deadline_expired_aborts_before_any_attempt():
+    """行为钉：预算已耗尽 ⇒ 一次请求都不发就抛具名 RuntimeError（不再无限重试）。"""
+    ac.push_deadline_reset(0.0)
+    try:
+        r, conn, _ = _reg(["EIO"] * 40)
+        with pytest.raises(RuntimeError, match="墙钟预算"):
+            r.request("PATCH", "/u/1?stage=1", "x", b"chunk", headers={})
+        assert conn.reqs == [], "预算耗尽后仍发了请求"
+    finally:
+        ac.push_deadline_clear()
+
+
+def test_deadline_ample_keeps_old_retry_behaviour():
+    """反向钉：预算充足 ⇒ 旧重试语义一字不动（穷尽 attempts 后抛原错误，不抛预算错）。"""
+    ac.push_deadline_reset(3600)
+    try:
+        r, conn, _ = _reg(["EIO"] * 40)
+        with pytest.raises(Exception) as ei:      # noqa: PT011 具体类型由旧语义决定
+            r.request("PATCH", "/u/1?stage=1", "x", b"chunk", headers={})
+        assert "墙钟预算" not in str(ei.value)
+        assert len(conn.reqs) == 6, "attempts 语义被改（旧 6 次）"
+    finally:
+        ac.push_deadline_clear()

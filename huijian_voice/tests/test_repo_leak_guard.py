@@ -75,6 +75,65 @@ def _scan_blob(blob: bytes):
     return sorted(name for name, rx in HARD_PATTERNS.items() if rx.search(blob))
 
 
+def test_no_secret_anywhere_in_git_history():
+    """**全历史对象扫**（v1.1.17 补）：上面几钉扫的是"索引 ∩ 工作树"，永远抓不到
+    "已经提交过的凭据"——真令牌那次恰好在从未入库的仓根脚本 `/_field_topology.py`
+    里，历史干净是**运气**，不是这道闸的功劳。这里遍历对象库里每个 blob，命中
+    HARD_PATTERNS 即红（含已删除文件、已改历史正文——只要还在对象库里就查）。
+
+    豁免面只有一处：`tests/` 下的 blob（仓内既有约定：测试夹具里的 192.168.x /
+    合成手机号属正常，见上方 PRIVATE_IP 注释）。夹具一旦挪进交付面照样红。
+    元钉：扫到的 blob 数必须成规模（防解析器退化/静默扫 0 个的真空绿）。
+    """
+    paths = _history_blob_paths()
+    assert len(paths) >= 100, f"历史扫描疑似退化（只解析到 {len(paths)} 个 blob）"
+    inp = ("\n".join(paths) + "\n").encode()
+    proc = subprocess.run(["git", "cat-file", "--batch"], cwd=REPO,
+                          input=inp, capture_output=True)
+    if proc.returncode != 0:
+        pytest.fail(f"守卫失去牙齿：cat-file --batch 失败 rc={proc.returncode} "
+                    f"{proc.stderr[:200]!r}")
+    buf, pos, hits, scanned = proc.stdout, 0, {}, 0
+    while pos < len(buf):
+        nl = buf.index(b"\n", pos)
+        header = buf[pos:nl].split()
+        if len(header) != 3:                     # missing/坏头：到此为止
+            break
+        sha, kind, size = header[0].decode(), header[1], int(header[2])
+        body = buf[nl + 1:nl + 1 + size]
+        pos = nl + 1 + size + 1                  # 跳对象尾随 \n
+        if kind != b"blob":                      # 只扫文件内容（bytes 比 bytes）：
+            continue                             # commit/tree 的哈希数字串会假阳（实测三例）
+        path = paths.get(sha, "")
+        if path.startswith(("tests/", "huijian_voice/tests/")):
+            continue
+        scanned += 1
+        for rule in _scan_blob(body):
+            hits.setdefault(rule, []).append(path or sha[:12])
+    assert scanned >= 100, f"实际扫描 blob 数过少（{scanned}）——解析或过滤失灵"
+    assert not hits, f"历史对象里命中硬规则：{ {k: v[:5] for k, v in hits.items()} }"
+
+
+def _history_blob_paths() -> dict:
+    """全历史 blob sha → 路径（首次出现者）。rev-list --objects --all 覆盖所有
+    分支/标签可达对象；sha 无路径者（如历史中间态）路径留空，照样扫。
+
+    encoding 显式 utf-8：Windows 上 text=True 会用 GBK 解 git 输出，
+    对象名含中文时 reader 线程 UnicodeDecodeError → stdout 变 None（本机实测）。"""
+    proc = subprocess.run(["git", "rev-list", "--objects", "--all"], cwd=REPO,
+                          capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
+    if proc.returncode != 0:
+        pytest.fail(f"守卫失去牙齿：rev-list 失败 rc={proc.returncode} "
+                    f"{proc.stderr.strip()[:200]}")
+    out: dict = {}
+    for line in proc.stdout.splitlines():
+        sha, _, path = line.partition(" ")
+        if sha and sha not in out:
+            out[sha] = path
+    return out
+
+
 def test_hard_secret_rules_are_nonempty():
     """元钉：规则表被清空/注释掉时本测试红，避免"守卫静默退化成永真"。"""
     assert len(HARD_PATTERNS) >= 4, "泄漏规则表被削减"

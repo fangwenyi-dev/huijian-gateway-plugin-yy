@@ -83,10 +83,22 @@ for _w, _d in _DEVICE_WORDS.items():
 # 状态疑问判据（v1.1.2 安全闸，fast_path 同调此表——一处判据两档共守）。
 # 「状态词 + 语气尾」收尾＝问句；礼貌请求尾（好吗/可以吗/行吗）已在
 # normalize_polite/_ECHO_TONE 剥除，剥后仍留 吗/没 的就是真问句。
+# v1.1.17 收口（审计实测三处枚举漏，命令档会**真的动设备**）：
+#   ①尾巴后允许跟时间副词与标点——旧表以 $ 直接锚在语气词后，实测
+#     「办公室窗户关了吗现在」「射灯关了吗？」「灯关了没？」全部漏进命令档；
+#   ②补方言尾「不」（「窗户关着不」= 关着吗）。
+# 反向纪律不变：祈使/请求句照旧执行（「…打开好吗」的 吗 已被上游剥掉）。
 STATE_QUESTION_TAIL = re.compile(
     r"(?:开着|开了|开着了|关着|关了|关上|关闭|关好|灭着|灭了|亮着|拉着|拉上|拉下|拉开"
     r"|停着|停了|停止|运行|在运行|插着|锁着|上锁|反锁|开着门)"
-    r"(?:的)?(?:呢|了)?\s*(?:吗|么|没有|没|[?？])\s*$")
+    r"(?:的)?(?:呢|了)?\s*"
+    r"(?:吗|么|没有|没|不|[?？])"
+    r"(?:现在|目前|这会儿|呢)?"
+    r"[\s。，,！!、?？]*$")
+# V 没 V（正反问，口语高频且不依赖标点）：「射灯关没关」「空调开没开」。
+# 只认同一动词的 没/没有 夹心形——不含 没 的复叠（"开开关关"）不在此列。
+STATE_QUESTION_V_NOT_V = re.compile(
+    r"(开|关|亮|灭|锁|停|插)(?:没|没有)\1(?:着|了|上|下)?")
 STATE_QUESTION_ALT = re.compile(
     r"(?:是开着还是关着|是关着还是开着|开着还是关着|关了没有|是不是开着|是不是关着"
     r"|是不是(?:还)?开|是不是(?:还)?关|是否开着|是否关着|有没有开|有没有关"
@@ -96,10 +108,13 @@ STATE_QUESTION_ALT = re.compile(
 
 def is_state_question(text: str) -> bool:
     """状态疑问句判据：命令档必须让路（实测「射灯关了吗」曾被 ^关了 接成
-    TurnDeviceOff，问一句关一次设备），交查询族作答。永不抛。"""
+    TurnDeviceOff，问一句关一次设备）；v1.1.17 补 V没V 与尾巴后置副词/标点。
+    永不抛。"""
     try:
         t = (text or "").strip().rstrip("。！!，,、")
-        return bool(STATE_QUESTION_TAIL.search(t) or STATE_QUESTION_ALT.search(t))
+        return bool(STATE_QUESTION_TAIL.search(t)
+                    or STATE_QUESTION_ALT.search(t)
+                    or STATE_QUESTION_V_NOT_V.search(t))
     except Exception:  # noqa: BLE001 判据故障=不误拦命令（保守放行原链）
         return False
 

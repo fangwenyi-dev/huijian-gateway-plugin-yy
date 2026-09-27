@@ -28,11 +28,13 @@ for i in $(seq 1 600); do
         curl -sf http://127.0.0.1:8002/api/health >/dev/null 2>&1 && { echo "health ok"; }
     fi
     ready=$(curl -sf --max-time 5 http://127.0.0.1:8002/api/health 2>/dev/null \
-        | "$PY" -c 'import json,sys
+        | HJ_LOCK="$ADDON/models.lock.json" "$PY" -c 'import json,os,sys
 try:
     j=json.load(sys.stdin); m=j.get("models_ready") or {}
-    need=["asr_sensevoice_small","tts_melo_zh_en"]  # 运行期主档 need（回落档不主动下载），与 run_e2e.sh 同步维护；v1.1.10 默认 TTS=melo
-    print("yes" if all(m.get(k) for k in need) else "")
+    d=json.load(open(os.environ["HJ_LOCK"], encoding="utf-8"))
+    # v1.1.17：need 集从 models.lock 派生（default_provider:true），不再写死模型键
+    need=[k for k,v in d.items() if isinstance(v,dict) and v.get("default_provider")]
+    print("yes" if need and all(m.get(k) for k in need) else "")
 except Exception: print("")' | tr -d '\r' || true)
     [ "$ready" = "yes" ] && break
     sleep 2

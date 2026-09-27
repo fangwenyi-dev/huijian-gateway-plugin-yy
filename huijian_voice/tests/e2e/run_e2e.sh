@@ -40,15 +40,18 @@ curl -sf http://127.0.0.1:8002/api/health >/dev/null || { diag "health 超时"; 
 echo "==== 4. 等运行期所需模型真下载就绪（主档 ASR+Kokoro ≈1.4GB，给 25 分钟）===="
 # v4.2 教训（run 34364440982 实红 25min 超时）：等值集合必须是「运行期 need」，
 # 不能是 lock 全清单——paraformer 已降兼容回落档，新装根本不会主动下载它，
-# all(models_ready.values()) 恒 false。改键/换默认主档时此 need 必须同步
-# （test_asr_engine::test_e2e_scripts_wait_on_need_not_full_lock 钉死 need 集，
-# 漂移先红）。v1.1.10 默认 TTS=melo ⇒ need 的 TTS 项=kokoro→melo。
+# all(models_ready.values()) 恒 false。
+# v1.1.17：need 集改**从 models.lock 派生**（default_provider:true 的键）——写死模型键
+# 的那版换默认档必漂（test_asr_engine::test_e2e_need_is_derived_from_lock_not_hardcoded
+# 钉死：脚本里不得再出现任何模型键字面量）。
 for i in $(seq 1 300); do
-    R=$(curl -sf --max-time 5 http://127.0.0.1:8002/api/health | python3 -c \
-        'import json,sys
+    R=$(curl -sf --max-time 5 http://127.0.0.1:8002/api/health | \
+        HJ_LOCK="$ADDON/models.lock.json" python3 -c \
+        'import json,os,sys
 j=json.load(sys.stdin); m=j.get("models_ready") or {}
-need=["asr_sensevoice_small","tts_melo_zh_en"]
-print("yes" if all(m.get(k) for k in need) else "")' \
+d=json.load(open(os.environ["HJ_LOCK"], encoding="utf-8"))
+need=[k for k,v in d.items() if isinstance(v,dict) and v.get("default_provider")]
+print("yes" if need and all(m.get(k) for k in need) else "")' \
         2>/dev/null | tr -d '\r' || true)
     [ "$R" = "yes" ] && break
     sleep 5
