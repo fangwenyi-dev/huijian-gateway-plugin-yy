@@ -242,3 +242,76 @@ def test_gate_is_anchorable(fp, monkeypatch):
     from core.nlu import fast_path as F
     assert getattr(F, "STATE_QUESTION_TAIL", None) is not None, "疑问尾表被删=闸失效"
     assert F.STATE_QUESTION_TAIL.search("射灯关了吗")
+
+
+# ── v1.1.18 复审：查询族必须按"用户说的是哪台"回答（线上实锤）──────────
+DECOY = [
+    {"entity_id": "light.kong_tiao_indicator", "state": "off",
+     "attributes": {"friendly_name": "办公室空调 Indicator Light"}},
+    {"entity_id": "light.ban_gong_shi_she_deng", "state": "on",
+     "attributes": {"friendly_name": "办公室射灯"}},
+]
+
+
+def test_state_answer_respects_spoken_device():
+    """问「办公室射灯」不得答成同域的别的灯（线上实测答成了空调指示灯）。"""
+    qz = QueryZone(_HaWith(DECOY), Settings(Path(os.environ["HUIJIAN_DATA"]) / "q18.json"))
+    ans = asyncio.run(qz.answer("办公室射灯现在什么状态"))
+    assert ans and "射灯" in ans, ans
+    assert "Indicator" not in ans, f"答成了别的灯：{ans}"
+
+
+def test_state_answer_area_mismatch_names_where():
+    """说的区域里没有、全屋按名有 ⇒ 如实说"本区没有"并报实体名（自带房间）。"""
+    qz = QueryZone(_HaWith(DECOY), Settings(Path(os.environ["HUIJIAN_DATA"]) / "q18b.json"))
+    ans = asyncio.run(qz.answer("客厅射灯关了吗"))
+    assert ans, '有实体可答却回了空（线上表现为「这句话我还不会」）'
+    assert "没有叫" in ans and "办公室射灯" in ans, ans
+
+
+def test_state_answer_absent_device_says_not_found():
+    """全屋都没有这个名字 ⇒ 如实说没找到（不再掉兜底"我还不会"）。"""
+    qz = QueryZone(_HaWith(DECOY), Settings(Path(os.environ["HUIJIAN_DATA"]) / "q18c.json"))
+    ans = asyncio.run(qz.answer("卧室吊灯关了吗"))
+    assert ans and "没找到" in ans, ans
+
+
+class _HaWith:
+    """按 find_entities(area, domains) 过滤的只读替身。"""
+
+    _areas = {}          # QueryZone._find_area 读 ha._areas（真客户端有）
+
+    def __init__(self, ents):
+        self.ents = ents
+
+    async def find_entities(self, area="", domains=(), name_contains=""):
+        out = []
+        for e in self.ents:
+            dom = e["entity_id"].split(".", 1)[0]
+            if domains and dom not in domains:
+                continue
+            if area and area not in str((e.get("attributes") or {}).get("friendly_name") or ""):
+                continue
+            out.append(e)
+        return out
+
+
+def test_count_answer_keeps_the_number():
+    """计数文案必须带数字：线上实测念成「办公室的盏灯都关着呢」（数字丢了）。"""
+    from core.nlu.query import say_name            # noqa: F401
+    ents = [{"entity_id": "light.a", "state": "off",
+             "attributes": {"friendly_name": "办公室射灯"}},
+            {"entity_id": "light.b", "state": "off",
+             "attributes": {"friendly_name": "办公室台灯"}}]
+    qz = QueryZone(_HaWith(ents), Settings(Path(os.environ["HUIJIAN_DATA"]) / "q18d.json"))
+    ans = asyncio.run(qz.answer("办公室有多少灯开着"))
+    assert ans and "2盏灯" in ans, ans
+
+
+def test_display_name_strips_ascii_tail_only_with_chinese():
+    """念名清洗：中文名带英文/十六进制尾巴要剥，纯英文名与前导英文名不动。"""
+    from core.nlu.query import say_name
+    assert say_name("办公室空调 Air Conditioner") == "办公室空调"
+    assert say_name("开窗器 123f-020A") == "开窗器"
+    assert say_name("HUIJIAN-BB28 麦克风开关") == "HUIJIAN-BB28 麦克风开关"
+    assert say_name("Air Conditioner") == "Air Conditioner"

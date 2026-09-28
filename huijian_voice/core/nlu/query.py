@@ -54,6 +54,22 @@ _DEVICE_WORDS = {
 _CLASS_WORDS = tuple(sorted(_DEVICE_WORDS, key=len, reverse=True))
 
 # 播报量词（计数/状态句里"3 __"的空）。表外类别回退"个设备"。
+_ASCII_TAIL_RE = re.compile(r"[\s\-_·]*[A-Za-z0-9][A-Za-z0-9\-_.:() ]*$")
+
+
+def say_name(raw) -> str:
+    """播报用设备名：剥掉**尾部**纯 ASCII 尾巴，只在名字确实含中文时才剥。
+
+    v1.1.18 线上实测的念名噪音：「办公室空调 Air Conditioner关着」「开窗器 123f-020A
+    开窗器关着」——注册表 friendly_name 自带英文型号/十六进制后缀，照念像机器。
+    前导英文名不受影响（「HUIJIAN-BB28 麦克风开关」原样保留）。
+    """
+    t = str(raw or "").strip()
+    if not t or not any("一" <= c <= "鿿" for c in t):
+        return t
+    return _ASCII_TAIL_RE.sub("", t).strip() or t
+
+
 _CLASS_NOUN = {"灯": "盏灯", "筒灯": "盏灯", "射灯": "盏灯", "灯带": "条灯带",
                "吸顶灯": "盏灯", "台灯": "盏灯", "吊灯": "盏灯", "主灯": "盏灯",
                "阅读灯": "盏灯", "镜前灯": "盏灯", "感应灯": "盏灯", "夜灯": "盏灯",
@@ -330,13 +346,42 @@ class QueryZone:
         u = str(attrs.get("unit_of_measurement") or "").strip().lower()
         return (not u) or u in allow
 
+    @staticmethod
+    def _by_name(ents: list, word) -> list:
+        """按"用户说的是哪台"过滤实体（v1.1.18 复审，线上实锤驱动）。
+
+        病灶（办公 .91 线上，1.1.18 实测）：问「办公室射灯现在什么状态」，答的是
+        「办公室空调 Indicator Light关着」——旧实现只按 **区域+域** 取前 3 台，
+        **完全不看用户说的名字**（`_attr_answer` 同病）。名字全等优先（用户说的就是
+        实体名），其次互含（集成回的名字常更长/更短，如「平开窗 开窗器」）；都不中
+        返回空表，交调用方如实处理——宁可不答，绝不答成别的设备。
+        """
+        if not word:
+            return list(ents)
+        w = str(word).strip()
+        if not w:
+            return list(ents)
+
+        def fn(e):
+            return str(((e or {}).get("attributes") or {}).get("friendly_name") or "").strip()
+
+        exact = [e for e in ents if fn(e) == w]
+        if exact:
+            return exact
+        return [e for e in ents if w in fn(e) or (fn(e) and fn(e) in w)]
+
     async def _attr_answer(self, area, dev_word: str, attr_word: str) -> Optional[str]:
         domains = _DEVICE_WORDS.get(dev_word, ())
         if not domains:
             return None        # 词表外设备词不猜域（find_entities 空 domains=全量，必错）
         ents = await self.ha.find_entities(area=area or "", domains=domains)
+        ents = self._by_name(ents, dev_word)          # v1.1.18：先认"用户说的是哪台"
         if not ents:
-            return None
+            wider = self._by_name(await self.ha.find_entities(area="", domains=domains),
+                                 dev_word)
+            if not wider:
+                return f"没找到叫「{dev_word}」的设备。" if dev_word else None
+            ents = wider                              # 全屋按名找到：答案里会带实体名（自带房间）
         keys = self._ATTR_KEYS.get((dev_word, attr_word)) or ()
         if not keys:
             canon = _DOMAIN_CANON.get(domains)
@@ -357,13 +402,13 @@ class QueryZone:
             if silent:
                 nm = (silent[0].get("attributes") or {}).get("friendly_name") or \
                     silent[0]["entity_id"]
-                return f"{nm}现在是关着的，没有{attr_word}读数。"
+                return f"{say_name(nm)}现在是关着的，没有{attr_word}读数。"
             # unavailable = 实体离线，同样如实说明而不是不回话
             dead = [e for e in ents if str(e.get("state", "")) == "unavailable"]
             if dead:
                 nm = (dead[0].get("attributes") or {}).get("friendly_name") or \
                     dead[0]["entity_id"]
-                return f"{nm}现在不在线，读不到{attr_word}。"
+                return f"{say_name(nm)}现在不在线，读不到{attr_word}。"
             return None
         attrs = ent.get("attributes") or {}
         val = next((attrs[k] for k in keys if attrs.get(k) is not None), None)
@@ -411,9 +456,10 @@ class QueryZone:
         if not on_ents:
             if not ents:
                 return None               # 该区域/类别压根没设备：不猜，让位上层
-            return f"{prefix}{noun}都关着呢。"
-        names = [((e.get("attributes") or {}).get("friendly_name") or e.get("entity_id", ""))
-                 for e in on_ents]
+            # v1.1.18：补上数量——旧文案漏了数字，线上念成「办公室的盏灯都关着呢」
+            return f"{prefix}{len(ents)}{noun}都关着呢。"
+        names = [say_name((e.get("attributes") or {}).get("friendly_name")
+                          or e.get("entity_id", "")) for e in on_ents]
         if len(on_ents) <= 3:
             return f"{prefix}开着{len(on_ents)}{noun}：" + "、".join(names) + "。"
         return f"{prefix}开着{len(on_ents)}{noun}，比如{'、'.join(names[:2])}。"
@@ -559,8 +605,23 @@ class QueryZone:
         domains = _DEVICE_WORDS.get(device_word or "", ())
         ents = await self.ha.find_entities(area=area or "", domains=domains or ())
         ents = [e for e in ents if e["entity_id"].split(".")[0] in (domains or ("light", "climate", "fan", "cover", "humidifier", "switch"))]
+        ents = self._by_name(ents, device_word)       # v1.1.18：旧实现完全不看名字（线上答成了别的灯）
         if not ents:
-            return None
+            wider = self._by_name(
+                [e for e in await self.ha.find_entities(area="", domains=domains or ())
+                 if e["entity_id"].split(".")[0] in (domains or ("light", "climate", "fan", "cover", "humidifier", "switch"))],
+                device_word)
+            if not wider:
+                return f"没找到叫「{device_word}」的设备。" if device_word else None
+            if area:
+                # 说的区域里没有这台，但全屋按名有 → 如实说明"本区没有"+ 实体名自带房间
+                e0 = wider[0]
+                nm0 = (e0.get("attributes") or {}).get("friendly_name") or e0["entity_id"]
+                st0 = str(e0.get("state", ""))
+                cn0 = {"on": "开着", "off": "关着", "open": "开着", "closed": "关着"}.get(
+                    st0, "现在不在线" if st0 == "unavailable" else f"处于 {st0}")
+                return f"{area}没有叫「{device_word}」的设备；{nm0}{cn0}。"
+            ents = wider
         on_words = ("on", "open", "heating", "cooling", "auto", "fan_only", "dry", "heat_cool", "eco")
         states_cn = {"on": "开着", "off": "关着", "open": "开着", "closed": "关着", "opening": "正在开", "closing": "正在关",
                      "heat": "制热中", "cool": "制冷中", "dry": "除湿中", "fan_only": "送风中", "auto": "自动模式", "idle": "待机"}
@@ -568,6 +629,6 @@ class QueryZone:
         for e in ents[:3]:
             st = str(e.get("state", ""))
             cn = states_cn.get(st, "开着" if st in on_words else f"处于 {st}")
-            nm = (e.get("attributes") or {}).get("friendly_name") or e["entity_id"]
+            nm = say_name((e.get("attributes") or {}).get("friendly_name") or e["entity_id"])
             lines.append(f"{nm}{cn}")
         return "，".join(lines) + "。" if lines else None
