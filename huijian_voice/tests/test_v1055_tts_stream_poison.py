@@ -501,7 +501,12 @@ def test_cloud_zero_frame_falls_back_and_pins():
     out, e = _collect(eng, "开灯了。")
     # 终态标签含回缀：except 支先写 "local:fallback"，进本地循环时缝成
     # "local:sid28(云回落)"——现场可观测性更好，钉此形状。
-    assert out == [FRAME] and e.get("engine") == "local:sid28(云回落)"
+    # v1.1.21：回落音色取**回落档（本地档）自己的默认**——期望值由 settings 默认档
+    # 现算（旧钉写死 sid28 是"默认档=kokoro"时代的形态；默认档改 melo 后就错了）
+    from core.settings import DEFAULTS as _D
+    from core.tts import _default_sid_for as _dsf
+    _want = f"local:sid{_dsf(_D['tts']['provider'])}(云回落)"
+    assert out == [FRAME] and e.get("engine") == _want, (e.get("engine"), _want)
     assert "truncated" not in e, "本地整段补全了，不是半截口"
     assert eng._cloud_fail_ts > 0, "零帧=失败，开钉扎而非解除"
 

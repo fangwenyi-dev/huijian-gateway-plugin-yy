@@ -123,8 +123,22 @@ def _walk_finite(obj) -> bool:
     return True
 
 
-_DICT_DATA_PATHS = (("nlu", "corrections_extra"), ("spatial", "satellite_areas"),
-                    ("music", "area_entities"))  # music.area_entities：v1.0.64 音乐批
+def _default_dict_paths(node=None, prefix=()):
+    """DEFAULTS 里**默认是 dict** 的路径全集（v1.1.21：硬编码 3 条会漏掉
+    stt.cloud / tts.cloud / nlu.thresholds_override 等装用户数据的 dict 节点，
+    传 null 会被 _repair_nodes 静默复原成默认空值 ⇒ 客户云配置/热词被抹掉）。"""
+    if node is None:
+        from .settings import DEFAULTS as node  # type: ignore[assignment]
+    out = set()
+    for k, v in (node or {}).items():
+        p = prefix + (k,)
+        if isinstance(v, dict):
+            out.add(p)
+            out |= _default_dict_paths(v, p)
+    return out
+
+
+_DICT_DATA_PATHS = tuple(sorted(_default_dict_paths()))   # music.area_entities 等自动在内
 # 同型「装用户数据的 dict」（DEFAULTS 默认 {}），null/[] 过闸同样被 repair 清空——
 # H6 判据按语义族收口而非按报告逐键点名。
 

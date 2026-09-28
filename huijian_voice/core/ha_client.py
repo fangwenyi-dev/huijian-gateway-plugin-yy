@@ -246,7 +246,9 @@ class HAClient:
                                    "读空（本条闩锁至下次成功）: %s", e)
                 else:
                     logger.debug("[HA] states 刷新失败: %s", e)
-            if time.time() - self._reg_ts > self._REG_TTL or not self._areas:
+            # v1.1.21：去掉 `or not self._areas`——空注册表正是"加载失败"的形态，
+            # 无条件重试等于把上一条的退避抹掉（每轮语音都再拉一次）
+            if time.time() - self._reg_ts > self._REG_TTL:
                 await self._load_registries()
 
     @staticmethod
@@ -307,6 +309,9 @@ class HAClient:
         areas, ent_map, alias_map, dc_map, err = await self._rest_registries()
         if areas is None:
             self.last_error = f"registry: ws+rest 均失败（rest: {err}）"
+            # v1.1.21：失败也推进窗口（退避）——旧式不写 _reg_ts ⇒ TTL 一到立刻重试，
+            # 而整段注册表加载持 _lock（最坏 ~110s），每轮语音都会被拖过设备 20s 超时
+            self._reg_ts = time.time()
             return
         self._apply_registries(areas, ent_map, alias_map, dc_map)
 

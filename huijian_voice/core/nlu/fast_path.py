@@ -161,7 +161,9 @@ _ACTION_PATTERNS: list[tuple[re.Pattern, str, Any]] = [
     (re.compile(r"^(?:打开|开|关)(?:到)?一半"), "AdjustDeviceAttribute",
      {"attribute": _ABSOLUTE, "delta": "50"}),
     (re.compile(r"^(调到|调为|调成|温度调到|温度设到|温度设为)\s*(\d+)\s*度"), "AdjustDeviceAttribute", {"attribute": "temperature", "delta": "$2"}),
-    (re.compile(r"^(调到|调为|调成|温度调到|温度设到|温度设为)\s*([零一二三四五六七八九十百]+)\s*度?"), "AdjustDeviceAttribute", {"attribute": "temperature", "delta": "cn:$2"}),
+    # v1.1.21：**必须带"度"**——旧式 `度?` 可选，裸数词被温度档抢走（「把灯调到五十」
+    # 给灯发 temperature=50、「窗帘调到八十」同理）。与上方数字档（要求 度）对齐。
+    (re.compile(r"^(调到|调为|调成|温度调到|温度设到|温度设为)\s*([零一二三四五六七八九十百]+)\s*度"), "AdjustDeviceAttribute", {"attribute": "temperature", "delta": "cn:$2"}),
     (re.compile(r"^(亮度设到|亮度调到|调亮到|调暗到|亮度)\s*(\d+)"), "AdjustDeviceAttribute", {"attribute": "brightness", "delta": "$2"}),
     (re.compile(r"^(亮度调到百分之)\s*([零一二三四五六七八九十百]+)"), "AdjustDeviceAttribute", {"attribute": "brightness", "delta": "cn:$2"}),
     (re.compile(r"^(亮度|调亮到)\s*百分之\s*([零一二三四五六七八九十百]+)"), "AdjustDeviceAttribute", {"attribute": "brightness", "delta": "cn:$2"}),

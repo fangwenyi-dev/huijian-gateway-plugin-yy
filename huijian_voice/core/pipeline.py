@@ -571,9 +571,7 @@ class Pipeline:
         """去重键：**(origin, text)**（v1.1.20）——旧实现只按文本分桶，两颗卫星在
         2s 窗内说同一句时，后说话的那颗被前一颗粒的结果顶掉（自己房间零动作、
         听到别人房间的回答）。"""
-        # 本批未含（有回归）：改为 (origin, text) 会撞两处白盒钉与一条端到端钉，
-        # 转下批把钉一起改完再上——现在保持旧键，行为逐值不变。
-        return text
+        return (origin or "", text)
 
     async def _dedup_gate(self, text: str, origin: str = "") -> Optional[Reply]:
         """契约 §1.4-② 短时去重的成熟形态：
@@ -588,6 +586,12 @@ class Pipeline:
         e = self._last.get(key)
         if e is not None and now - e["first"] < win:
             if e.get("reply") is not None:
+                # v1.1.21：**问句型回复不走去重复述**——重复一句待确认指令时，复述
+                # 不会再挂确认环（只有真跑一遍才会），用户接着说「确认」就被当改口，
+                # 高风险动作（解锁等）静默丢失。放行走正常流程 = 重新挂环。
+                if str(getattr(e["reply"], "source", "") or "").startswith("confirm"):
+                    logger.info("[级联] 去重命中但上轮是问句型回复 → 放行重跑（重挂确认环）: %s", text)
+                    return None
                 logger.info("[级联] 去重命中(%0.1fs 内重复): %s", now - e["first"], text)
                 r0 = e["reply"]
                 return Reply(r0.text, "dedup", r0.ok, end_dialogue=r0.end_dialogue)
@@ -742,7 +746,18 @@ class Pipeline:
                     fb = None
                 if fb is not None:
                     fb = self._apply_context(fb, text, origin)
+                    # v1.1.21：降级同样要过**过宽目标闸与歧义闸**（逐行审计实锤：
+                    # 主路三道里只补了 confirm，`name=客厅` 这类"区域当设备名"的降级
+                    # 计划会直接执行=一次动作打穿整个区域，含开关/门锁）
+                    ob = self._overbroad_area_target(fb)
+                    if ob:
+                        logger.info("[级联] 降级计划过宽目标拦截（%s 全部设备）: %s", ob, fb.args)
+                        return Reply(self._overbroad_say(ob), "clarify", ok=False,
+                                     trace=trace + [f"降级过宽目标拦截:{ob}"])
                     ask = self._confirm_ask(fb, origin)   # 降级计划同样过风险闸
+                    if ask is not None:
+                        return ask
+                    ask = self._ambiguity_ask(fb, origin)  # 多台同名同样先问（v1.1.4 同款）
                     if ask is not None:
                         return ask
                     logger.info("[级联] %s 执行失败 → 降级 %s:%s（%r）",
@@ -875,10 +890,22 @@ class Pipeline:
         if not entity:
             return Reply("先到 设置-音乐 里配置播放端点，我才知道问谁。",
                          "music", ok=False, trace=["music:未配置端点"])
+        # v1.1.21：读不到端点/连不上 HA 时**不再折叠成"没有在放歌"**（假否定，
+        # 还会被计成一次成功）——按与 _music_fail_say 同口径分诊如实说。
+        _ent_none = False
         try:
-            ent = await self.ha.get_state(entity) or {}
+            ent = await self.ha.get_state(entity)
+            if ent is None:
+                _ent_none = True
+                ent = {}
         except Exception:
+            _ent_none = True
             ent = {}
+        if _ent_none:
+            reach = getattr(self.ha, "reachable", True)
+            _why = "连不上 Home Assistant" if not reach else "没读到播放端点（端点可能改名/被删）"
+            return Reply(f"现在读不到播放器的状态——{_why}。", "music", ok=False,
+                         trace=["music:state-unreadable"])
         st = str(ent.get("state") or "")
         attrs = ent.get("attributes") or {}
         title = str(attrs.get("media_title") or "").strip()
@@ -1545,7 +1572,11 @@ class Pipeline:
                       # 类优先 klar），一条链本就可能是混形的。执行层若只看首腿来源，
                       # 次腿的 grounded entity_id 就失去直调（v1.1.15 D6，见
                       # executor.run 的 steps 构造与 _klar_direct 取值处）。
-                      extra_steps=[{"name": p.intent, "args": p.args, "source": p.source}
+                      # v1.1.21：每腿还带自己的**分句原话**——执行层 `_turn_gate`
+                      # 拿整句判窗词时，「打开客厅的灯然后打开卧室窗户」的灯腿会被
+                      # 窗腿的词误拒（该做的不做，实测整链零执行）。
+                      extra_steps=[{"name": p.intent, "args": p.args, "source": p.source,
+                                    "utterance": p.utterance or ""}
                                    for p in plans[1:]])
         ok, speech = await self.executor.run(merged)
         if ok:

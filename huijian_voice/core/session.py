@@ -589,8 +589,13 @@ class LlmSession(BaseSession):
             if gen != self._gen:
                 return    # 已抢占：本句属旧回合，不发（孤儿句会把新回合掐流）
             # data 字段名是客户端硬约束（llm_transport 聚合读 data），勿改
-            if await self.send_json({"type": "text", "state": "sentence_end", "data": sent}):
+            # v1.1.21：只要**发出动作没抛异常**就算已流式——旧式只有 send 返回真才置位，
+            # 3s drain 超时（帧其实已入栈）会被判成"没流式" ⇒ 收尾把整段重发一遍
+            try:
+                await self.send_json({"type": "text", "state": "sentence_end", "data": sent})
                 streamed = True
+            except Exception:  # noqa: BLE001 真没发出去才退回整段重发
+                logger.exception("[LLM] 句帧发送失败（退回整段重发）")
 
         try:
             reply = await asyncio.wait_for(

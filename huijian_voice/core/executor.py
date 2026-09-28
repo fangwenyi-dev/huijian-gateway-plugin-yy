@@ -664,7 +664,17 @@ class Executor:
         lock_notes: list[str] = []           # 锁后置确证未过（见 _lock_unconfirmed）
         anon_missing = 0                     # entity_id 形分句查无此台（E1，无名可点）
         for idx, (name, args, src) in enumerate(steps):
-            gate = self._turn_gate(name, args, plan.utterance or "")
+            # v1.1.21：本步用**副本**——改指（_repoint_offline_twin）会就地写 args，
+            # 旧实现把调用方 plan.args/extra_steps 里的同一份引用改掉（同轮二次 run
+            # 会静默对改指后的目标执行、且丢"已改指"留痕）
+            args = dict(args) if isinstance(args, dict) else args
+            # v1.1.21：本步原话优先（链路逐腿带 utterance）；缺省回落整句原话
+            _utt = plan.utterance or ""
+            if idx > 0:
+                _es = getattr(plan, "extra_steps", None) or []
+                if idx - 1 < len(_es):
+                    _utt = str((_es[idx - 1] or {}).get("utterance") or _utt)
+            gate = self._turn_gate(name, args, _utt)
             if gate is not None:
                 # v1.0.69 根因②：宁可当场如实失败，绝不 area 扇出+谎报成功
                 self.last_run = {"steps": len(steps), "applied": len(results),

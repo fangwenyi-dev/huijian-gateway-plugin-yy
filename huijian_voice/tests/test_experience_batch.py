@@ -173,7 +173,8 @@ def test_dedup_window_anchored_at_first_not_completion():
     arun(p.handle("开灯"))
     r2 = arun(p.handle("开灯"))                         # 窗内 → 复述不重跑
     assert r2.source == "dedup" and len(ex.plans) == 1
-    p._last["开灯"]["first"] = time.time() - 3          # 时间流过（锚在 first）
+    # v1.1.21：去重键＝(origin, text)（handle 无 origin ⇒ ""）——白盒钉同步键形
+    p._last[("", "开灯")]["first"] = time.time() - 3
     r3 = arun(p.handle("开灯"))
     assert r3.source == "t0" and len(ex.plans) == 2     # 出窗重执行
 
@@ -200,7 +201,7 @@ def test_dedup_abandon_on_cancel_frees_waiters():
         p = _pipe(fp=Lane(single=_p("TurnDeviceOn", _tgt())), ex=ex)
         task = asyncio.create_task(p.handle("开灯"))
         await asyncio.sleep(0.02)
-        fut = p._last["开灯"]["fut"]
+        fut = p._last[("", "开灯")]["fut"]            # v1.1.21 键形 (origin, text)
         waiter = asyncio.create_task(asyncio.wait_for(fut, 2))
         task.cancel()
         with pytest.raises(asyncio.CancelledError):

@@ -174,7 +174,7 @@ def test_dedup_propagates_end_flag():
     """去重复述窗口内二说「退下」：旗必须随复述同发（丢旗=该停不停）。"""
     p = object.__new__(Pipeline)
     p.settings = {"dialog.dedup_window_s": 2.0}
-    p._last = {"退下": {"first": __import__("time").time(), "fut": None,
+    p._last = {("", "退下"): {"first": __import__("time").time(), "fut": None,
                         "reply": Reply(const.END_DIALOGUE_SAY, "t0_end", True,
                                        end_dialogue=True)}}
     r = asyncio.run(p._dedup_gate("退下"))

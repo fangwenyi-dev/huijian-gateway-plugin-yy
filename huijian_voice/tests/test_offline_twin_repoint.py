@@ -118,15 +118,22 @@ def test_missing_from_snapshot_still_passes_through():
     assert ok is True, msg
 
 
-def test_entity_id_list_form_repoints_in_place():
-    """entity_id 是列表形时按位替换，顺序与其余目标不变。"""
+def test_entity_id_list_form_repoints_by_position():
+    """entity_id 列表形：**下发按位替换**（顺序与其余目标不变），但**不改调用方计划**。
+
+    v1.1.21 契约变更：旧钉断言"调用方的 args 被就地改写"——那是实现细节而非语义，
+    且副作用真实（同一 plan 再跑会对改指后的目标执行、丢"已改指"留痕）。现改为：
+    断言**实际下发**的目标（svc_calls）按位替换，且调用方 args 原样不动。
+    """
     ha = Ha(states={"light.she_deng": OFFLINE_TWIN,
                     "light.ban_gong_shi_she_deng": GOOD_LAMP,
                     "fan.f": _ent("fan.f", "off", "风扇")})
     args = {"entity_id": ["light.she_deng", "fan.f"]}
     ok, _ = _run(ha, _klar("HassTurnOn", args, "打开客厅的灯和风扇"))
     assert ok is True
-    assert args["entity_id"] == ["light.ban_gong_shi_she_deng", "fan.f"], args
+    sent = [d.get("entity_id") for _, _, d in ha.svc_calls]
+    assert sent == [["light.ban_gong_shi_she_deng", "fan.f"]], sent   # 按位替换、顺序不变
+    assert args["entity_id"] == ["light.she_deng", "fan.f"], "调用方计划被就地改写（v1.1.21 起不允许）"
 
 
 # ── 改指必须在播报里点名（收口批）──────────────────────────────

@@ -475,12 +475,20 @@ def _run_stream(eng):
 
 
 def test_cloud_fallback_forces_default_sid_not_web():
-    """条款③：云失败切回本地=固定默认音色 28（2026-09-19 定案；原 18），web 设定（81）不参与回落。"""
+    """条款③：云失败切回本地 = **回落档自己的默认音色**（web 设定的 81 不参与回落）。
+
+    v1.1.21 契约变更：旧钉写死 `28`——那是"默认档=kokoro"时代的形态，默认档改 melo
+    （单说话人，只有 sid0）后写死的值就是错的。现期望值由 settings 默认档现算，
+    默认档再翻也不会漂。语义未变：回落**不跟 web 配置漂**。
+    """
+    from core.settings import DEFAULTS as _D
+    from core.tts import _default_sid_for as _dsf
+    _sid = _dsf(_D["tts"]["provider"])
     eng, seen = _fb_engine("cloud_openai_compat", 81)
     eng.settings._d["_boom"] = True
     eo = _run_stream(eng)
-    assert seen and all(s == 28 for s in seen), seen
-    assert eo["engine"] == "local:sid28(云回落)"
+    assert seen and all(s == _sid for s in seen), (seen, _sid)
+    assert eo["engine"] == f"local:sid{_sid}(云回落)", eo["engine"]
 
 
 def test_cloud_success_uses_cloud_voice():
