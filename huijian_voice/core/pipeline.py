@@ -37,6 +37,7 @@ from typing import Any, Callable, Coroutine, Optional
 
 from . import const
 from .tts import _SPEED_MAX, _SPEED_MIN      # 语速钳位单点（确认环 TTL 与合成账同源）
+from .nlu.query import is_query_like
 from .nlu.fast_path import (END_DIALOGUE_INTENT, FLAG_ANAPHORA_STRIPPED,
                             FLAG_CHAIN_ANAPHORA, FLAG_PRONOUN_TARGET,
                             TRACE_TAG_CHAIN, TRACE_TAG_CONTEXT,
@@ -307,6 +308,11 @@ def select_primary_plan(fp: Optional[Plan], kl: Optional[Plan],
         if fp.intent in HUIJIAN_ONLY_INTENTS or _mentions_window_device(fp.args):
             return fp
     if kl is not None:
+        # v1.1.17 复审（线上实锤）：**查询句不得由 klar 执行**。疑问闸此前只在字面表
+        # 一侧，引擎支没有 ⇒「客厅射灯关了吗」被落成 HassTurnOff 真关了灯、
+        # 「哪些灯开着」落成 HassTurnOn。判据与字面表共用 is_query_like（单点定义）。
+        if is_query_like(kl.utterance or ""):
+            return None
         # v1.0.55：见 _klar_window_lamp_conflict——句在说窗、klar 却指向
         # 灯/开关时**整条弃用**（返回 None 落级联下层，宁可不执行）。
         if _klar_window_lamp_conflict(kl):

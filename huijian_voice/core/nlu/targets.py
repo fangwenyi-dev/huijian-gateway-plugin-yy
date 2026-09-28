@@ -288,6 +288,10 @@ _VOCAB_STOP = {"开关", "状态", "电量", "信号", "电池", "亮度", "色�
                "待机", "在线", "离线", "主开关", "设置", "传感器", "实体", "慧尖",
                "左", "右", "上", "下", "中", "全部", "全屋"}
 _dyn_vocab: tuple[str, ...] = ()      # 已排序（长在前），整体替换赋值（GIL 原子）
+_dyn_set: frozenset = frozenset()          # 动态词集合（注册表派生的"本家装得下"名字）
+# 近音档 ⑦ 的"装得下"判据（v1.1.17 复审补漏）：本家装了哪些域。空=注册表未同步
+# ⇒ 不施加判据（维持旧行为，宁保守不误伤刚启动的首句话）。
+_installed_domains: frozenset = frozenset()
 
 
 def _name_tokens(friendly: str) -> list[str]:
@@ -341,9 +345,13 @@ def sync_vocab(states: dict, aliases: dict | None = None,
                 per_word.setdefault(t, set()).add(dom)
                 names.add(t)
     global _dyn_vocab, ALL_DEVICES, ALL_SET, _ALL_MIN2, _dyn_domains, _dyn_lookup
+    global _dyn_set, _installed_domains
     # 动态词之间等长平局给**码点序**次键（注册表派生顺序不代表作者意图，但必须可
     # 复现）；静态表与动态词合并时**静态在前**，与 KNOWN_DEVICES 同一确定性判据。
     _dyn_vocab = tuple(sorted(names, key=lambda w: (-len(w), w)))
+    _dyn_set = frozenset(_dyn_vocab)
+    # 本家装了哪些域（近音档 ⑦ 的"装得下"判据用，见 _rescuable_words）
+    _installed_domains = frozenset(d for ds in per_word.values() for d in ds)
     merged = _dedup_keep_order(_STATIC_ORDER + list(_dyn_vocab))
     ALL_DEVICES = tuple(sorted(merged, key=len, reverse=True))
     ALL_SET = frozenset(merged)
@@ -375,8 +383,10 @@ _dyn_lookup: tuple[str, ...] = ()
 
 def clear_vocab() -> None:      # 测试隔离
     global _dyn_vocab, ALL_DEVICES, ALL_SET, _ALL_MIN2, _dyn_areas
-    global _dyn_domains, _dyn_lookup
+    global _dyn_domains, _dyn_lookup, _dyn_set, _installed_domains
     _dyn_vocab = ()
+    _dyn_set = frozenset()
+    _installed_domains = frozenset()
     _dyn_areas = ()
     _dyn_domains = {}
     _dyn_lookup = ()
@@ -666,6 +676,34 @@ def domain_hint(name: str) -> list[str]:
 _RESIVE_NO_GO = ("帘", "纱", "叶")
 
 
+def _admissible(w: str) -> bool:
+    """⑦/泛称两条近音救援路的"本家装得下"判据（v1.1.17 复审补漏）。
+
+    候选可被提出的条件：①注册表尚未同步（冷启动首句/单测面）⇒ 一律放行，行为同旧；
+    ②是注册表派生词（实体名或别名整词/其 token）；③静态通用词的域提示与本家
+    实际装了该域的设备有交集（家里装了灯才允许「泰腾」→台灯）。
+    否则**不得凭空造出本家没有的设备**——「打开摄像机」→洗碗机那整类事故的技术根因
+    就是救援面用了整张静态通用词表，而不是这台 HA 的设备面。
+    """
+    if not _installed_domains or w in _dyn_set:
+        return True
+    hints = domain_hint(w)
+    if hints:                               # 有域提示：本家装了该域才允许（台灯←light）
+        return bool(set(hints) & _installed_domains)
+    # 无域提示的**具体器具名**（音箱/按摩椅/干衣机/浴霸/新风…）：集成端只能靠
+    # "名字全等/包含"解析到实体 ⇒ 本家没这个名字时造出来也执行不了，却会在播报里
+    # 谎称"已经打开音箱了"。一律要求它是本家实有名字（_dyn_set 已在上面放行）。
+    return False
+
+
+# 泛称档（⑥）的近音救援只在该"泛称字族"本家装了时才允许——窗型词在 domain_hint 里
+# 故意没有域提示（帘/纱窗才有一对一硬闸），故不走 _admissible；本家没装任何开窗器
+# 时，「催拉窗」不该被救援成一台不存在的推拉窗。
+_GENERIC_FAMILIES = {"窗": {"cover", "button", "number"},
+                     "灯": {"light"},
+                     "门": {"lock", "cover"}}
+
+
 def _generic_rescue(pre: str, generic: str):
     """泛称字前的残段 pre → 应顶替「pre+泛称」整段的表内标准词；None=不救。"""
     try:
@@ -693,6 +731,9 @@ def _generic_rescue(pre: str, generic: str):
         for cand in ALL_DEVICES:
             if len(cand) != len(word) or not cand.endswith(generic) or cand == word:
                 continue
+            if _installed_domains and not (
+                    _GENERIC_FAMILIES.get(generic, set()) & _installed_domains):
+                return None                 # 本家没装这一族 ⇒ 不救援（同 ⑦ 的收紧）
             if not all("\u4e00" <= c <= "\u9fff" for c in cand):
                 continue
             if any(c in cand for c in _RESIVE_NO_GO):
@@ -837,9 +878,19 @@ def parse_target(raw: str, action_match=None) -> tuple[str | None, str | None, i
         try:
             from pypinyin import lazy_pinyin
             py_raw = "".join(lazy_pinyin(stripped))
+            # v1.1.17 复审收口（换机制，不再堆禁词）：⑦ 只能在**本家装得下的设备**里
+            # 做近音救援。旧形态扫整张静态通用词表（数百词），于是家里根本没有洗碗机
+            # 也能把「打开摄像机」糊成 dishwasher 并被集成真的执行掉（实测 20+ 例：
+            # 摄像机/相机/体温计→洗碗机、伸缩→门锁、信封→新风、便是→电视、中等→筒灯…）。
+            # 判据：注册表已同步时，候选必须①是动态词（实体名/别名整词或其 token），
+            # 或②静态词的域提示与本家装了的域有交集——⑦ 的本职本来就是"把听歪的本机
+            # 设备名捞回来"（「催拉窗」→「推拉窗」、家里装了灯才允许「泰腾」→台灯）。
+            # 未同步（_installed_domains 空：冷启动首句/单测）⇒ 不施加判据，行为同旧。
             best = None  # (dist, -len(d), d)
             for d in ALL_DEVICES:
                 if len(d) < 2:
+                    continue
+                if not _admissible(d):
                     continue
                 py_dev = "".join(lazy_pinyin(d))
                 # v1.1.17 收口（同族第三刀）：容差改按**字数**判——两字设备词最多容

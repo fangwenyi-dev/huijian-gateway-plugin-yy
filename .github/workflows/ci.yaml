@@ -36,6 +36,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0     # v1.1.17 复审：默认 depth=1 时"历史扫"只扫到 HEAD blob，与索引扫同一批字节（实测 150 vs 1448）
 
       - name: Check shell scripts syntax
         run: |

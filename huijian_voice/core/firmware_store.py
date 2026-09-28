@@ -67,6 +67,44 @@ def ota_capacity_error(version: str, size: int) -> str:
     return ""
 
 
+# app 镜像描述结构（esp_app_desc）的魔数，小端 0xABCD5432。
+ESP_APP_DESC_MAGIC = b"\x32\x54\xcd\xab"
+
+
+def ota_image_error(path) -> str:
+    """纯函数（v1.1.17 复审）：返回 ""＝像 app 镜像；否则＝拒下发的具名原因。
+
+    为什么不能只看 size：容量闸（`OTA_MAX_BYTES`）只判字节数 ⇒ 一个"小到能进槽"的
+    **产线合并镜像**照样过闸并被判"可 OTA"，而它含 bootloader + 分区表 + otadata，
+    写进 app 槽必炸（真机形态）。
+
+    判据用**真实 bin 头 64B 实测**（公开 release Range 请求取的，2026-09-28）：
+      · huijian-s3-2.1.67.bin（app 镜像）：首字节 0xE9，0x20 处 = 32 54 cd ab ✔
+      · huijian-s3-2.1.65.bin（合并出厂镜像）：首字节 0xE9，0x20 处 = 50 00 00 00 ✗
+    ⇒ app 镜像在偏移 0x20 带 esp_app_desc（魔数 + 版本串），合并镜像那里是 bootloader
+    代码。第一道判 0xE9（ESI 镜像头），第二道判魔数。
+
+    读不到/异常 → 返回 ""（判不了就不拦，与全仓 fail-open 纪律一致；容量闸仍在）。
+    """
+    try:
+        with open(path, "rb") as f:
+            head = f.read(0x24)
+    except OSError as e:
+        logger.warning("[固件] 形态闸读头失败（放行）：%s", e)
+        return ""
+    if len(head) < 0x24:
+        return ""                       # 太短判不了：交 0 字节/size 账与设备侧（不在这里拦）
+    if head[0] != 0xE9:
+        # 不是 ESP32 镜像（首字节非 0xE9）——本闸只管"**像** ESP32 镜像却缺 app 描述"
+        # 这一种；其余形态由 size 账/sha 复核/设备侧管，不在这里扩大拦截面
+        # （既有 11 条 OTA 用例的夹具都是任意小字节串，扩大拦截会把它们一起打死）。
+        return ""
+    if head[0x20:0x24] != ESP_APP_DESC_MAGIC:
+        return ("载荷缺 esp_app_desc 魔数（0x20 处不是 32 54 cd ab）——"
+                "疑似产线 flash_tool 用的合并出厂镜像，OTA 只收 app 镜像")
+    return ""
+
+
 def _clip(s, n: int = 120) -> str:
     """入日志前净化：截断+剔控制字符（:8000 匿名面 fname 可含 CRLF → 日志注入）。"""
     return "".join(ch for ch in str(s)[:n] if ch.isprintable())
@@ -283,6 +321,13 @@ class FirmwareStore:
             }
             if e:   # 实盘哈希与 lock 声明不符 → 面板标红，绝不默认信任
                 row["sha_mismatch"] = bool(row["sha256"] and row["sha256"] != e.get("sha256"))
+            # v1.1.17 复审（面板诚实化）：把容量闸的结论带进**账目面**。
+            # 旧形态闸只在签发/下发时生效 ⇒ 面板照样把 2.1.65（8.7MB 产线合并镜像）
+            # 显示成"最新/可升级"，用户点下去才被拒（原因还只躺在加载项日志里）。
+            # notes_zh 一直都在 row 里，但面板从不渲染 ⇒ 登记时写下的实话没人看得见。
+            _reason = ota_capacity_error(v, _to_int(row.get("size"), f"lock v{v}"))
+            row["ota_ok"] = not _reason
+            row["ota_block_reason"] = _reason
             rows[v] = row
         for fn, e in idx.items():
             v = e.get("version", "")
@@ -301,13 +346,24 @@ class FirmwareStore:
                     row["notes_zh"] = lock_row["notes_zh"]
                     if lock_row["sha256"] and lock_row["sha256"] != e.get("sha256"):
                         row["sha_mismatch"] = True
+                _r2 = ota_capacity_error(v, _to_int(row.get("size"), f"index {fn}"))
+                row["ota_ok"] = not _r2
+                row["ota_block_reason"] = _r2
                 rows[v] = row
         return sorted(rows.values(), key=lambda r: vkey(r["version"]), reverse=True)
 
     def latest(self) -> dict | None:
+        """可升级目标＝最新**可 OTA** 的版本（v1.1.17 复审）。
+
+        旧形态只查 在盘/哈希/非空 ⇒ 面板会把 8.7MB 的产线合并镜像（2.1.65）当"最新
+        可升级"，用户点「升级」必被设备分区闸拒（原因只在串口里）。装不进槽的版本
+        压根不该出现在任何升级话术里——它仍然列在 versions() 里（近场领取/产线烧录），
+        只是带 ota_ok=false 与原因。
+        """
         for r in self.versions():
             if (r.get("on_disk") and not r.get("sha_mismatch")
-                    and _to_int(r.get("size")) > 0):   # 0 字节包不入围（F-07）
+                    and _to_int(r.get("size")) > 0
+                    and r.get("ota_ok", True)):        # 0 字节包不入围（F-07）
                 return r
         return None
 
@@ -433,6 +489,11 @@ class FirmwareStore:
         # 免得白烧一枚 10min 令牌并让面板以为"已下发"。
         if (cap := ota_capacity_error(version, row.get("size"))):
             logger.warning("[固件] %s", cap)
+            return None
+        # 形态闸（v1.1.17 复审）：容量闸只看 size ⇒ 一个"小到能进槽"的产线合并镜像
+        # 照样过闸——而它含 bootloader/分区表/otadata，装进 app 槽必炸。按字节判型。
+        if (img := ota_image_error(self.public / row["file"])):
+            logger.warning("[固件] v%s %s", version, img)
             return None
         tok = secrets.token_hex(16)
         now = time.time()

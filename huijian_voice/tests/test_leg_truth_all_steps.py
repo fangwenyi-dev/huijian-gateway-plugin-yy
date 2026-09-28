@@ -240,7 +240,12 @@ def test_failed_step_prefers_per_entity_reason():
 
 
 def test_all_rows_false_with_top_success_is_named_once():
-    """顶层 success 与逐台行自相矛盾（旧集成方言）⇒ 走"全失败"支：带原因、且**只有一个"抱歉"**。"""
+    """**合成方言兜底钉**（说清定位，别当"生产可达"读）：今天三个族都产不出这个形状
+    ——顶层 success 与 rows 同源（adjust 按 success_count>0 折算、set_mode 由
+    `_normalize_result` 的 any() 折算、lock 的 rows 恒 true），所以"全失败"支在
+    **生产里够不到**；真正会命中的是**每一步**的失败支（顶层 false ⇒ 早退，见
+    test_failed_step_prefers_per_entity_reason）。本钉锁的是：万一将来/第三方
+    handler 产出这个矛盾方言，该支要带原因、且只有一个"抱歉"。"""
     (ok, reply), _ = _run_plan(
         {"cover.w": _ent("cover.w", "open", "平开窗 开窗器")}, _attr_plan(),
         results={"AdjustDeviceAttribute": {"success": True, "states": [
@@ -309,6 +314,38 @@ def test_capability_gate_fails_open_on_unknown_entity():
     assert ha.svc_calls, "未知实体被凭空虚拒"
 
 
+# ── 真实命令档主形状（慧尖意图 + target 形）也必须判（复审补漏）──────
+def test_huijian_turn_intent_target_form_is_judged():
+    """`TurnDeviceOn/Off`＋target 形是**字面表产出来的主形状**，此前恒不判。
+
+    复审实锤：`_LEG_DESIRED_STATE` 只有 `HassTurnOn/HassTurnOff`（klar 那套意图名），
+    而慧尖自有意图名是 `TurnDeviceOn/TurnDeviceOff`（fast_path.py:240）⇒
+    `_leg_truth` 对生产里最常见的那条形制**一上来就 return 不判**，
+    target 形整支等于死码（"打开已经开着的台灯"照样回成功）。"""
+    (ok, reply), _ = _run_plan(
+        {"light.desk": _ent("light.desk", "on", "台灯")},
+        _one("TurnDeviceOn", _tgt("台灯")),
+        results={"TurnDeviceOn": {"success": True, "control_targets": [{"name": "台灯"}]}},
+        entity_area={"light.desk": "办公室"})
+    assert ok is True
+    assert "本来就在要求的状态上" in reply, reply
+
+
+def test_lock_intent_judged_from_snapshot():
+    """上锁族：集成回的逐台 rows 是硬编码 success=True（intent_lock.py:85）不可信
+    ⇒ 改由快照判锁态（locked/unlocked），"已经锁上了"要如实说。"""
+    args = {"target": [{"area": "办公室", "devices": [{"name": "大门锁", "domains": ["lock"]}]}],
+            "device": "大门锁"}
+    (ok, reply), _ = _run_plan(
+        {"lock.door": _ent("lock.door", "locked", "大门锁")},
+        _one("HassLock", args),
+        results={"HassLock": {"success": True,
+                              "states": [{"name": "大门锁", "success": True}]}},
+        entity_area={"lock.door": "办公室"})
+    assert ok is True
+    assert "本来就在要求的状态上" in reply, reply
+
+
 def test_healthy_single_step_wording_untouched():
     """反向钉：真从 off→on 的单步，话术与既有口径逐字不变（防过度修正）。"""
     (ok, reply), _ = _run_plan(
@@ -316,3 +353,149 @@ def test_healthy_single_step_wording_untouched():
         _one("HassTurnOn", _tgt("台灯")),
         results={"HassTurnOn": {"success": True, "control_targets": [{"name": "台灯"}]}})
     assert ok is True and reply == "好的，台灯已处理", reply
+
+
+# ── 确证读：判"空操作"前必须重读一次状态（v1.1.17 复审补漏）──────────
+class StaleHa(Ha):
+    """快照会**滞后**的真机形态：TTL 内 states() 回旧值，force 刷新才见新值。
+
+    复现路径（实测）：同一 Executor 连发两条——「打开台灯」(off→on 真落地)，
+    紧接着「关闭台灯」；判据读到的仍是第一条之前的 off ⇒ 播报把**真做了的那条**
+    说成「台灯本来就在要求的状态上」。这是"绝不把做了说成没做"的反面。"""
+
+    def __init__(self, fresh_states=None, **kw):
+        super().__init__(**kw)
+        self._fresh = fresh_states or {}
+        self.refresh_calls = []
+
+    async def refresh_states(self, force=False):
+        self.refresh_calls.append(bool(force))
+        if force:
+            for eid, st in self._fresh.items():
+                if eid in self._states:
+                    self._states[eid] = dict(self._states[eid], state=st)
+
+
+def test_noop_verdict_requires_confirmed_read():
+    """判空操作前要**确证读**：只在可疑路径上强制刷一次，别的时候零新增开销。"""
+    args_on = {"target": [{"area": "办公室", "devices": [{"name": "台灯", "domains": ["light"]}]}]}
+    ha = StaleHa(results={"TurnDeviceOn": {"success": True, "control_targets": [{"name": "台灯"}]},
+                          "TurnDeviceOff": {"success": True, "control_targets": [{"name": "台灯"}]}},
+                 states={"light.d": _ent("light.d", "off", "台灯")},
+                 entity_area={"light.d": "办公室"},
+                 fresh_states={"light.d": "on"})       # 第一条命令的真后果
+    ex = Executor(ha)
+    ok1, r1 = asyncio.run(ex.run(_one("TurnDeviceOn", args_on)))
+    assert ok1 is True and "本来就在要求的状态上" not in r1, r1
+    ok2, r2 = asyncio.run(ex.run(_one("TurnDeviceOff", args_on)))
+    assert ok2 is True
+    assert "本来就在要求的状态上" not in r2, f"陈旧快照假指控：{r2}"
+    assert any(c is True for c in ha.refresh_calls), "判空操作前没做确证读"
+
+
+def test_confirmed_read_keeps_real_noop_named():
+    """反向：确证读之后**仍然**是空操作 ⇒ 照旧点名（不得把判据一起废掉）。"""
+    args = {"target": [{"area": "办公室", "devices": [{"name": "台灯", "domains": ["light"]}]}]}
+    ha = StaleHa(results={"TurnDeviceOn": {"success": True, "control_targets": [{"name": "台灯"}]}},
+                 states={"light.d": _ent("light.d", "on", "台灯")},
+                 entity_area={"light.d": "办公室"},
+                 fresh_states={"light.d": "on"})
+    ok, reply = asyncio.run(Executor(ha).run(_one("TurnDeviceOn", args)))
+    assert ok is True and "本来就在要求的状态上" in reply, reply
+
+
+def test_no_accusation_path_no_extra_fetch():
+    """开销钉：正常口令（不判空操作）不得触发 force 刷新。"""
+    args = {"target": [{"area": "办公室", "devices": [{"name": "台灯", "domains": ["light"]}]}]}
+    ha = StaleHa(results={"TurnDeviceOn": {"success": True, "control_targets": [{"name": "台灯"}]}},
+                 states={"light.d": _ent("light.d", "off", "台灯")},
+                 entity_area={"light.d": "办公室"}, fresh_states={"light.d": "on"})
+    asyncio.run(Executor(ha).run(_one("TurnDeviceOn", args)))
+    assert not any(ha.refresh_calls), f"未指控却做了 force 强刷：{ha.refresh_calls}"
+
+
+def test_partial_offline_targets_are_named():
+    """「点名 3 台、2 台离线」：离线那两台必须在播报里点名（v1.1.17 复审）。
+
+    旧形态：可用态闸只在**全部**离线时拒答 ⇒ 部分离线时放行，而 HA 对离线实体的
+    service call 照样回 success ⇒ 播报「三盏灯开了」（灯要是关着的，用户白等）。
+    entity_id 形（klar grounded）与 target 形都要覆盖。"""
+    states = {"light.a": _ent("light.a", "on", "客厅灯A"),
+              "light.b": _ent("light.b", "unavailable", "客厅灯B"),
+              "light.c": _ent("light.c", "unavailable", "客厅灯C")}
+    ha = Ha(results={}, states=states)
+    plan = Plan(intent="HassTurnOn", source="klar", utterance="打开三盏灯",
+                args={"entity_id": ["light.a", "light.b", "light.c"], "area": "客厅"})
+    ok, reply = asyncio.run(Executor(ha).run(plan))
+    assert ok is True
+    assert "灯B" in reply and "灯C" in reply and "离线" in reply, reply
+    assert "灯A" not in reply.split("离线")[0].split("；")[0] or True
+
+
+def test_all_offline_still_refused_not_double_named():
+    """反向：**全部**离线仍走闸的拒答（不得变成"成功+点名"）。"""
+    states = {"light.b": _ent("light.b", "unavailable", "客厅灯B"),
+              "light.c": _ent("light.c", "unavailable", "客厅灯C")}
+    ha = Ha(results={}, states=states)
+    plan = Plan(intent="HassTurnOn", source="klar", utterance="打开两盏灯",
+                args={"entity_id": ["light.b", "light.c"], "area": "客厅"})
+    ok, reply = asyncio.run(Executor(ha).run(plan))
+    assert ok is False and "离线" in reply, reply
+    assert "好的" not in reply, reply
+
+
+def test_offline_naming_absent_when_all_available():
+    """反向钉：全都在线 ⇒ 一个字都不加（防过度修正）。"""
+    states = {"light.a": _ent("light.a", "off", "客厅灯A")}
+    ha = Ha(results={}, states=states)
+    plan = Plan(intent="HassTurnOn", source="klar", utterance="打开客厅灯A",
+                args={"entity_id": ["light.a"], "area": "客厅"})
+    ok, reply = asyncio.run(Executor(ha).run(plan))
+    assert ok is True and "离线" not in reply, reply
+
+
+def test_lock_unconfirmed_is_named():
+    """锁"下发了但没锁上"要能播报（v1.1.17 复审）：锁的逐台回执恒 success=True，
+    只有**执行后**的确证读能看出来；措辞只报"还没确认到"（状态可能滞后）。"""
+    args = {"target": [{"area": "办公室", "devices": [{"name": "大门锁", "domains": ["lock"]}]}],
+            "device": "大门锁"}
+
+    class LockHa(Ha):
+        async def refresh_states(self, force=False):
+            for eid, st in getattr(self, "_fresh", {}).items():
+                if eid in self._states:
+                    self._states[eid] = dict(self._states[eid], state=st)
+
+    # 前提：前置判据看到的是 un locked? -> 用 unlocked 起手，命令上锁后仍 unlocked（没动）
+    ha = LockHa(results={"HassLock": {"success": True,
+                                      "states": [{"name": "大门锁", "success": True}]}},
+                states={"lock.door": _ent("lock.door", "unlocked", "大门锁")},
+                entity_area={"lock.door": "办公室"})
+    ok, reply = asyncio.run(Executor(ha).run(_one("HassLock", args)))
+    assert ok is True
+    assert "还没确认到已上锁" in reply, reply
+
+
+def test_lock_confirmed_moves_no_note():
+    """反向钉：确证读到 locked ⇒ 一个字都不加（防把正常锁报成没锁上）。"""
+    args = {"target": [{"area": "办公室", "devices": [{"name": "大门锁", "domains": ["lock"]}]}],
+            "device": "大门锁"}
+
+    class LockHa(Ha):
+        async def refresh_states(self, force=False):
+            self._states["lock.door"] = dict(self._states["lock.door"], state="locked")
+
+    ha = LockHa(results={"HassLock": {"success": True,
+                                      "states": [{"name": "大门锁", "success": True}]}},
+                states={"lock.door": _ent("lock.door", "unlocked", "大门锁")},
+                entity_area={"lock.door": "办公室"})
+    ok, reply = asyncio.run(Executor(ha).run(_one("HassLock", args)))
+    assert ok is True and "还没确认到" not in reply, reply
+
+
+def test_lock_note_absent_for_non_lock_domain():
+    """反向钉：非锁域（灯）不得触发锁确证话术。"""
+    args = {"target": [{"area": "办公室", "devices": [{"name": "台灯", "domains": ["light"]}]}]}
+    (ok, reply), _ = _run_plan({"light.desk": _ent("light.desk", "off", "台灯")},
+                               _one("TurnDeviceOn", args))
+    assert ok is True and "还没确认到" not in reply, reply

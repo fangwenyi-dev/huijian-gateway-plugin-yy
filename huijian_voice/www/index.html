@@ -16,8 +16,8 @@
      v1.0.42 的 #1d1750「过紫」与更早 #030712「过黑」均已作废，勿回潮 -->
 <meta name="theme-color" content="#071426">
 <title>慧尖HA语音插件</title>
-<link rel="stylesheet" href="css/huijian.css?v=1.1.17">
-<link rel="stylesheet" href="css/voice.css?v=1.1.17">
+<link rel="stylesheet" href="css/huijian.css?v=1.1.18">
+<link rel="stylesheet" href="css/voice.css?v=1.1.18">
 </head>
 <body>
 <!-- 「星辰大海」背景层（与网关加载项同一设计标准/同一固定种子＝同一片天）：
@@ -314,7 +314,7 @@
 
 <script>
 "use strict";
-const CURRENT_VERSION = "1.1.17";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
+const CURRENT_VERSION = "1.1.18";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
 // 音色表 = kokoro-multi-lang-v1_1 官方 103 sid 全表（k2-fsa docs sid 表实证；
 // 标注=对用户上传试听样本的 CAM++ 声纹溯源榜：v1_1 不含晓晓/云扬，
 // sid18=zf_026 女声最似晓晓(0.454 全场最近)，sid81=zm_055 最似云扬）
@@ -862,11 +862,17 @@ async function loadOta(){
     const disk = !it.on_disk ? pill("未拉取","warn")
       : it.sha_mismatch ? pill("哈希不符!","bad")
       : (!it.size) ? pill("空包!","bad") : pill("在盘","ok");
-    tr.innerHTML = `<td>v${esc0(it.version)} ${it.version===_otaLatest?pill("最新","ok"):""}</td>
+    // v1.1.17：装不进 OTA 槽的登记（产线合并镜像）如实标出来 + 渲染登记时的实话。
+    // 旧形态这些只躺在加载项日志里，面板照样显示"最新/可升级"。
+    const otaBadge = (it.on_disk && it.ota_ok === false)
+      ? " " + pill("装不进 OTA · 仅近场/产线","warn") : "";
+    const noteLine = it.notes_zh
+      ? `<br><span class="mut">${esc0(String(it.notes_zh).slice(0, 80))}</span>` : "";
+    tr.innerHTML = `<td>v${esc0(it.version)} ${(it.version===_otaLatest && it.ota_ok!==false)?pill("最新","ok"):""}</td>
       <td>${it.source==="lock"?"lock 登记":"投递收编"}</td>
-      <td>${disk}</td>
+      <td>${disk}${otaBadge}</td>
       <td><span class="mut">${fmtBytes(it.size)}</span><br><span class="mut code">${esc0(String(it.sha256||"").slice(0,16))}…</span>
-        ${it.urls_count?`<br><span class="mut">${it.urls_count} 源：${esc0((it.urls_hosts||[]).join(" · "))}</span>`:""}</td>
+        ${it.urls_count?`<br><span class="mut">${it.urls_count} 源：${esc0((it.urls_hosts||[]).join(" · "))}</span>`:""}${noteLine}</td>
       <td>${pull}</td>`;
     ft.appendChild(tr);
   }
@@ -1083,6 +1089,6 @@ $("#regenBtn").onclick = async ()=>{
   try { await post("/api/token/regenerate",{}); toast("已重置"); loadEndpoints(); } catch(e){ toast(e.message); }
 };
 </script>
-<script src="js/starsky.js?v=1.1.17"></script>
+<script src="js/starsky.js?v=1.1.18"></script>
 </body>
 </html>

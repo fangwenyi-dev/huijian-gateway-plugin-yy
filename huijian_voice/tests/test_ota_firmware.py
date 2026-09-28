@@ -17,6 +17,7 @@ import pytest
 from aiohttp import web
 
 from conftest import FakeHAClient
+from core import firmware_store as fs
 from core.admin_api import make_admin_app
 from core.firmware_store import FirmwareStore, vkey
 from core.ws_server import AppContext, make_ws_app
@@ -699,3 +700,92 @@ def test_panel_dispatch_wiring():
     assert "data-remote" in html and 'b.dataset.remote==="1"?dispatchOta' in html, \
         "按钮按接收口存在性双分支：真下发 / 签发备存"
     assert "代发能力未上线" not in html, "旧备存话术须随真下发同步"
+
+
+# ── v1.1.17 复审：装不进 OTA 槽的登记不得出现在升级话术里 ──────────────
+_APP_MAGIC = b"\x32\x54\xcd\xab"          # esp_app_desc magic（小端 0xABCD5432）
+
+
+def _app_image_bytes(payload=b"app", pad=0x40):
+    """构造一个**合法 app 镜像头**：0xE9 + … + 0x20 处 app-desc magic。"""
+    b = bytearray(pad)
+    b[0] = 0xE9
+    b[0x20:0x24] = _APP_MAGIC
+    return bytes(b) + payload
+
+
+def _write_lock(tmp_path, releases):
+    lock = tmp_path / "firmware.lock.json"
+    lock.write_text(json.dumps({"releases": releases}), encoding="utf-8")
+    return lock
+
+
+def test_latest_skips_oversized_payload_and_versions_mark_it(tmp_path):
+    """8.7MB 产线合并镜像（2.1.65 型）不得当"最新可升级"；仍列出但带 ota_ok=false。
+
+    旧形态：闸只在签发/下发时生效，面板照样显示"最新/可升级"，点下去必被设备分区闸拒
+    （原因只躺在串口/加载项日志里）。"""
+    import hashlib
+    big = b"\xe9" + b"\x00" * 63 * 140000                     # 8.7MB 级（形态无关紧要）
+    good = _app_image_bytes(b"x" * 100)
+    lock = _write_lock(tmp_path, [
+        {"version": "2.1.99", "file": "huijian-s3-2.1.99.bin", "urls": [],
+         "sha256": hashlib.sha256(big).hexdigest(), "size": len(big),
+         "notes_zh": "产线合并镜像：urls 只作近场领取/产线烧录"},
+        {"version": "2.1.67", "file": "huijian-s3-2.1.67.bin", "urls": [],
+         "sha256": hashlib.sha256(good).hexdigest(), "size": len(good),
+         "notes_zh": "app 镜像，可 OTA"},
+    ])
+    st = fs.FirmwareStore(root=tmp_path, lock_path=lock)
+    for name, data in (("huijian-s3-2.1.99.bin", big), ("huijian-s3-2.1.67.bin", good)):
+        _drop(st, name, data)                        # 静止闸适配的投递口放包
+    st.scan_import()
+    lat = st.latest()
+    # 超容量那条是**版本更新**的（真实形态：新登记的产线合并镜像）⇒ 旧实现会把它当
+    # "最新可升级"，用户点下去必被设备分区闸拒（原因只在串口里）。
+    assert lat and lat["version"] == "2.1.67", f"升级目标指到了超容量镜像：{lat}"
+    rows = {r["version"]: r for r in st.versions()}
+    assert rows["2.1.99"]["ota_ok"] is False and rows["2.1.99"]["ota_block_reason"]
+    assert rows["2.1.67"]["ota_ok"] is True
+    assert rows["2.1.99"]["notes_zh"], "登记时的实话必须带在行里（面板要渲染）"
+
+
+def test_panel_renders_ota_block_and_notes():
+    """面板必须渲染 ota_ok/notes_zh（否则实话说在 lock 里没人看得见）。"""
+    from pathlib import Path
+    html = (Path(__file__).resolve().parents[1] / "www" / "index.html").read_text(
+        encoding="utf-8")
+    assert "ota_ok" in html and "notes_zh" in html and "仅近场/产线" in html
+
+
+def test_ota_image_gate_uses_real_headers(tmp_path):
+    """形态闸按**真 bin 头**判型（2026-09-28 公开 release Range 实测的 64B 头）：
+    app 镜像 0x20 处是 esp_app_desc 魔数 32 54 cd ab；产线合并镜像那里是
+    bootloader 代码 50 00 00 00。容量闸只看 size ⇒ 小的合并镜像照样过闸，必炸分区。"""
+    app = tmp_path / "app.bin"
+    app.write_bytes(b"\xe9" + b"\x00" * 0x1f + b"\x32\x54\xcd\xab" + b"x" * 40)
+    fac = tmp_path / "factory.bin"
+    fac.write_bytes(b"\xe9" + b"\x00" * 0x1f + b"\x50\x00\x00\x00" + b"x" * 40)
+    short = tmp_path / "short.bin"
+    short.write_bytes(b"\xe9" + b"\x00" * 8)
+    assert fs.ota_image_error(app) == ""
+    assert "合并出厂镜像" in fs.ota_image_error(fac)
+    assert fs.ota_image_error(short) == "", "太短判不了=放行（不扩大拦截面）"
+    assert fs.ota_image_error(tmp_path / "missing.bin") == "", "读不到=放行（fail-open）"
+
+
+def test_issue_refuses_factory_image_even_when_small(tmp_path):
+    """接线钉：小体积合并镜像必须在**签发口**就被拦（不能只靠容量闸）。"""
+    data = b"\xe9" + b"\x00" * 0x1f + b"\x50\x00\x00\x00" + b"x" * 400
+    import hashlib
+    lock = _write_lock(tmp_path, [
+        {"version": "2.1.99", "file": "huijian-s3-2.1.99.bin", "urls": [],
+         "sha256": hashlib.sha256(data).hexdigest(), "size": len(data),
+         "notes_zh": "假装的产线合并镜像（小体积）"},
+    ])
+    st = fs.FirmwareStore(root=tmp_path, lock_path=lock)
+    _drop(st, "huijian-s3-2.1.99.bin", data)
+    st.scan_import()
+    assert st.latest() is not None, "小体积包应过容量闸（正是本闸要拦的场景）"
+    issued = st.issue("2.1.99", "aabbccddeeff")     # 签名是 (version, mac)——写反了会"查无此版"提前返回，钉变假绿
+    assert issued is None, f"签发口必须拒合并镜像（形态闸），实得 {issued!r}"

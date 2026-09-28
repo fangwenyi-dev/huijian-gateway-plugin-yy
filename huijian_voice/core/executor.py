@@ -159,9 +159,15 @@ def is_indeterminate(err: str) -> bool:
     return any(h in low for h in _INDETERMINATE_HINTS)
 
 
-# 链式分句真伪判定用（见 Executor._leg_truth）：只对"状态名就是 on/off"的域判空操作。
-_LEG_DESIRED_STATE = {"HassTurnOn": ("on",), "HassTurnOff": ("off",)}
-_LEG_NOOP_DOMAINS = {"light", "fan", "switch", "humidifier", "input_boolean"}
+# 链式分句真伪判定用（见 Executor._leg_truth）：只对"状态名就是 on/off/locked"的域判空操作。
+# v1.1.17 复审补漏：慧尖自有意图名是 `TurnDeviceOn/Off`（fast_path.py:240 / agent.py），
+# `HassTurnOn/Off` 是 klar/HA 内置那套——旧表只收后者，于是**字面表主形状（target 形）
+# 一上来就被判据以"意图不认识"放行**，target 支在生产里等于死码。两族都收，并把锁族
+# 纳入（锁的逐台 rows 是硬编码 success=True，intent_lock.py:85，只有快照能证伪）。
+_LEG_DESIRED_STATE = {"HassTurnOn": ("on",), "HassTurnOff": ("off",),
+                      "TurnDeviceOn": ("on",), "TurnDeviceOff": ("off",),
+                      "HassLock": ("locked",), "HassUnlock": ("unlocked",)}
+_LEG_NOOP_DOMAINS = {"light", "fan", "switch", "humidifier", "input_boolean", "lock"}
 # 开合类意图的目标态按 action 取（v1.1.15 收口批）：ControlWindow 不进上表是因为
 # 它的"要求状态"藏在参数里。只用于**查无此名/已在要求态**的证伪，空白 action（stop 等）
 # 一律不判。
@@ -292,6 +298,98 @@ class Executor:
             logger.exception("[执行] 可用态预裁异常（放行）")
             return None
 
+    async def _offline_names(self, name: str, args: dict) -> list[str]:
+        """目标里**确证 unavailable** 的那几台（v1.1.17 复审补漏，与 _availability_refuse
+        同口径：只认 'unavailable'，'unknown'/不在快照一律不算）。
+
+        病灶：可用态闸只在"**全部**离线"时拒答；「点名 3 台、2 台离线」是部分离线 ⇒
+        闸放行 → 而 HA 对离线实体的 service call 照样回 success ⇒ 播报笼统成功，
+        用户永远不知道那两台没动。这里把"哪几台没执行"在播报里点出来（只改播报，
+        不改成败口径）。target 形与 entity_id 形都覆盖。
+        """
+        try:
+            raw = (args or {}).get("entity_id")
+            eids = [raw] if isinstance(raw, str) and "." in raw else [
+                e for e in (raw or []) if isinstance(e, str) and "." in e]
+            states = await self.ha.states()
+            if not states:
+                return []
+            out: list[str] = []
+            if eids:
+                for e in eids:
+                    ent = states.get(e)
+                    if isinstance(ent, dict) and str(ent.get("state")) == "unavailable":
+                        nm = str(((ent.get("attributes") or {})
+                                  .get("friendly_name")) or "").strip()
+                        out.append(nm or str(e))
+            else:
+                tgt = (args or {}).get("target")
+                if not isinstance(tgt, list) or not tgt:
+                    return []
+                for ent in capability.resolve_candidates(
+                        states, getattr(self.ha, "_entity_area", {}) or {}, tgt):
+                    if str((ent or {}).get("state")) != "unavailable":
+                        continue
+                    nm = str(((ent.get("attributes") or {}).get("friendly_name")) or "").strip()
+                    if nm:
+                        out.append(nm)
+            return list(dict.fromkeys(out))
+        except Exception:  # noqa: BLE001 判不了就不判（绝不凭空点名）
+            logger.exception("[执行] 离线目标点名异常（不判）")
+            return []
+
+    async def _lock_unconfirmed(self, name: str, args: dict) -> list[str]:
+        """锁命令发完后的**后置确证**（v1.1.17 复审补漏）：返回"还没到要求锁态"的点名串。
+
+        病灶：锁族的逐台回执是硬编码 `success: True`（intent_lock.py:85）⇒ 只靠回执
+        永远看不出"命令发了、锁没动"（本条之前只能靠快照判"本来就已经锁着"，那是
+        **执行前**的前置判定）。这里在执行后强制刷一次状态做确证。
+
+        纪律（宁可不点，绝不把做了说成没做）：
+          · 只报**未确证**、不断言失败——锁状态可能滞后/正在动作（locking/unlocking），
+            措辞是「还没确认到已上锁」，用户自己去面板核对即可；
+          · 非 lock 域 / 目标不在快照 / 快照空 / 'unknown' 与中间态 / 任何异常
+            → 一律当已确认（不打扰）；
+          · 强制刷新失败 → 不判。
+        """
+        want = "locked" if name == "HassLock" else "unlocked"
+        try:
+            rf = getattr(self.ha, "refresh_states", None)
+            if rf is not None:
+                await rf(force=True)
+            states = await self.ha.states()
+            if not states:
+                return []
+            raw = (args or {}).get("entity_id")
+            eids = [raw] if isinstance(raw, str) and "." in raw else [
+                e for e in (raw or []) if isinstance(e, str) and "." in e]
+            if eids:
+                ents = [states[e] for e in eids if e in states]
+            else:
+                tgt = (args or {}).get("target")
+                if not isinstance(tgt, list) or not tgt:
+                    return []
+                ents = capability.resolve_candidates(
+                    states, getattr(self.ha, "_entity_area", {}) or {}, tgt)
+            if not ents:
+                return []
+            out: list[str] = []
+            for ent in ents:
+                eid = str((ent or {}).get("entity_id") or "")
+                if eid.split(".", 1)[0] != "lock":
+                    return []                       # 非锁域：本闸不管
+                st = str((ent or {}).get("state"))
+                if st not in ("locked", "unlocked"):
+                    return []                       # 'unknown'/动作中/不可用：无从判
+                if st != want:
+                    nm = str(((ent.get("attributes") or {}).get("friendly_name"))
+                             or eid).strip()
+                    out.append(f"「{nm}」还没确认到{'已上锁' if want == 'locked' else '已解锁'}")
+            return out
+        except Exception:  # noqa: BLE001 确证故障=不打扰
+            logger.exception("[执行] 锁后置确证异常（不判）")
+            return []
+
     async def _repoint_offline_twin(self, args: dict) -> None:
         """v1.1.15（办公 .91 实锤 D4）：目标确证离线时，先改指**同名同域且唯一可用**
         的那一台，而不是直接回「"射灯"现在离线（不可用）」。
@@ -348,6 +446,32 @@ class Executor:
                             f"·{rec[1]}" if rec[1] else "")
         except Exception:  # noqa: BLE001 改指故障=不改（闸仍在后面兜底）
             logger.exception("[执行] 离线同名改指异常（不动目标）")
+
+    async def _leg_truth_confirmed(self, name: str, args: dict) -> tuple[str, str]:
+        """判"空操作"前要**确证读**一次状态（v1.1.17 复审补漏，实测复现）。
+
+        病灶：`states()` 是 TTL 缓存（ha_client.refresh_states 默认 5s 且不回灌
+        执行后果），而 `_leg_truth` 是**执行前**判的 ⇒ 同一 Executor 连发两条时，
+        第二条读到的还是第一条之前的旧值：「打开台灯」(off→on 真落地) 后立刻
+        「关闭台灯」，判据看到 off 就宣告"台灯本来就在要求的状态上"——把**真做了的
+        那条**说成没做，正是本仓"绝不把做了说成没做"的红线反面（我 1.1.16/17 把判据
+        从链放宽到单步、又补了 TurnDevice 族之后才够得到）。
+
+        代价与边界：只在**要指控空操作**这条可疑路径上强制刷一次（正常口令零新增
+        网络开销，由开销钉把住）；刷完仍成立才点名，刷不动/异常则不判（保守）。
+        """
+        kind, label = await self._leg_truth(name, args)
+        if kind != "noop":
+            return kind, label
+        try:
+            rf = getattr(self.ha, "refresh_states", None)
+            if rf is None:
+                return "", ""
+            await rf(force=True)
+        except Exception:  # noqa: BLE001 确证读失败=不指控（宁可不点名）
+            logger.exception("[执行] 空操作确证读失败（不点名）")
+            return "", ""
+        return await self._leg_truth(name, args)
 
     async def _leg_truth(self, name: str, args: dict) -> tuple[str, str]:
         """v1.1.15（办公 .91 实锤 D2）：链式分句"这一条到底成不成立"。
@@ -519,6 +643,8 @@ class Executor:
         missing: list[str] = []              # 链中"这屋里查无此名"的分句（D2）
         noops: list[str] = []                # 链中"目标已在要求状态"的空操作分句（D2）
         no_receipt: list[str] = []           # 链中点了名、回执里却没有那台的分句（E3）
+        offline: list[str] = []              # 标的确证离线（部分离线时点名，见 _offline_names）
+        lock_notes: list[str] = []           # 锁后置确证未过（见 _lock_unconfirmed）
         anon_missing = 0                     # entity_id 形分句查无此台（E1，无名可点）
         for idx, (name, args, src) in enumerate(steps):
             gate = self._turn_gate(name, args, plan.utterance or "")
@@ -550,7 +676,7 @@ class Executor:
             # 让"电视声被听成单步 HassTurnOff 打在已关的灯上"永远回"关了"（审计实证：
             # 17:02/17:03 两轮）。判据本身早就对单步成立（resolve_candidates 与
             # _leg_truth_by_entity 都不依赖步数），栅栏只是话术侧的旧口径。
-            kind, label = await self._leg_truth(name, args)
+            kind, label = await self._leg_truth_confirmed(name, args)
             if kind == "missing":
                 if label:
                     missing.append(label)
@@ -570,6 +696,11 @@ class Executor:
                 result = await self.ha.call_service(domain, service, data)
             else:
                 result = await self.ha.handle_intent(name, wire_args(name, args))
+            for _nm in await self._offline_names(name, args):
+                if _nm not in offline:
+                    offline.append(_nm)
+            if name in ("HassLock", "HassUnlock"):
+                lock_notes.extend(await self._lock_unconfirmed(name, args))
             if not result.get("success"):
                 raw_err = str(result.get("error") or result.get("message") or "")
                 # v1.1.17：逐台回执带原因且**全部失败**时，用逐台真原因——集成的顶层
@@ -649,7 +780,8 @@ class Executor:
                 reply = "好的，都办妥了"
         bits = [f"「{n}」我没找到" for n in missing] + \
                [f"「{n}」本来就在要求的状态上" for n in noops] + \
-               [f"「{n}」没拿到执行回执" for n in no_receipt]
+               [f"「{n}」没拿到执行回执" for n in no_receipt] + \
+               [f"「{n}」现在离线、这条没执行" for n in offline] + lock_notes
         if anon_missing:
             # entity_id 形分句查无此台（E1）：没有中文名可点，按数量如实说，
             # 绝不把 entity_id 念进播报（「light.bedside_lamp」只会成噪音）。

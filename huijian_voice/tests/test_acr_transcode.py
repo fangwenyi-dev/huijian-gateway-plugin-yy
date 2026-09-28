@@ -287,3 +287,19 @@ def test_deadline_ample_keeps_old_retry_behaviour():
         assert len(conn.reqs) == 6, "attempts 语义被改（旧 6 次）"
     finally:
         ac.push_deadline_clear()
+
+
+def test_deadline_accounts_for_both_transcodes_in_one_job():
+    """预算算术要按**同一 job 内串行两次 transcode**（双架构）算，且与 ci.yaml 的
+    job 上限对账——v1.1.17 首版写 60min 只按单链算，两档都慢时第二档照样被 CI 硬杀
+    （1.1.16 的 run 就是这么死的：90min 整点 cancel ⇒ Release 被 skip）。"""
+    import re
+    from pathlib import Path
+    ci = (Path(__file__).resolve().parents[2] / ".github/workflows/ci.yaml").read_text(
+        encoding="utf-8")
+    m = re.search(r"push-acr:.*?timeout-minutes:\s*(\d+)", ci, re.S)
+    assert m, "找不到 push-acr job 的 timeout-minutes"
+    job_min = int(m.group(1))
+    two_chains_min = 2 * ac.PUSH_DEADLINE_S / 60
+    assert two_chains_min + 10 <= job_min, \
+        f"两档预算 {two_chains_min:.0f}min + 10min 余量 > job {job_min}min ⇒ 仍会被硬杀"

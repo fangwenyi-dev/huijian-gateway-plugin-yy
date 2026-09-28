@@ -53,9 +53,12 @@ UA = {"User-Agent": "acr-transcode/1.0 (huijian_voice CI)"}
 # 停在 layer6 54.5/76.5MB，两头都看不出"是卡在某个块上"）。
 # 现加**推送阶段墙钟预算**：到期即抛具名 RuntimeError 退出，把失败原因留在日志里，
 # 也把 job 预算让给后续重试（`gh run rerun --failed` 可只补没传完的层）。
-# 默认 60min：健康轮整链 ~19min、job 上限 90min，留 ≥25min 余量（超期最多再多一次
-# socket 超时 300s 才轮到判断点）。操作员可用 ACR_PUSH_DEADLINE_S 覆盖。
-PUSH_DEADLINE_S = float(os.environ.get("ACR_PUSH_DEADLINE_S", "3600"))
+# 默认 40min（v1.1.17 复审更正我自己的算术）：push-acr job 里是**串行两次** transcode
+# （ci.yaml 的 DA/DR 两步，两个架构各一次），而 job 上限 90min ⇒ 单链预算必须
+# ≤ (90−余量)/2。上一版写的 60min 只按"一条链 ≤75min"算，两档都慢时第二档照样被
+# CI 硬杀（1.1.16 的 run 36330078632 就是这么死的：90min 整点 cancel ⇒ Release skip）。
+# 判断点在每次尝试/每轮起点，超期最多多走一次 socket 超时(300s)。可 env 覆盖。
+PUSH_DEADLINE_S = float(os.environ.get("ACR_PUSH_DEADLINE_S", "2400"))
 _deadline_at = 0.0        # 0＝未进入推送阶段（不施加预算；monotonic 基准）
 
 

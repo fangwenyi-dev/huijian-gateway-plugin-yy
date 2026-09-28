@@ -151,6 +151,10 @@ IMPERATIVE_STILL_COMMAND = [
     ("关闭办公室平开窗", "ControlWindow"),
     ("所有灯都关啦", "TurnDeviceOff"),
     ("把窗帘拉上", None),
+    # v1.1.17 复审：V没V 若**不锚句尾**，祈使句中段的"关没关紧/开没开过"会被当问句
+    # 吞掉（实测两条整句从命令档掉光=该做的不做）。锚尾后必须照旧执行。
+    ("把那个关没关紧的窗关上", "ControlWindow"),
+    ("开没开过的灯都打开", "TurnDeviceOn"),
 ]
 
 

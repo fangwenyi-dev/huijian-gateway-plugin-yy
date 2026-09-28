@@ -237,7 +237,12 @@ def _readiness(ctx) -> dict:
         "tts_ready": bool(ctx.tts and ctx.tts.ready()),
         "sessions": len(ctx.sessions),
         "models_fatal": fatal,
-        "models": {k: v.get("state") for k, v in sorted(snap.items())},
+        # v1.1.17 复审（线上实锤）：台账 `state` 只有后台循环真 ensure() 过才会写 ready，
+        # 已在盘的键永远停在构造初值 "pending" ⇒ 引擎好好载着、这里五个键全报 pending
+        # （办公 .91 实测：asr_loaded_model=sensevoice / tts_ready=true 而 models 全 pending）。
+        # 与 1.1.14 修 asr_model_state 同一处方：**在盘优先判 ready**，state 只作补充。
+        "models": {k: ("ready" if v.get("ready") else v.get("state"))
+                   for k, v in sorted(snap.items())},
         "asr_model": primary,
         "asr_model_state": state if primary else "n/a",
         "asr_loaded_model": loaded,

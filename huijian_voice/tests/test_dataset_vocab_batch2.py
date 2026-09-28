@@ -421,3 +421,79 @@ def test_pinyin_blocklist_does_not_blind_literal_window_words(fp):
         assert tgt["devices"][0]["name"] == want, (s, tgt)
     q = _match(fp, "开窗器内倒")                      # 内倒作为**动作**的既有车道
     assert q is not None and q.args.get("action") == "a", q.args
+
+
+# ── ⑧ v1.1.17 复审：近音救援面必须是"本家装得下的设备"（机制级收口）──
+# ⑦ 的候选集此前取**整张静态通用词表**（数百词），于是家里根本没有洗碗机也能
+# 「打开摄像机」→dishwasher 并被集成真的执行掉。复审实测 14 例里 12 例是"本家没装
+# 的设备"——那不该是近音救援的对象，任何容差都治不了，要换的是**候选面**。
+OFFICE_HOME = {                      # 典型办公家：灯 / 帘 / 空调 / 风扇
+    "light.ban_gong_shi_she_deng": {"entity_id": "light.ban_gong_shi_she_deng",
+                                    "state": "off",
+                                    "attributes": {"friendly_name": "办公室射灯"}},
+    "cover.ping_kai_chuang": {"entity_id": "cover.ping_kai_chuang", "state": "closed",
+                              "attributes": {"friendly_name": "办公室平开窗"}},
+    "climate.kong_tiao": {"entity_id": "climate.kong_tiao", "state": "off",
+                          "attributes": {"friendly_name": "办公室空调"}},
+    "fan.feng_shan": {"entity_id": "fan.feng_shan", "state": "off",
+                      "attributes": {"friendly_name": "办公室风扇"}},
+}
+INVENTED = {"摄像机": "洗碗机", "相机": "洗碗机", "体温计": "洗碗机", "小家电": "洗地机",
+            "伸缩": "门锁", "便是": "电视", "信箱": "音箱", "感应": "干衣机",
+            "安乐椅": "按摩椅", "一百": "浴霸"}
+
+
+def test_rescue_cannot_invent_uninstalled_devices():
+    """本家没装的设备 ⇒ 近音档一律不得造出来（改判 MISS，交回如实失败）。"""
+    T.sync_vocab(OFFICE_HOME, {})
+    try:
+        for frag, banned in INVENTED.items():
+            want = banned.split("?")[0]
+            _a, n, _s = T.parse_target(frag)
+            assert n != want, f"本家无 {want}，却把 {frag!r} 近音成它：{n!r}"
+    finally:
+        T.clear_vocab()
+
+
+def test_rescue_residual_is_documented_not_hidden():
+    """**已知残余（不是本次修的范围，写在案上免得被当成已全清）**：候选设备族本家
+    确实装了时，近音档仍可能把它派给用户——实测本家有风扇时「打开丰盛」→风扇。
+    这是"救援面=本机设备面"的固有代价（⑦ 的存在意义就是把听歪的本机设备名捞回来，
+    无法在不知道用户要说什么的前提下区分"听歪"与"说错词"）。收口方向是把 ⑦ 限定为
+    "只在动态词（本机实体名/别名）内救援"并放弃静态泛称救援，代价是「催拉窗」那类
+    整词救援失效——需用户拍口径，见 CHANGELOG 本批说明。"""
+    T.sync_vocab(OFFICE_HOME, {})
+    try:
+        assert T.parse_target("丰盛")[1] == "风扇"
+    finally:
+        T.clear_vocab()
+
+
+def test_rescue_cannot_invent_devices_end_to_end(fp):
+    """端到端：字面表整条链都不许带着"凭空设备"进计划（那会被真执行）。"""
+    T.sync_vocab(OFFICE_HOME, {})
+    try:
+        for sent, banned in (("打开摄像机", "洗碗机"), ("打开伸缩", "门锁"),
+                             ("打开电视的相机", "洗碗机")):
+            p = _match(fp, sent)
+            assert p is None or banned not in str(p.args), (sent, p.args if p else None)
+    finally:
+        T.clear_vocab()
+
+
+def test_rescue_still_rescues_installed_names():
+    """反向钉：本家装了灯 ⇒ 「泰腾→台灯」「催拉窗→推拉窗」这类真救援必须照旧生效
+    （收口不得做成"近音档整体失能"）。"""
+    T.sync_vocab(OFFICE_HOME, {})
+    try:
+        assert T.parse_target("泰腾")[1] == "台灯", "本家有灯，单音节听错不得一起打死"
+        assert T.parse_target("催拉窗")[1] == "推拉窗", "泛称整词救援被误伤"
+    finally:
+        T.clear_vocab()
+
+
+def test_rescue_surface_fail_open_before_registry_sync():
+    """注册表尚未同步（冷启动首句）⇒ 不施加判据、行为逐值同旧（宁漏不新增失能）。"""
+    T.clear_vocab()
+    assert not T._installed_domains
+    assert T.parse_target("摄像机")[1] == "洗碗机", "未同步面被改成 MISS=冷启动新失能"

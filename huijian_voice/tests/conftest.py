@@ -82,6 +82,14 @@ class FakeHAClient:
         self._writes = writes or {}       # {(method, path): 返回 dict}
         self.written = []                 # [(method, path, body)] 留痕
 
+    async def refresh_states(self, force=False):
+        """真客户端有这条（TTL 刷新）——替身缺它会让"判据的确证读路径"在测试里
+        走样（v1.1.17 复审：executor 改为指控空操作前 force 重读一次）。替身按
+        真机形态存在但**不回灌状态**：即"刷完还是这个值"⇒ 空操作指控照旧成立。"""
+        self.refreshed = getattr(self, "refreshed", [])
+        self.refreshed.append(bool(force))
+        return None
+
     async def rest_get(self, path, timeout=6.0):
         return self._rest.get(path)   # 无条目=None（真实语义：一切失败折叠 None）
 

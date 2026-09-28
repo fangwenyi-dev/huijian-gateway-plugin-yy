@@ -754,3 +754,26 @@ def test_discover_require_token_mode(discover_server):
     finally:
         asyncio.run_coroutine_threadsafe(holder["runner"].cleanup(), loop).result(10)
         loop.call_soon_threadsafe(loop.stop)
+
+
+def test_healthz_models_field_prefers_on_disk_ready(server):
+    """`models` 字段不得把在盘模型报成 pending（v1.1.17 复审，办公 .91 线上实锤：
+    引擎已载、tts_ready=true，而该字段五个键全 pending）。台账 state 只有后台循环
+    ensure() 过才写 ready，在盘的键永远停在初值 ⇒ 与 1.1.14 修 asr_model_state 同病，
+    同处方：在盘优先判 ready。"""
+    port, ctx = server
+
+    class _Store:
+        def snapshot(self):
+            return {"tts_kokoro_multilang": {"state": "pending", "ready": True},
+                    "asr_paraformer_bilingual": {"state": "failed", "ready": False}}
+
+    ctx.store = _Store()
+
+    async def go():
+        async with ClientSession() as sess:
+            async with sess.get(f"http://127.0.0.1:{port}/healthz") as r:
+                body = await r.json()
+                assert body["models"]["tts_kokoro_multilang"] == "ready", body["models"]
+                assert body["models"]["asr_paraformer_bilingual"] == "failed", body["models"]
+    _run(go())

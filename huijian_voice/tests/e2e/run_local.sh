@@ -28,11 +28,13 @@ for i in $(seq 1 600); do
         curl -sf http://127.0.0.1:8002/api/health >/dev/null 2>&1 && { echo "health ok"; }
     fi
     ready=$(curl -sf --max-time 5 http://127.0.0.1:8002/api/health 2>/dev/null \
-        | HJ_LOCK="$ADDON/models.lock.json" "$PY" -c 'import json,os,sys
+        | HJ_LOCK="$PWD/models.lock.json" "$PY" -c 'import json,os,sys
 try:
     j=json.load(sys.stdin); m=j.get("models_ready") or {}
     d=json.load(open(os.environ["HJ_LOCK"], encoding="utf-8"))
     # v1.1.17：need 集从 models.lock 派生（default_provider:true），不再写死模型键
+    # 本脚本无 $ADDON（第 7 行只 cd），路径取 $PWD——v1.1.17 首版误用未定义量，
+    # set -u 下子壳当场 abort ⇒ ready 恒空 ⇒ 600×2s 后假报「models 未就绪」。
     need=[k for k,v in d.items() if isinstance(v,dict) and v.get("default_provider")]
     print("yes" if need and all(m.get(k) for k in need) else "")
 except Exception: print("")' | tr -d '\r' || true)
