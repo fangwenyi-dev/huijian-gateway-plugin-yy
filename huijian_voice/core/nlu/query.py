@@ -54,20 +54,29 @@ _DEVICE_WORDS = {
 _CLASS_WORDS = tuple(sorted(_DEVICE_WORDS, key=len, reverse=True))
 
 # 播报量词（计数/状态句里"3 __"的空）。表外类别回退"个设备"。
-_ASCII_TAIL_RE = re.compile(r"[\s\-_·]*[A-Za-z0-9][A-Za-z0-9\-_.:() ]*$")
+_ASCII_TAIL_RE = re.compile(r"[\s\-_·]*([A-Za-z0-9][A-Za-z0-9\-_.:() ]*)$")
 
 
 def say_name(raw) -> str:
-    """播报用设备名：剥掉**尾部**纯 ASCII 尾巴，只在名字确实含中文时才剥。
+    """播报用设备名：剥掉**尾部**型号尾巴，只在名字确实含中文时才剥。
 
     v1.1.18 线上实测的念名噪音：「办公室空调 Air Conditioner关着」「开窗器 123f-020A
     开窗器关着」——注册表 friendly_name 自带英文型号/十六进制后缀，照念像机器。
     前导英文名不受影响（「HUIJIAN-BB28 麦克风开关」原样保留）。
-    """
+
+    v1.1.22：短尾（单个数字/字母，如「客厅射灯2」「客厅射灯A」）是**设备序号**不是
+    型号——剥了多台带序号设备在播报里就分不出谁是谁。只剥"≥2 字符且含字母"的尾段
+    （英文型号/十六进制），纯数字短尾一律原样。"""
     t = str(raw or "").strip()
     if not t or not any("一" <= c <= "鿿" for c in t):
         return t
-    return _ASCII_TAIL_RE.sub("", t).strip() or t
+    m = _ASCII_TAIL_RE.search(t)
+    if not m:
+        return t
+    tail = m.group(1)
+    if len(tail) < 2 or not any(c.isascii() and c.isalpha() for c in tail):
+        return t
+    return t[:m.start()].strip() or t
 
 
 _CLASS_NOUN = {"灯": "盏灯", "筒灯": "盏灯", "射灯": "盏灯", "灯带": "条灯带",
@@ -162,6 +171,19 @@ def is_query_like(text: str) -> bool:
         return bool(is_state_question(t) or _QUERY_TRIGGER_RE.search(t)
                     or _QUANTITY_Q_RE.search(t))
     except Exception:  # noqa: BLE001 判据故障=不误拦命令
+        return False
+
+
+def is_status_query(text: str) -> bool:
+    """状态/情况/清单类查询的**疑问形**触发词（v1.1.22：单点定义）。
+
+    病灶：fast_path 复杂查询守卫此前是**裸** `(状态|情况|哪些|列表)`——1.1.20 只
+    把查询族一侧收窄成疑问形，字面表这条漏改 ⇒「把空调调到除湿状态」这类**命令**
+    仍被守卫吞掉（实测两档同时弃权=命令丢失，用户听到"我还不会"）。现守卫与本表
+    共用同一张疑问形表，与 `_QUERY_TRIGGER_RE` 逐字同源。永不抛。"""
+    try:
+        return bool(_QUERY_TRIGGER_RE.search(str(text or "")))
+    except Exception:  # noqa: BLE001 判据故障=不误拦命令（保守放行原文）
         return False
 
 
@@ -260,8 +282,15 @@ class QueryZone:
                   or re.search(r"(查询|查一查|查一下|查下|查查|看看|看下|报一下|告诉我)", text)):
             kind = {"温度": "temperature", "湿度": "humidity", "照度": "illuminance", "亮度": "illuminance"}[m.group(1)]
             return await self._sensor_answer(area, kind, m.group(1))
-        # 「多少度/几度」裸形（fast_path 守卫专门放行给本层，必须接住）
+        # 「多少度/几度」（fast_path 守卫专门放行给本层，必须接住）：**带设备词**时
+        # 先答设备本身的设定温度——旧式一律房间传感器（v1.1.22：问「客厅空调开多少度」
+        # 答成室温 24.3，而 AC 设定 26 就在快照里）；无设备词才是房间温度。
         if re.search(r"(多少度|几度)", text):
+            dev_word, _doms = class_of(text)
+            if dev_word:
+                ans = await self._attr_answer(area, dev_word, "温度")
+                if ans:
+                    return ans
             return await self._sensor_answer(area, "temperature", "温度")
         # 设备开关状态（v1.1.2 重写：原表只有 8 个固定尾巴，实测 15 种口语问法
         # 里 9 种落空——「现在是开着的吗/是开着还是关着/还亮着吗/关了没有/查询X

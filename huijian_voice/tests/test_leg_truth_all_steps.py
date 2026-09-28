@@ -271,6 +271,32 @@ def test_partial_failure_counts_devices_not_rows():
     assert "另有 1 台没成功" in reply, reply
 
 
+def test_partial_count_survives_named_bits():
+    """v1.1.22：分句判据点名（查无此名/空操作/离线…）与逐台失败计数是**两种事实**，
+    不许互吞——旧式一旦有 bits 就把 partial 置空，实测「另有 1 台没成功」静默消失
+    （链里一腿查无此名 + 一腿部分失败）。"""
+    class TwoStepHa(Ha):
+        async def handle_intent(self, name, data, timeout=10.0):
+            nm = ""
+            for slot in (data.get("target") or []):
+                for d in ((slot or {}).get("devices") or []):
+                    nm = (d or {}).get("name") or nm
+            if nm == "台灯":                     # 快照里没有 → 判据侧点名"我没找到"
+                return {"success": True}
+            return {"success": True, "states": [
+                {"name": "射灯", "success": True},
+                {"name": "筒灯", "success": False, "error": "does not support x"}]}
+
+    plan = Plan(intent="TurnDeviceOn", source="t0", utterance="测试",
+                args=_tgt("台灯"),
+                extra_steps=[{"name": "TurnDeviceOn", "source": "t0",
+                              "args": _tgt("射灯"), "utterance": "打开射灯"}])
+    ha = TwoStepHa(states={"light.desk": _ent("light.desk", "off", "射灯")},
+                   entity_area=AREA)
+    ok, reply = asyncio.run(Executor(ha).run(plan))
+    assert ok is True and "我没找到" in reply and "另有 1 台没成功" in reply, reply
+
+
 # ── 能力预裁：entity_id 形（v1.1.3 留下的缝，B 批）──────────────────
 def _klar_plan(intent, args):
     return Plan(intent=intent, source="klar", utterance="打开那个东西", args=args)
@@ -499,3 +525,31 @@ def test_lock_note_absent_for_non_lock_domain():
     (ok, reply), _ = _run_plan({"light.desk": _ent("light.desk", "off", "台灯")},
                                _one("TurnDeviceOn", args))
     assert ok is True and "还没确认到" not in reply, reply
+
+
+def test_klar_turnon_lock_post_confirm_direction():
+    """v1.1.22：klar「打开门锁」=HassTurnOn×lock=**上锁**（D7 语义，_klar_direct 落
+    lock.lock）——后置确证旧式按意图名取值（非 HassLock 一律当"想解锁"）⇒ 上锁
+    成功反报「还没确认到已解锁」。本钉钉双向：真锁上不打扰 / 没锁上点名「已上锁」。"""
+    args = {"entity_id": ["lock.door"], "area": "办公室"}
+
+    class LockDone(Ha):
+        async def refresh_states(self, force=False):
+            self._states["lock.door"] = dict(self._states["lock.door"], state="locked")
+
+    ha = LockDone(results={}, states={"lock.door": _ent("lock.door", "unlocked", "大门锁")},
+                  entity_area={"lock.door": "办公室"})
+    ok, reply = asyncio.run(Executor(ha).run(_one("HassTurnOn", args, source="klar",
+                                                  utterance="打开大门锁")))
+    assert ok is True and "还没确认到" not in reply, reply
+    assert ("lock", "lock") in [(d, s) for d, s, _ in ha.svc_calls], ha.svc_calls
+
+    class LockStuck(Ha):
+        async def refresh_states(self, force=False):
+            pass                                   # 命令没落地：仍 unlocked
+
+    ha2 = LockStuck(results={}, states={"lock.door": _ent("lock.door", "unlocked", "大门锁")},
+                    entity_area={"lock.door": "办公室"})
+    ok2, reply2 = asyncio.run(Executor(ha2).run(_one("HassTurnOn", args, source="klar",
+                                                     utterance="打开大门锁")))
+    assert ok2 is True and "还没确认到已上锁" in reply2, reply2

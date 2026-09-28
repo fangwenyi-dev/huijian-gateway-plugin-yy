@@ -101,6 +101,33 @@ def test_scene_created_with_parsed_actions():
     assert "晚安" in r.text and "关闭卧室灯" in r.text
 
 
+def test_scene_with_unlock_action_is_named_in_reply():
+    """v1.1.22 口径（用户拍板）：创建/修改**不拦**，但含解锁族动作（D7：「关闭门锁」
+    =解锁）必须在播报里点名——静默入库=埋一条以后无人值守的解锁。"""
+    ex = Recorder()
+    r = _casc(_pipe(executor=ex), "当我说晚安就关闭门锁")
+    assert r.ok and "解锁" in r.text and "门锁" in r.text, r.text
+
+
+def test_scene_without_unlock_has_no_note():
+    """反向钉：普通动作不得被加注。"""
+    r = _casc(_pipe(), "当我说晚安就关闭卧室灯")
+    assert r.ok and "解锁" not in r.text, r.text
+
+
+def test_automation_with_unlock_action_is_named():
+    ex = Recorder()
+    r = _casc(_pipe(executor=ex), "当客厅温度超过28度就关闭门锁")
+    assert r.ok and "解锁" in r.text, r.text
+
+
+def test_scene_modify_with_unlock_is_named():
+    sc = FakeScenes(triggers=("晚安",))
+    ex = Recorder()
+    r = _casc(_pipe(scenes=sc, executor=ex), "把场景晚安改成关闭门锁")
+    assert r.ok and "解锁" in r.text, r.text
+
+
 def test_scene_multi_clause_all_parsed():
     ex = Recorder()
     r = _casc(_pipe(executor=ex), "当我说回家就打开客厅灯并打开卧室灯")

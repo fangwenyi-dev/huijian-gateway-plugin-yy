@@ -369,7 +369,10 @@ class Executor:
             → 一律当已确认（不打扰）；
           · 强制刷新失败 → 不判。
         """
-        want = "locked" if name == "HassLock" else "unlocked"
+        # v1.1.22：按 D7 语义判方向，不按意图名——klar 的 HassTurnOn×lock 落的是
+        # `lock.lock`（:1002-1003，_KLAR_ECHO_LOCK 同为"上锁"），旧式非 HassLock
+        # 一律取 "unlocked" ⇒ 上锁成功反报「还没确认到已解锁」。
+        want = "locked" if name in ("HassLock", "HassTurnOn") else "unlocked"
         try:
             rf = getattr(self.ha, "refresh_states", None)
             if rf is not None:
@@ -829,6 +832,11 @@ class Executor:
         if bits:
             # 实测假形（「打开办公室射灯和打开床头灯」→"好的，都办妥了"而 HA 零变化）：
             # 只要有一条分句被证伪，就不允许再用笼统的"都办妥了"收口。
+            if partial:
+                # v1.1.22：分句判据（查无此名/空操作/离线点名/锁确证）与逐台失败计数
+                # （逐实体行）是**两种事实**，不许互吞——旧式这里把 partial 置空，实测
+                # 「另有 1 台没成功」静默消失（链里一腿查无此名 + 一腿部分失败）。
+                bits.append(partial.strip("（）"))
             reply = "好的，" + "；".join(bits)
             partial = ""
         tag = f"(+%d步)" % (len(steps) - 1) if len(steps) > 1 else ""

@@ -315,3 +315,53 @@ def test_display_name_strips_ascii_tail_only_with_chinese():
     assert say_name("开窗器 123f-020A") == "开窗器"
     assert say_name("HUIJIAN-BB28 麦克风开关") == "HUIJIAN-BB28 麦克风开关"
     assert say_name("Air Conditioner") == "Air Conditioner"
+
+
+def test_say_name_keeps_short_index_suffix():
+    """v1.1.22：短尾（单个数字/字母）是**设备序号**不是型号——「客厅射灯2」剥成
+    「客厅射灯」后，多台带序号设备在播报里就分不出谁是谁；型号/英文/十六进制尾
+    照旧剥（判据：尾段 ≥2 字符且含字母）。"""
+    from core.nlu.query import say_name
+    assert say_name("客厅射灯2") == "客厅射灯2"
+    assert say_name("客厅射灯A") == "客厅射灯A"
+    assert say_name("客厅射灯 2") == "客厅射灯 2"
+    assert say_name("办公室空调 Air Conditioner") == "办公室空调"   # 型号尾照剥
+    assert say_name("开窗器 123f-020A") == "开窗器"
+
+
+class _HaClimate:
+    """只读替身：客厅空调（设定 26）+ 客厅温度传感器（室温 24.3）。"""
+    _areas = {}
+    ENTS = [
+        {"entity_id": "climate.kt", "state": "cool",
+         "attributes": {"friendly_name": "客厅空调", "temperature": 26}},
+        {"entity_id": "sensor.kt_t", "state": "24.3",
+         "attributes": {"friendly_name": "客厅温度传感器 温度",
+                        "device_class": "temperature", "unit_of_measurement": "°C"}},
+    ]
+
+    async def states(self):
+        return {e["entity_id"]: e for e in self.ENTS}
+
+    async def find_entities(self, area="", domains=(), name_contains=""):
+        out = []
+        for e in self.ENTS:
+            dom = e["entity_id"].split(".", 1)[0]
+            if domains and dom not in domains:
+                continue
+            nm = str((e.get("attributes") or {}).get("friendly_name") or "")
+            if area and area not in nm:
+                continue
+            out.append(e)
+        return out
+
+
+def test_ac_setpoint_question_answers_the_ac():
+    """v1.1.22：「客厅空调开多少度」问的是**空调设定值**——旧式落到裸「多少度」支
+    一律答房间传感器（实测 AC 设定 26 在案，却答「客厅的温度是 24.3 度」）。"""
+    qz = QueryZone(_HaClimate(), Settings(Path(os.environ["HUIJIAN_DATA"]) / "q18e.json"))
+    ans = asyncio.run(qz.answer("客厅空调开多少度"))
+    assert ans and "26" in ans and "24.3" not in ans, ans
+    # 反向钉：无设备词仍是房间温度（本职不变）
+    ans2 = asyncio.run(qz.answer("客厅多少度"))
+    assert ans2 and "24.3" in ans2, ans2

@@ -24,7 +24,7 @@ from typing import Any, Optional
 from . import corrector, targets as T
 from . import creation
 from .music import GENERIC_WORDS as _MUSIC_WORDS
-from .query import is_state_question, looks_local_query
+from .query import is_state_question, is_status_query, looks_local_query
 from .query import STATE_QUESTION_TAIL      # noqa: F401  变异靶：判据表在 query 单点定义
 
 logger = logging.getLogger("huijian.fastpath")
@@ -227,12 +227,14 @@ _ACTION_PATTERNS: list[tuple[re.Pattern, str, Any]] = [
     (re.compile(r"^(调到|调为|调成|调至|调整为|调整到|设置为|设定为|设定成|设置成|设为|设成|设置|设定|改成|换成|切换为|切换到|切到|切为|换到|变为|进入|改)\s*(自动模式|自动)"), "SetDeviceMode", {"mode": "auto"}),
     # ── 场景模式（v1.0.30 收编 060401/061701 语料：五拆之外的 HA preset 档；
     #    mode 直发英文规范名，集成端 set_preset_mode 通道按实体能力校验）──
-    (re.compile(r"^(调到|调为|调成|设为|设成|改成|换成|切换为|切换到|切到|切为|换到|变为|进入)\s*(?:的)?(睡眠|睡觉|夜间)(?:模式|档位|挡位|档)?$"), "SetDeviceMode", {"mode": "sleep"}),
-    (re.compile(r"^(调到|调为|调成|设为|设成|改成|换成|切换为|切换到|切到|切为|换到|变为|进入)\s*(?:的)?(节能|省能|省电)(?:模式|档位|挡位|档)?$"), "SetDeviceMode", {"mode": "eco"}),
-    (re.compile(r"^(调到|调为|调成|设为|设成|改成|换成|切换为|切换到|切到|切为|换到|变为|进入)\s*(?:的)?(舒适)(?:模式|档位|挡位|档)?$"), "SetDeviceMode", {"mode": "comfort"}),
-    (re.compile(r"^(调到|调为|调成|设为|设成|改成|换成|切换为|切换到|切到|切为|换到|变为|进入)\s*(?:的)?(静音|安静)(?:模式|档位|挡位|档)?$"), "SetDeviceMode", {"mode": "silent"}),
-    (re.compile(r"^(调到|调为|调成|设为|设成|改成|换成|切换为|切换到|切到|切为|换到|变为|进入)\s*(?:的)?(强力|强劲|增强|速冷|速热)(?:模式|档位|挡位|档)?$"), "SetDeviceMode", {"mode": "boost"}),
-    (re.compile(r"^(调到|调为|调成|设为|设成|改成|换成|切换为|切换到|切到|切为|换到|变为|进入)\s*(?:的)?(标准|常规)(?:模式|档位|挡位|档)?$"), "SetDeviceMode", {"mode": "normal"}),
+    # v1.1.22：尾巴并收「状态」（「空调调到睡眠状态」——守卫收窄后靠这里接住，
+    # 旧式 end 锚定只认 模式/档位/档，整句仍 MISS）
+    (re.compile(r"^(调到|调为|调成|设为|设成|改成|换成|切换为|切换到|切到|切为|换到|变为|进入)\s*(?:的)?(睡眠|睡觉|夜间)(?:模式|档位|挡位|档|状态)?$"), "SetDeviceMode", {"mode": "sleep"}),
+    (re.compile(r"^(调到|调为|调成|设为|设成|改成|换成|切换为|切换到|切到|切为|换到|变为|进入)\s*(?:的)?(节能|省能|省电)(?:模式|档位|挡位|档|状态)?$"), "SetDeviceMode", {"mode": "eco"}),
+    (re.compile(r"^(调到|调为|调成|设为|设成|改成|换成|切换为|切换到|切到|切为|换到|变为|进入)\s*(?:的)?(舒适)(?:模式|档位|挡位|档|状态)?$"), "SetDeviceMode", {"mode": "comfort"}),
+    (re.compile(r"^(调到|调为|调成|设为|设成|改成|换成|切换为|切换到|切到|切为|换到|变为|进入)\s*(?:的)?(静音|安静)(?:模式|档位|挡位|档|状态)?$"), "SetDeviceMode", {"mode": "silent"}),
+    (re.compile(r"^(调到|调为|调成|设为|设成|改成|换成|切换为|切换到|切到|切为|换到|变为|进入)\s*(?:的)?(强力|强劲|增强|速冷|速热)(?:模式|档位|挡位|档|状态)?$"), "SetDeviceMode", {"mode": "boost"}),
+    (re.compile(r"^(调到|调为|调成|设为|设成|改成|换成|切换为|切换到|切到|切为|换到|变为|进入)\s*(?:的)?(标准|常规)(?:模式|档位|挡位|档|状态)?$"), "SetDeviceMode", {"mode": "normal"}),
     # 体验批 E2E 补洞（2026-09-12）：开解锁令曾整体走兜底——确认环与 NLU 脱节。
     # 必须排在通用「开」前，否则 "开锁" 被 TurnDeviceOn(name=锁) 吃掉（语义还反了）。
     (re.compile(r"^(解锁|开锁|解开锁|打开锁)"), "HassUnlock", None),
@@ -712,7 +714,10 @@ def _is_complex_query(text: str) -> bool:
     # 反向钉在 test_v1112 IMPERATIVE_STILL_COMMAND 八句上。
     if is_state_question(t):
         return True
-    if re.search(r"(状态|情况|哪些|列表)", t):
+    # v1.1.22：裸「状态」→**疑问形**（与查询族共用 is_status_query，单点定义）。
+    # 旧式裸字会把「把空调调到除湿状态」这类**命令**一起吞：字面表弃权、klar 无
+    # 模式档、无 LLM 时整句落兜底＝命令丢失（1.1.20 只收了查询族一侧，这条漏改）。
+    if is_status_query(t):
         return True
     if re.search(r"所有.*(?:灯|设备|开关)", t):
         # v1.0.41（F13）：「所有…」分支原先不分位置——「把所有灯都关掉」这类

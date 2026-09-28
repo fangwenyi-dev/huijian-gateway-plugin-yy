@@ -131,6 +131,21 @@ def test_complex_query_guard_semantics():
     assert _is_complex_query("把客厅保存为会客模式")  # M1 场景创建不接管
 
 
+def test_mode_command_with_status_suffix_parses(fp):
+    """v1.1.22：裸「状态」守卫收窄成**疑问形**——「把空调调到除湿状态」是命令，
+    不是查询（1.1.20 只收窄了查询族一侧，字面表这条把命令一起吞；实测两档同时
+    弃权=命令丢失，用户听到"我还不会"）。反向：真查询照旧不接管。"""
+    plan = asyncio.run(fp.match("把空调调到除湿状态"))
+    assert plan is not None and plan.intent == "SetDeviceMode", plan
+    assert plan.args.get("mode") == "dry", plan.args
+    assert plan.args["target"][0]["devices"][0]["name"] == "空调", plan.args
+    plan2 = asyncio.run(fp.match("空调调到睡眠状态"))
+    assert plan2 is not None and plan2.args.get("mode") == "sleep", plan2
+    # 反向钉：疑问形照旧交上层（不许把查询吞成命令）
+    assert asyncio.run(fp.match("客厅灯状态如何")) is None
+    assert asyncio.run(fp.match("所有灯现在什么状态")) is None
+
+
 def test_scene_uncached_miss(fp):
     fp.scenes = FakeScenes(triggers=())
     assert asyncio.run(fp.match("观影模式")) is None

@@ -527,19 +527,19 @@ class Pipeline:
         if not text:
             return Reply("", "fallback", ok=False)
         self._sync_vocab()
-        dup = await self._dedup_gate(text)
+        dup = await self._dedup_gate(text, origin)
         if dup is not None:
             return dup
         try:
             reply = await self._cascade(text, origin, on_sentence)
         except asyncio.CancelledError:
-            self._dedup_abandon(text)            # 在飞方被杀：结算防共享方永挂
+            self._dedup_abandon(text, origin)    # 在飞方被杀：结算防共享方永挂
             raise
         except Exception:            # 级联永不冒泡：future 必须先结算再重抛语义（去重共享方）
             logger.exception("[级联] 意外异常（按兜底收束）")
             reply = Reply(self.settings.get("dialog.fallback_text", const.FALLBACK_TEXT),
                           "fallback", ok=False)
-        self._dedup_settle(text, reply)
+        self._dedup_settle(text, reply, origin)
         # v1.0.62 P0-1/P0-2：漏斗计数 + 兜底回流（观测件；_dedup_gate 早退的
         # 共享方不经过此处，天然不重复计数；reply.source 已是最终收口档位）。
         tele = getattr(self, "telemetry", None)
@@ -608,6 +608,8 @@ class Pipeline:
         fut = asyncio.get_running_loop().create_future()
         # v1.1.20：键带 origin——旧实现只按文本去重 ⇒ 两颗卫星 2s 内说同一句时，
         # 后说话的那颗被前一颗粒的回复顶掉（自己房间零动作、听到别人的房间）
+        # v1.1.22：1.1.20/21 只改了键函数，handle 三处调用没把 origin 传下来
+        # （键恒 `("", text)`，分桶等于没接线）；现三处补传，本注释才成立。
         self._last[key] = {"first": now, "fut": fut, "reply": None}
         self._last.move_to_end(key)
         return None
@@ -1072,6 +1074,7 @@ class Pipeline:
                              ok=False, trace=plan.trace)
             await self.scenes.refresh(force=True)   # 触发词即刻可用，不等 60s 缓存
             say = f"好的，语音场景已创建，以后说「{x}」，就{y_say}"
+            say += self._risky_actions_note(actions)   # v1.1.22：含解锁动作必须点名
         else:
             plan = Plan(intent="HassCreateAutomation",
                         args={"trigger": c["trigger"], "actions": actions},
@@ -1083,6 +1086,7 @@ class Pipeline:
                              ok=False, trace=plan.trace)
             idx = await self._automation_count()      # 播报编号=删除锚点（fail-open）
             say = f"好的，语音自动化已创建：{self._cond_say(c)}，就{y_say}"
+            say += self._risky_actions_note(actions)   # v1.1.22：含解锁动作必须点名
             if idx:
                 say += f"。要改它就说「删除自动化{idx}」再说一句新的"
         self._remember_turn(origin, text, say)
@@ -1423,6 +1427,8 @@ class Pipeline:
                    f"，就{y_say}")
         else:
             say = f"好的，自动化{idx}的动作已改成：就{y_say}（触发条件不变）"
+        if actions:
+            say += self._risky_actions_note(actions)   # v1.1.22：含解锁动作必须点名
         self._remember_turn(origin, text, say)
         return Reply(say, "creation", True, plan.trace)
 
@@ -1453,6 +1459,7 @@ class Pipeline:
                    f"请再说一句「当我说{x}，就{y_say}」")
             return Reply(say, "creation", ok=False, trace=cp.trace)
         say = f"好的，场景「{x}」已改成：就{y_say}"
+        say += self._risky_actions_note(actions)       # v1.1.22：含解锁动作必须点名
         self._remember_turn(origin, text, say)
         return Reply(say, "creation", True, cp.trace)
 
@@ -1867,6 +1874,29 @@ class Pipeline:
                     and T.args_target_lock(args):
                 return True                       # D7 反转语义：关锁=解锁
         return False
+
+    @staticmethod
+    def _risky_actions_note(actions: list) -> str:
+        """入库动作里含**解锁族**时的点名尾注（v1.1.22 用户拍板：创建/修改**不拦**，
+        但必须在播报里点名）。D7 反转语义（「关闭门锁」=解锁）静默入库 = 埋一条以后
+        无人值守的解锁；风险判据与确认环 `_plan_has_risky_step` 同一张表。返回 ""＝
+        无可点名项。永不抛（拼注失败=不加注，不改成败）。"""
+        try:
+            for a in actions or []:
+                if not isinstance(a, dict):
+                    continue
+                intent = str(a.get("intent") or "")
+                params = a.get("params") or {}
+                if intent in _RISKY_INTENTS or (
+                        intent in ("TurnDeviceOff", "HassTurnOff", "HassToggle")
+                        and T.args_target_lock(params)):
+                    what = "、".join(_target_names(params) or _target_areas(params)
+                                     or ["某台设备"])
+                    return f"（注：含解锁{what}的动作，触发时会直接执行）"
+            return ""
+        except Exception:  # noqa: BLE001 注可缺，动作入库不受影响
+            logger.exception("[创建] 解锁点名拼装异常（不加注）")
+            return ""
 
     def _confirm_ttl(self, text: str) -> float:
         """确认环自适应存活窗：基线 TTL + 提示播报时长估算（见 CONFIRM_TTL_S 注）。

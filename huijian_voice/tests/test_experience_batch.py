@@ -212,6 +212,22 @@ def test_dedup_abandon_on_cancel_frees_waiters():
     asyncio.run(scenario())
 
 
+def test_dedup_is_per_origin_wired():
+    """v1.1.22 接线钉：去重按 (origin, text) 分桶必须在**调用链上**生效——旧式
+    `_dkey` 已改但 `handle` 三处调用没把 origin 传下来（键恒 `("", text)`），
+    两颗卫星 2s 内同句时后说话的那颗仍被顶掉（自己房间零动作、听到别人房间的
+    答复）。本钉同时钉"同 origin 同句照旧去重"（本职不丢）。"""
+    ex = RecExecutor()
+    p = _pipe(fp=Lane(single=_p("TurnDeviceOn", _tgt())), ex=ex)
+    r1 = arun(p.handle("开灯", origin="satA"))
+    r2 = arun(p.handle("开灯", origin="satB"))
+    assert r1.source != "dedup" and r2.source != "dedup", (r1.source, r2.source)
+    assert len(ex.plans) == 2, "两颗卫星各说一次必须各自执行（旧式后者被顶掉）"
+    assert ("satA", "开灯") in p._last and ("satB", "开灯") in p._last, list(p._last)
+    r3 = arun(p.handle("开灯", origin="satA"))          # 同一颗卫星重复 → 仍去重
+    assert r3.source == "dedup" and len(ex.plans) == 2, (r3.source, len(ex.plans))
+
+
 # ── P1-8 STT 抢占收束 ─────────────────────────────────────────
 def test_stt_preempted_stop_still_gets_one_frame():
     """被抢占的 stop 必须恰收一条空帧——含"任务尚未起跑就被取消"竞态。

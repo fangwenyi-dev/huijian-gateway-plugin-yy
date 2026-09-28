@@ -187,8 +187,9 @@ def _mk_pipe(tmp_path):
         return None
     p._cascade = _fake_cascade
     p.query = types.SimpleNamespace(answer=_fake_query)
-    p._dedup_gate = lambda text: _ret(None)
-    p._dedup_settle = lambda text, reply: None
+    # v1.1.22：handle 三处调用补传 origin（键形 (origin, text)）——白盒替身同步收参
+    p._dedup_gate = lambda text, origin="": _ret(None)
+    p._dedup_settle = lambda text, reply, origin="": None
     p._sync_vocab = lambda: None
     p._spawn = lambda coro: coro.close()
     p.ha = types.SimpleNamespace(fire_event=lambda *a, **k: _noop())
