@@ -221,6 +221,48 @@ class StateWithAreaConstraint:
     unset_area_constraint: bool
 
 
+def _entity_area_id(hass: HomeAssistant, entity_id: str) -> str | None:
+    """实体所属区域：实体自身 area_id → 回落到设备 area_id（与 HA 同口径）。"""
+    entry = er.async_get(hass).async_get(entity_id)
+    if entry is None:
+        return None
+    if entry.area_id:
+        return entry.area_id
+    if entry.device_id:
+        dev = dr.async_get(hass).async_get(entry.device_id)
+        if dev is not None:
+            return dev.area_id
+    return None
+
+
+def _contains_name_states(hass: HomeAssistant, name: str, area_name: str | None,
+                          domains) -> list[State]:
+    """名称「包含」回捞（v1.1.25 办公 .91 英文句实锤根修）。
+
+    病灶：HA 的 target 名称匹配是**词级**——实体叫「射灯」、用户说「灯」
+    （英文 'turn on the office light' 经双语桥也落到「灯」）时严格匹配必 miss ⇒
+    「没找到符合条件的设备」；中文同形只是常被 klar 接走，英文没有兜底。
+    保守三约束：**同区域（若给了）+ 同域 + 名称包含**；区域名注册表里不认识 ⇒
+    一律返回空（宁如实 miss，绝不跨区抓设备）。仅供严格匹配为空后的回捞使用。"""
+    if not name:
+        return []
+    area_id = None
+    if area_name:
+        area = ar.async_get(hass).async_get_area_by_name(area_name)
+        if area is None:
+            return []
+        area_id = area.id
+    low = name.lower()
+    out: list[State] = []
+    for state in hass.states.async_all(domains or None):
+        if area_id is not None and _entity_area_id(hass, state.entity_id) != area_id:
+            continue
+        fname = str(state.attributes.get("friendly_name") or state.name or "")
+        if low in fname.lower():
+            out.append(state)
+    return out
+
+
 async def _match_with_constraints(
     hass: HomeAssistant,
     targets: list[HaTargetItem],
@@ -254,6 +296,21 @@ async def _match_with_constraints(
             _LOGGER.info("Match constraints (assistant=%s): %s", assistant, match_constraints)
             match_result = intent.async_match_targets(hass, match_constraints)
             if not match_result.is_match:
+                # v1.1.25：「包含」回捞（泛称/英文双语桥必 miss 形态；办公 .91 实锤
+                # 'turn on the office light' → 桥成「灯」→ 实体叫「射灯」⇒ 严格匹配空）。
+                fallback = _contains_name_states(
+                    hass, str(device.get("name") or ""), area_name,
+                    expanded_domains or None)
+                if fallback:
+                    _LOGGER.info(
+                        "Contains-name fallback matched %d entities for %r",
+                        len(fallback), device.get("name"))
+                    found_states.append(
+                        StateWithAreaConstraint(
+                            states=fallback,
+                            unset_area_constraint=(area_name == ""),
+                        )
+                    )
                 continue
             found_states.append(
                 StateWithAreaConstraint(

@@ -2,6 +2,19 @@
   "_doc": "ESP32 卫星固件发布锁（OTA 方案 Phase 2）。releases 每条=一个可下发版本：version(x.y.z)/file(public 目录内落盘名)/urls(按容灾顺序 GitHub→Gitee，私有仓须内嵌一次性访问串)/sha256(64hex 必填，缺=拒下载)/size/notes_zh(对外话术，受内部文档禁发约束)/min_compatible。镜像内置文件之外，/data/firmware/firmware.lock.json 同名整文件优先（现场热修不重打镜像）。版本值以固件仓 release 实测为准，禁止凭记忆填写。",
   "releases": [
     {
+      "version": "2.1.70",
+      "file": "huijian-s3-2.1.70.bin",
+      "urls": [
+        "https://gh-proxy.com/https://github.com/fangwenyi-dev/huijian-gateway-plugin-yy/releases/download/v1.1.25/huijian-s3-2.1.70.bin",
+        "https://github.com/fangwenyi-dev/huijian-gateway-plugin-yy/releases/download/v1.1.25/huijian-s3-2.1.70.bin",
+        "https://gitee.com/fangwenyi-dev/huijian-gateway-plugin-yy/releases/download/v1.1.25/huijian-s3-2.1.70.bin"
+      ],
+      "sha256": "3638f6dad707d15031d7f3d10d027f2d0efe7b22e2b4d7ec5a2fdbccc5a534da",
+      "size": 2579264,
+      "notes_zh": "证据面批（不改音频行为、不动出货默认值）：三处自证行订正 + S6c 守卫改「钉结构+反向」+ AGC 旋钮 A/B 记账——让现场日志说真话、把台架结论入账；并入 2.1.68 的 F7 上行尾包修复（弱网「说了没反应」整轮 20 秒根因）与 2.1.69 死旋钮收口。bin 为 v2.1.70 发布构建（app 镜像，版本戳 2.1.70 已核），由固件仓镜像至本公开 release",
+      "min_compatible": "2.1.36"
+    },
+    {
       "version": "2.1.67",
       "file": "huijian-s3-2.1.67.bin",
       "urls": [
