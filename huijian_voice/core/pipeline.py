@@ -45,6 +45,7 @@ from .nlu.fast_path import (END_DIALOGUE_INTENT, FLAG_ANAPHORA_STRIPPED,
                             attribute_domain_target, is_end_dialogue, is_pronoun,
                             is_whole_house, split_compound)
 from .nlu import targets as T
+from .nlu import corrector
 from . import capability
 from .nlu.canonical import canonical
 from .nlu import music
@@ -550,7 +551,16 @@ class Pipeline:
             "utterance": text, "reply": reply.text, "source": reply.source,
             "ok": reply.ok, "origin": origin,
             "ms": int((time.time() - t0) * 1000)}))
-        logger.info("[级联] %r → [%s] %r (%.0fms)", text, reply.source, reply.text,
+        # v1.1.22：日志打**纠错后**文本——现场把 ASR 听错的原话（「平台窗」）误读成
+        # 缺陷；判据与 fast_path 内部同表同参（corrector.apply），故障回落原文；
+        # 原始听写文本降级 DEBUG 留痕（诊断 ASR 仍拿得到）。
+        try:
+            shown = corrector.apply(text, self.settings.get("nlu.corrections_extra") or {})
+        except Exception:  # noqa: BLE001 纠错故障=日志回落原文
+            shown = text
+        if shown != text:
+            logger.debug("[级联] 原始听写 %r（纠错后见下行）", text)
+        logger.info("[级联] %r → [%s] %r (%.0fms)", shown, reply.source, reply.text,
                     (time.time() - t0) * 1000)
         return reply
 
@@ -1172,6 +1182,15 @@ class Pipeline:
                 return Reply(self._creation_reject(c, clause), "creation",
                              ok=False, trace=[f"创建拒收:{clause!r}"])
             plan = self._scope_action_area(plan, clause, c)
+            bad_area = await self._creation_area_problem(plan)
+            if bad_area:
+                # v1.1.22：区域解析不到的动作绝不入库（否则场景触发时必半失败）
+                logger.info("[创建] 子句区域解析不到 → 整单拒收 %r（area=%r）",
+                            clause, bad_area)
+                return Reply(f"抱歉，「{bad_area}」这个房间我没找到——这句可能没听全，"
+                             f"请把房间和设备说清楚再说一次（比如「打开办公室的射灯」）。",
+                             "creation", ok=False,
+                             trace=[f"创建拒收:区域不存在:{bad_area}"])
             actions.append({"intent": plan.intent, "params": copy.deepcopy(plan.args)})
             echo_parts.append(clause)
         return actions, "，".join(echo_parts)
@@ -1809,6 +1828,37 @@ class Pipeline:
         except Exception:
             pass
         return {a.strip() for a in areas if a and str(a).strip()}
+
+    async def _creation_area_problem(self, plan: Plan) -> Optional[str]:
+        """创建入库前的**区域可解析性**预检（v1.1.22 办公实锤）。
+
+        病灶：连写句「打开办公室的射灯办公室的空调」被解析成 area='办公室的射灯办公室'
+        的畸形动作——创建时无人校验，场景照样入库、播报"已创建"，**触发时必然半失败**
+        （现场「我有点热」1/2 个动作没执行成功）。
+        判据：动作目标的 area 必须在 **HA 区域注册表**（`ha._areas`）里存在；注册表
+        未同步（_areas 空）⇒ 一律放行（fail-open，同 capability 纪律：宁漏放不误拒）。
+        只判区域名——设备名不在册不判（离线/隐藏实体在册，误拒风险高）。永不抛。"""
+        try:
+            ha = self.ha
+            if ha is None:
+                return None
+            targets = (plan.args or {}).get("target")
+            if not isinstance(targets, list) or not targets:
+                return None
+            await ha.states()                     # 顺带触发注册表 TTL 刷新
+            reg = {str(v).strip() for v in (getattr(ha, "_areas", {}) or {}).values()
+                   if str(v).strip()}
+        except Exception:  # noqa: BLE001 判不了=放行（宁漏放不误拒）
+            return None
+        if not reg:
+            return None
+        for t in targets:
+            if not isinstance(t, dict):
+                continue
+            a = str(t.get("area") or "").strip()
+            if a and a not in reg:
+                return a
+        return None
 
     def _overbroad_area_target(self, plan: Optional[Plan]) -> Optional[str]:
         """target 只有"区域名当设备名"+空 domains（"客厅开灯"→name=客厅/domains=[]）

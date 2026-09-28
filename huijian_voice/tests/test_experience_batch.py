@@ -212,6 +212,21 @@ def test_dedup_abandon_on_cancel_frees_waiters():
     asyncio.run(scenario())
 
 
+def test_handle_log_shows_corrected_text(caplog):
+    """v1.1.22：`[级联]` 日志打**纠错后**文本——现场把 ASR 听错的原话
+    （「平台窗」）误读成缺陷；原始听写文本降级 DEBUG 留痕（诊断 ASR 仍拿得到）。"""
+    p = _pipe(fp=Lane(single=_p("TurnDeviceOn", _tgt())), ex=RecExecutor())
+    with caplog.at_level("DEBUG"):
+        arun(p.handle("关闭办公室平台窗"))
+    info = [r.getMessage() for r in caplog.records
+            if r.levelname == "INFO" and "[级联]" in r.getMessage()]
+    assert info, "handle 必须留 [级联] INFO 行"
+    assert all("平台窗" not in m for m in info), info          # INFO 只看纠错后
+    assert any("平开窗" in m for m in info), info
+    dbg = [r.getMessage() for r in caplog.records if r.levelname == "DEBUG"]
+    assert any("平台窗" in m for m in dbg), "原始听写必须降级 DEBUG 留痕"  # 反向
+
+
 def test_dedup_is_per_origin_wired():
     """v1.1.22 接线钉：去重按 (origin, text) 分桶必须在**调用链上**生效——旧式
     `_dkey` 已改但 `handle` 三处调用没把 origin 传下来（键恒 `("", text)`），

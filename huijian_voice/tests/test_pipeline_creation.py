@@ -101,6 +101,57 @@ def test_scene_created_with_parsed_actions():
     assert "晚安" in r.text and "关闭卧室灯" in r.text
 
 
+class _RegHa:
+    """只读替身：区域注册表（_areas）+ states 快照（区域预检用）。"""
+
+    def __init__(self, areas=None, states=None):
+        self._areas = {"a1": "办公室"} if areas is None else areas
+        self._states = states or {}
+        self._entity_area = {}
+        self._entity_alias = {}
+
+    async def states(self):
+        return self._states
+
+    async def refresh_states(self, force=False):
+        return None
+
+
+def _pipe_reg(ha, executor=None):
+    return Pipeline(S(**{"nlu.textcnn_enabled": False}), ha=ha, scenes=FakeScenes(),
+                    textcnn=None, executor=executor or Recorder(), agent=None,
+                    klar=StubKlar())
+
+
+FUSED = "当我说我有点热就打开办公室的射灯办公室的空调和办公室的平开窗"
+SEPARATED = "当我说我有点热就打开办公室的射灯、办公室的空调和办公室的平开窗"
+
+
+def test_creation_rejects_area_not_in_registry():
+    """v1.1.22 办公实锤：连写句把区域解析成「办公室的射灯办公室」（注册表里没有）——
+    创建时必须整单拒收（旧式照样入库 ⇒ 触发时必半失败「1/2 个动作没执行成功」）。"""
+    ex = Recorder()
+    r = _casc(_pipe_reg(_RegHa(), ex), FUSED)
+    assert r.ok is False and not ex.calls, (r.text, ex.calls)
+    assert "办公室的射灯办公室" in r.text, r.text
+
+
+def test_creation_separated_clauses_still_create():
+    """反向钉：分句正确 → 不误拒（顿号版三条动作，area 全 = 办公室）。"""
+    ex = Recorder()
+    r = _casc(_pipe_reg(_RegHa(), ex), SEPARATED)
+    assert r.ok and ex.calls and ex.calls[0].intent == "HassCreateVoiceScene", r.text
+    areas = [a["params"]["target"][0].get("area") for a in ex.calls[0].args["actions"]]
+    assert areas == ["办公室", "办公室", "办公室"], areas
+
+
+def test_creation_area_gate_fail_open_without_registry():
+    """反向钉：区域注册表未同步（_areas 空）⇒ 不判、行为同旧（fail-open 纪律）。"""
+    ex = Recorder()
+    r = _casc(_pipe_reg(_RegHa(areas={}), ex), FUSED)
+    assert r.ok and ex.calls, r.text
+
+
 def test_scene_with_unlock_action_is_named_in_reply():
     """v1.1.22 口径（用户拍板）：创建/修改**不拦**，但含解锁族动作（D7：「关闭门锁」
     =解锁）必须在播报里点名——静默入库=埋一条以后无人值守的解锁。"""

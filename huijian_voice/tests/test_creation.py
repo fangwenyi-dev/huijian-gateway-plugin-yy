@@ -159,6 +159,19 @@ def test_scene_delete_requires_explicit_name():
         assert p is None or p.get("kind") != "delete_scene", s
 
 
+def test_scene_delete_verb_first_name_middle():
+    """v1.1.22 现场语序（办公实锤）：「删除我有点热语音场景」——动词在前、名字居中、
+    「(语音)场景」在尾。旧表只认"场景在名前"或"动词在句尾" ⇒ 整句落兜底"我还不会"。"""
+    for s in ("删除我有点热语音场景", "删掉我有点热场景", "删除我有点热场景"):
+        p = cr.parse(s)
+        assert p and p["kind"] == "delete_scene" and p["trigger_phrase"] == "我有点热", s
+    # 反向：既有语序不回归；泛称/代词仍不得被当名字（清库与误删双护栏）
+    assert cr.parse("删除场景我有点热")["trigger_phrase"] == "我有点热"
+    assert cr.parse("删除所有场景") is None
+    p = cr.parse("删除这个场景")
+    assert p is None or p.get("trigger_phrase") != "这个"
+
+
 # ── v1.0.34 生命周期句式（列出/删自动化/改场景）─────────────────
 def test_list_phrases():
     for s in ("列出场景", "有哪些场景", "我有什么自动化", "查看语音场景",
