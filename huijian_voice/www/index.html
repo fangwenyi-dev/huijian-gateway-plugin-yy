@@ -16,8 +16,8 @@
      v1.0.42 的 #1d1750「过紫」与更早 #030712「过黑」均已作废，勿回潮 -->
 <meta name="theme-color" content="#071426">
 <title>慧尖HA语音插件</title>
-<link rel="stylesheet" href="css/huijian.css?v=1.1.25">
-<link rel="stylesheet" href="css/voice.css?v=1.1.25">
+<link rel="stylesheet" href="css/huijian.css?v=1.1.26">
+<link rel="stylesheet" href="css/voice.css?v=1.1.26">
 </head>
 <body>
 <!-- 「星辰大海」背景层（与网关加载项同一设计标准/同一固定种子＝同一片天）：
@@ -82,6 +82,7 @@
         <select id="stt_local_model">
           <option value="sensevoice">SenseVoice-Small · 中英粤（默认，整句离线识别）</option>
           <option value="paraformer">Paraformer · 中英双语流式（逐字出字，纯中文场景对比档）</option>
+          <option value="firered_ctc">FireRedASR2-CTC · 中英+20多种方言（离线整句，实测对比档，包 776MB）</option>
         </select></div>
     </div>
     <div id="sttCloudBox" style="display:none">
@@ -314,7 +315,7 @@
 
 <script>
 "use strict";
-const CURRENT_VERSION = "1.1.25";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
+const CURRENT_VERSION = "1.1.26";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
 // 音色表 = kokoro-multi-lang-v1_1 官方 103 sid 全表（k2-fsa docs sid 表实证；
 // 标注=对用户上传试听样本的 CAM++ 声纹溯源榜：v1_1 不含晓晓/云扬，
 // sid18=zf_026 女声最似晓晓(0.454 全场最近)，sid81=zm_055 最似云扬）
@@ -364,7 +365,7 @@ const VOICE_HINTS = {
 };
 const TTS_SID_OWNER = "local_kokoro";   // tts.sid 的写权只属 Kokoro 档：单音色/云档保存时不提交
 let _kokoroSid = null;                  // Kokoro 档记住的选择（切档再切回不丢，含自定义音色主名）
-const MODEL_NAMES = {asr_sensevoice_small:"STT · SenseVoice-Small 中英粤", asr_paraformer_bilingual:"STT · Paraformer 中英双语流式", tts_kokoro_multilang:"TTS · Kokoro 多语包"};
+const MODEL_NAMES = {asr_sensevoice_small:"STT · SenseVoice-Small 中英粤", asr_paraformer_bilingual:"STT · Paraformer 中英双语流式", asr_firered_ctc:"STT · FireRedASR2-CTC 中英+方言", tts_kokoro_multilang:"TTS · Kokoro 多语包"};
 const $ = s => document.querySelector(s);
 /* Ingress 适配（网关同款实证）：页面挂在 /api/hassio_ingress/<token>/ 下，
    根绝对路径 fetch 会打到 HA Core。由 location.pathname 推导前缀；
@@ -420,7 +421,7 @@ async function refreshStatus(){
                                  : `<span class="pill ok">正常 ${up}</span>`),
       statRow("HA 桥接", st.ha_bridge?pill("在线","ok")
         :pill("不可达","bad")+(st.ha_error?`<span class="hint" style="margin-left:8px">${esc0(String(st.ha_error).slice(0,60))}</span>`:"")),
-      statRow("STT 引擎", st.stt_loaded?pill("已加载 · "+(st.stt_kind==="paraformer"?"Paraformer 流式":st.stt_kind==="sensevoice"?"SenseVoice":(st.stt_kind||"本地")),"ok"):pill("未就绪","warn")),
+      statRow("STT 引擎", st.stt_loaded?pill("已加载 · "+(st.stt_kind==="paraformer"?"Paraformer 流式":st.stt_kind==="sensevoice"?"SenseVoice":st.stt_kind==="firered_ctc"?"FireRedASR2-CTC":(st.stt_kind||"本地")),"ok"):pill("未就绪","warn")),
       statRow("TTS 引擎", st.tts_loaded?pill("已加载","ok"):pill("未就绪","warn")),
       statRow("意图分类", st.textcnn?pill("可用","ok"):pill("缺资产","warn")),
       statRow("本地理解", st.nlu_enabled!==false?pill("已启用","ok")
@@ -508,9 +509,12 @@ async function loadSettings(){
   _kokoroSid = String(S.tts.sid ?? KOKORO_DEFAULT_SID);   // Kokoro 档的选择；音色表由 syncBoxes() 按引擎重建
   $("#tts_speed").value = S.tts.speed ?? 1.25;
   $("#stt_provider").value = S.stt.provider==="cloud" ? "cloud" : "local_paraformer";
-  // v1.0.99+ 本地模型切换（stt.local_model：sensevoice|paraformer）：未知值按
-  // 默认档显示（引擎读侧同判据——_primary_kind 非表值一律回落 sensevoice）。
-  $("#stt_local_model").value = S.stt.local_model==="paraformer" ? "paraformer" : "sensevoice";
+  // v1.0.99+ 本地模型切换（stt.local_model：sensevoice|paraformer|firered_ctc）：
+  // 未知值按默认档显示（引擎读侧同判据——_primary_kind 非表值一律回落 sensevoice）。
+  // 旧写法是 paraformer/其余 的二元三元式：第三档会被显示成默认档（用户以为切了
+  // 实际没切，且下一次保存静默改写 settings），故改成员判断。
+  const _STT_KINDS = ["sensevoice", "paraformer", "firered_ctc"];
+  $("#stt_local_model").value = _STT_KINDS.includes(S.stt.local_model) ? S.stt.local_model : "sensevoice";
   // v1.0.65（TTS 深审 F11）：云档存在两个"正统"拼法（引擎读侧 startswith
   // ("cloud") 双吃：UI 的 "cloud" 与 settings 注释/测试沿用的
   // "cloud_openai_compat"）。旧版严格判等：手改的 cloud_openai_compat 下拉框
@@ -1091,6 +1095,6 @@ $("#regenBtn").onclick = async ()=>{
   try { await post("/api/token/regenerate",{}); toast("已重置"); loadEndpoints(); } catch(e){ toast(e.message); }
 };
 </script>
-<script src="js/starsky.js?v=1.1.25"></script>
+<script src="js/starsky.js?v=1.1.26"></script>
 </body>
 </html>

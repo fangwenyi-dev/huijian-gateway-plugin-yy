@@ -39,6 +39,20 @@
       "https://hf-mirror.com/csukuangfj/sherpa-onnx-streaming-paraformer-bilingual-zh-en/resolve/main/sherpa-onnx-streaming-paraformer-bilingual-zh-en.tar.bz2"
     ]
   },
+  "asr_firered_ctc": {
+    "display_name": "STT · FireRedASR2-CTC 中英+方言 (int8)",
+    "default_provider": false,
+    "tarball": "sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25.tar.bz2",
+    "sha256": "1da8b737ecc5e29f36759a4460c754863e7c919a4ba325aea187331fbfc83274",
+    "top_dir": "sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25",
+    "required_files": ["model.int8.onnx", "tokens.txt"],
+    "size_mb": 520,
+    "_file_note": "2026-09-28 本机 gh-proxy 直下实测 520,516,278B（与官方 gh release asset 字节数逐字相同）→ sha256 1da8b737…。解包后 model.int8.onnx **775,861,420B(740MiB)** + tokens.txt 79,172B（现役 SenseVoice 仅 239MB，这是 3.3×；/data/models 需 ~777MB，下载期另有 .part 520MB）。它是 FireRedASR2-AED 同一份权重**只取 encoder + CTC 分支**的导出、attention decoder 被排除（导出方官方文档明写）⇒ 官方那张 3.05% CER 表是 AED/LLM 口径，**此档无任何公开 CER/WER**，属实测对比档。sherpa-onnx 支持落在 1.12.27（我们 requirements >=1.13.4,<1.14 区间已含，构造签名 v1.13.4 实测无 sample_rate 形参）。与 SenseVoice 一样**不吃热词**。hf-mirror 该包实测 404⇒不设第三源，逃生门 /data/models/import/。非默认档，开机不自动下载。",
+    "urls": [
+      "https://gh-proxy.com/https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25.tar.bz2",
+      "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25.tar.bz2"
+    ]
+  },
   "tts_kokoro_multilang": {
     "display_name": "TTS · Kokoro 中英多音色 v1.1 (103 音色，默认 sid28)",
     "default_provider": false,

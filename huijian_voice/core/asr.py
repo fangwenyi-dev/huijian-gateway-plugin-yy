@@ -18,6 +18,13 @@
     优势本就未使用，换离线引擎零协议损失。
   - Paraformer **保留为兼容/回落档**：stt.local_model=paraformer 显式回退，或
     主档缺失/加载失败自动降级，语音链不断（fail-open）。
+2026-09-28 追加（用户点名实测的**对比档**，非默认、不参与 fail-open）：
+  - `firered_ctc` = FireRedASR2-CTC int8（OfflineRecognizer，中英 + 20 多种方言）。
+    它是 FireRedASR2-AED 同一份权重里**只取 encoder + CTC 分支**的导出，attention
+    decoder 被排除（导出方官方文档明写）⇒ **官方没有此档的 CER/WER 数字**，
+    3.05% 那张表是 AED/LLM 口径，不得张冠李戴。解包 776MB（现役 239MB）。
+  - 该档构建失败**不回落 Paraformer**：显式选的对比档若被顶替，用户会把回落档
+    的识别结果当成 FireRed 的成绩，对比实测直接失效。
 云档 = OpenAI 兼容 /audio/transcriptions（whisper 形态），任何异常回落本地（v4.1-②）。
 """
 from __future__ import annotations
@@ -37,7 +44,13 @@ _CHUNK = 1600   # 100ms 分块喂入（实测与整段喂入结果一致，分�
 # 引擎键位（models.lock.json 的 key）
 KEY_SV = "asr_sensevoice_small"
 KEY_PF = "asr_paraformer_bilingual"
-_KIND_KEY = {"sensevoice": KEY_SV, "paraformer": KEY_PF}
+KEY_FR = "asr_firered_ctc"
+_KIND_KEY = {"sensevoice": KEY_SV, "paraformer": KEY_PF, "firered_ctc": KEY_FR}
+_KIND_LABEL = {"sensevoice": "SenseVoice-Small", "paraformer": "Paraformer 双语流式",
+               "firered_ctc": "FireRedASR2-CTC"}
+# 离线＝整句一次解码；其余走流式收流（is_ready/get_result_all + 1s 尾静音）。
+# CTC 是 OfflineRecognizer，归错集合＝调用它没有的收流接口，结果是空串。
+_OFFLINE_KINDS = ("sensevoice", "firered_ctc")
 
 # SenseVoice 输出的语言/情感/事件标签：zh/yue/EN/NEUTRAL/Speech/woitn 等
 _STRIP_TAGS = re.compile(r"<\|[^<>|]*\|>")
@@ -90,6 +103,16 @@ class AsrEngine:
                 use_itn=False,                    # 与旧档对齐：不挂 ITN（paraformer 无 rule_fsts）
                 provider="cpu",
             )
+        elif kind == "firered_ctc":
+            # v1.13.4 实测签名只有 model/tokens/num_threads/decoding_method/debug/
+            # provider，**没有 sample_rate**——照 SenseVoice 那套传参是 TypeError，
+            # 现场表现为"模型加载失败"而非可读分因。
+            rec = sherpa_onnx.OfflineRecognizer.from_fire_red_asr_ctc(
+                model=str(d / "model.int8.onnx"),
+                tokens=str(d / "tokens.txt"),
+                num_threads=2,
+                provider="cpu",
+            )
         else:
             rec = sherpa_onnx.OnlineRecognizer.from_paraformer(
                 tokens=str(d / "tokens.txt"),
@@ -131,8 +154,7 @@ class AsrEngine:
         with self._lock:
             self._rec = rec
         self.last_used = time.time()
-        logger.warning("[STT] %s 已加载 @ %s",
-                       "SenseVoice-Small" if kind == "sensevoice" else "Paraformer 双语流式", d)
+        logger.warning("[STT] %s 已加载 @ %s", _KIND_LABEL.get(kind, kind), d)
         return True
 
     def ensure_loaded(self) -> bool:
@@ -230,7 +252,7 @@ class AsrEngine:
             self._busy += 1
         try:
             samples = audio.pcm16_to_f32(pcm_s16)
-            if getattr(rec, "_hj_kind", "paraformer") == "sensevoice":
+            if getattr(rec, "_hj_kind", "paraformer") in _OFFLINE_KINDS:
                 stream = rec.create_stream()
                 stream.accept_waveform(const.SAMPLE_RATE, samples)
                 rec.decode_stream(stream)

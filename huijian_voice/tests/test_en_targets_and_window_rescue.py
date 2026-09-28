@@ -225,7 +225,8 @@ def test_www_local_model_selector_wired():
     assert 'id="stt_local_model"' in html, "本地模型下拉未挂线"
     assert 'id="sttLocalBox"' in html, "云档隐藏盒未挂线"
     assert 'local_model:$("#stt_local_model").value' in html, "保存体未带 local_model"
-    assert 'S.stt.local_model==="paraformer"' in html, "loadSettings 未回填选择"
+    assert '_STT_KINDS.includes(S.stt.local_model)' in html, \
+        "loadSettings 未回填选择（须成员判断：二元式会把第三档显示成默认档）"
     assert '"paraformer"' in html and "stt_kind" in html, "状态卡未显示在载引擎"
 
 

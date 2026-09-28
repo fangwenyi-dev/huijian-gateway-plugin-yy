@@ -29,7 +29,7 @@ DEFAULTS: dict[str, Any] = {
         # provider：local_paraformer(=本地引擎总开关值，历史兼容，勿改字面) | cloud_openai_compat
         # v4.2：本地具体引擎由 local_model 决定；provider 字面值保持兼容存量 settings.json
         "provider": "local_paraformer",
-        "local_model": "sensevoice",          # sensevoice(默认中英粤) | paraformer(双语流式兼容回落档)
+        "local_model": "sensevoice",          # sensevoice(默认中英粤) | paraformer(双语流式兼容回落档) | firered_ctc(离线对比档·中英+方言)
         "language": "zh-CN",
         # 云档示例：{"provider":"cloud_openai_compat","base_url":"https://dashscope.aliyuncs.com/compatible-mode/v1","api_key":"","model":"paraformer 或 whisper 兼容名"}
         # 云失败自动回落本地（v4.1-②）
