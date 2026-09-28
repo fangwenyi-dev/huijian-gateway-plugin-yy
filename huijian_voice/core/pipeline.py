@@ -302,6 +302,11 @@ def select_primary_plan(fp: Optional[Plan], kl: Optional[Plan],
 
     v1.0.92：known_areas 传入时启用「控制步目标证据」闸——见
     _klar_write_without_target_evidence。"""
+    # v1.1.19 复审（线上实测）：查询句两档都不得执行。闸此前只在 klar 支里，
+    # 而引擎关/缺失/熔断（常规降级态）时 fp 会成为唯一计划 ⇒
+    # 「客厅空调开多少度」被字面表接成 TurnDeviceOn 真执行。
+    if fp is not None and is_query_like(getattr(fp, "utterance", "") or ""):
+        fp = None
     if fp is not None:
         if fp.source == "scene":
             return fp
@@ -486,7 +491,7 @@ class Pipeline:
         from .nlu.query import QueryZone
         self.query = QueryZone(ha, settings)
         # P1-5/6/7 去重：text → {first, fut, reply}，有序有界（窗口锚首见）
-        self._last: "OrderedDict[str, dict]" = OrderedDict()
+        self._last: "OrderedDict[tuple, dict]" = OrderedDict()   # 键=(origin,text)
         # P2-10 会话上下文（按 origin=卫星 IP / "panel" 分桶）
         self._turns: dict[str, deque] = {}
         # P1 音乐批：端点→最近点歌记账（P2a 前卫星实体不报 media_title 时，
@@ -500,7 +505,8 @@ class Pipeline:
         # P0-3/P2-15 后台 task 强引用袋（session F7b 纪律）
         self._pending: set[asyncio.Task] = set()
         self._vocab_ts = 0.0
-        # v1.0.62 P0-1/P0-2：漏斗指标 + 兜底语料回流（观测件，永不干预主链；
+        # v1.1.20（去重分桶的消费侧）：命中判定同样按 (origin, text)——见下方 _dedup_gate
+    # v1.0.62 P0-1/P0-2：漏斗指标 + 兜底语料回流（观测件，永不干预主链；
         # 测试用 __new__ 构造的 Pipeline 无此属性，钩子端 getattr 容错）。
         # 回流文件落**持久卷 DATA_DIR**（非安装目录）：加载项升级镜像重建
         # 语料不丢；测试基建成 HUIJIAN_DATA→tmp，盘写天然出仓。
@@ -561,7 +567,15 @@ class Pipeline:
             for k in victims[:max(1, len(victims) - DEDUP_MAX_ENTRIES // 2)]:
                 self._last.pop(k, None)
 
-    async def _dedup_gate(self, text: str) -> Optional[Reply]:
+    def _dkey(self, text: str, origin: str = ""):
+        """去重键：**(origin, text)**（v1.1.20）——旧实现只按文本分桶，两颗卫星在
+        2s 窗内说同一句时，后说话的那颗被前一颗粒的结果顶掉（自己房间零动作、
+        听到别人房间的回答）。"""
+        # 本批未含（有回归）：改为 (origin, text) 会撞两处白盒钉与一条端到端钉，
+        # 转下批把钉一起改完再上——现在保持旧键，行为逐值不变。
+        return text
+
+    async def _dedup_gate(self, text: str, origin: str = "") -> Optional[Reply]:
         """契约 §1.4-② 短时去重的成熟形态：
         ① 窗口内已完成 → 复述上次结果；② 窗口内在飞 → 共享同一 future 的真实结果
         （不再返回空串把 TTS 打成静默/兜底）；③ 窗口锚定首见时间，执行完成不顺延。"""
@@ -570,7 +584,8 @@ class Pipeline:
             return None
         now = time.time()
         self._dedup_sweep(now, win)
-        e = self._last.get(text)
+        key = self._dkey(text, origin)
+        e = self._last.get(key)
         if e is not None and now - e["first"] < win:
             if e.get("reply") is not None:
                 logger.info("[级联] 去重命中(%0.1fs 内重复): %s", now - e["first"], text)
@@ -587,21 +602,23 @@ class Pipeline:
             except Exception:
                 return Reply("刚才那条指令处理时出了点问题，可以再试一次", "dedup", ok=False)
         fut = asyncio.get_running_loop().create_future()
-        self._last[text] = {"first": now, "fut": fut, "reply": None}
-        self._last.move_to_end(text)
+        # v1.1.20：键带 origin——旧实现只按文本去重 ⇒ 两颗卫星 2s 内说同一句时，
+        # 后说话的那颗被前一颗粒的回复顶掉（自己房间零动作、听到别人的房间）
+        self._last[key] = {"first": now, "fut": fut, "reply": None}
+        self._last.move_to_end(key)
         return None
 
-    def _dedup_settle(self, text: str, reply: Reply) -> None:
-        e = self._last.get(text)
+    def _dedup_settle(self, text: str, reply: Reply, origin: str = "") -> None:
+        e = self._last.get(self._dkey(text, origin))
         if e is not None:
             e["reply"] = reply
             if not e["fut"].done():
                 e["fut"].set_result(reply)
 
-    def _dedup_abandon(self, text: str) -> None:
+    def _dedup_abandon(self, text: str, origin: str = "") -> None:
         """在飞执行被取消（超时/断连）：以兜底 Reply 结算，共享方拿真实文本，
         否则队头永远 in-flight，清扫与后续同句全部饿死。"""
-        e = self._last.pop(text, None)
+        e = self._last.pop(self._dkey(text, origin), None)
         if e is not None and not e["fut"].done():
             e["fut"].set_result(
                 Reply(self.settings.get("dialog.fallback_text", const.FALLBACK_TEXT),

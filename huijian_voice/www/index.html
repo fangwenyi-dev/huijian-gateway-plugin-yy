@@ -16,8 +16,8 @@
      v1.0.42 的 #1d1750「过紫」与更早 #030712「过黑」均已作废，勿回潮 -->
 <meta name="theme-color" content="#071426">
 <title>慧尖HA语音插件</title>
-<link rel="stylesheet" href="css/huijian.css?v=1.1.19">
-<link rel="stylesheet" href="css/voice.css?v=1.1.19">
+<link rel="stylesheet" href="css/huijian.css?v=1.1.20">
+<link rel="stylesheet" href="css/voice.css?v=1.1.20">
 </head>
 <body>
 <!-- 「星辰大海」背景层（与网关加载项同一设计标准/同一固定种子＝同一片天）：
@@ -314,7 +314,7 @@
 
 <script>
 "use strict";
-const CURRENT_VERSION = "1.1.19";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
+const CURRENT_VERSION = "1.1.20";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
 // 音色表 = kokoro-multi-lang-v1_1 官方 103 sid 全表（k2-fsa docs sid 表实证；
 // 标注=对用户上传试听样本的 CAM++ 声纹溯源榜：v1_1 不含晓晓/云扬，
 // sid18=zf_026 女声最似晓晓(0.454 全场最近)，sid81=zm_055 最似云扬）
@@ -439,7 +439,9 @@ async function refreshStatus(){
     const mm = (ms && typeof ms === "object" && ms.models && typeof ms.models === "object") ? ms.models : (ms || {});
     $("#modelPills").innerHTML = Object.entries(mm).map(([k,v])=>{
       const o = (v && typeof v === "object") ? v : {state:String(v||"?")};
-      const s = o.state || o.status || "?";
+      // v1.1.20：在盘优先判就绪——台账 state 只有后台 ensure 过才写 ready，
+      // 已就绪的模型会一直显示黄色 pending（与 /healthz 的 models 同病，同处方）
+      const s = o.ready ? "ready" : (o.state || o.status || "?");
       const cls = (s==="ready"||s==="ok") ? "ok" : (s==="failed" ? "bad" : "warn");
       const pct = (o.pct!=null) ? Math.round(o.pct) : (o.progress!=null ? Math.round(o.progress*100) : null);
       const extra = (pct!=null && s!=="ready" ? ` <span class="mut">${pct}%</span>` : "")
@@ -1089,6 +1091,6 @@ $("#regenBtn").onclick = async ()=>{
   try { await post("/api/token/regenerate",{}); toast("已重置"); loadEndpoints(); } catch(e){ toast(e.message); }
 };
 </script>
-<script src="js/starsky.js?v=1.1.19"></script>
+<script src="js/starsky.js?v=1.1.20"></script>
 </body>
 </html>

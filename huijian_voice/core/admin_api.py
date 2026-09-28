@@ -1,7 +1,9 @@
 """管理 API（127.0.0.1:8002；nginx 以 /api/local/ 反代，仅经 HA ingress 可达）。
 
 能力对齐 v2 §5 Web UI 五分区：状态/设置/模型/调试(理解级联 dry-run)/配对(endpoints)。
-注意：/api/nlu/test 只跑级联不执行（调试面板绝不能真开灯）。
+注意：/api/nlu/test 默认 dry_run（只跑级联不执行）；显式传 execute=true 会**真执行**
+设备动作（含确认环，可完成解锁两步）——按 v1.1.20 复审改口：旧注释写"只跑级联不执行"
+与代码不符，运维据此在真机上点"真执行"会意外动设备。
 """
 from __future__ import annotations
 

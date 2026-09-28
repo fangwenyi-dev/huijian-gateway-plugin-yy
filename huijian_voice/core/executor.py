@@ -113,9 +113,9 @@ _KLAR_ECHO_LOCK = {"HassTurnOn": "上锁了", "HassTurnOff": "解锁了"}
 # （长形态 打开/关闭/关掉/开了 排在交替式前，天然优先）。
 _ECHO_PREP = re.compile(r"^(?:把|将|给|帮我把|帮我将)")
 _ECHO_HEAD = re.compile(
-    r"^(?:打开来|打开|关闭|关掉|开了|关了|开一下|关一下|开启|关上|启动|停止|切换(?!器)|开(?!关)|关|换)")
+    r"^(?:打开来|打开|关闭|关掉|开了|关了|开一下|关一下|开启|关上|启动|停止|解锁|开锁|锁上|落锁|上锁|切换(?!器)|开(?!关)|关|换|锁)")
 _ECHO_TAIL = re.compile(
-    r"(?:打开来|打开|关闭|关掉|开一下|关一下|开启|关上|起来|启动|停止|(?<!开)关|开)+$")
+    r"(?:打开来|打开|关闭|关掉|开一下|关一下|开启|关上|起来|启动|停止|解锁|开锁|锁上|落锁|上锁|(?<!开)关|开)+$")
 _ECHO_TONE = re.compile(r"(?:了吧|啦|咯|了|吧|呢|呀|啊|哦|嘛|都|全部|全)+$")
 # 复合/连接残留：多目标回显会错指，交回原路径（多分句另有链话术）
 _ECHO_MULTI = re.compile(r"[和与跟]|还有|然后|接着|顺便|并且|同时")
@@ -172,6 +172,23 @@ _LEG_NOOP_DOMAINS = {"light", "fan", "switch", "humidifier", "input_boolean", "l
 # 它的"要求状态"藏在参数里。只用于**查无此名/已在要求态**的证伪，空白 action（stop 等）
 # 一律不判。
 _LEG_WINDOW_DESIRED = {"open": ("open",), "close": ("closed",), "closed": ("closed",)}
+
+
+def _lock_domain_target(args: dict) -> bool:
+    """目标是否为 lock 域（v1.1.19：锁确证按域判，不看意图名）。永不抛。"""
+    try:
+        raw = (args or {}).get("entity_id")
+        eids = [raw] if isinstance(raw, str) else [
+            e for e in (raw or []) if isinstance(e, str)]
+        if any(str(e).split(".", 1)[0] == "lock" for e in eids):
+            return True
+        for slot in ((args or {}).get("target") or []):
+            for d in ((slot or {}).get("devices") or []):
+                if "lock" in ((d or {}).get("domains") or []):
+                    return True
+        return False
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _leg_want(name: str, args: dict):
@@ -699,7 +716,12 @@ class Executor:
             for _nm in await self._offline_names(name, args):
                 if _nm not in offline:
                     offline.append(_nm)
-            if name in ("HassLock", "HassUnlock"):
+            # v1.1.19 复审：按**目标域**判，不按意图名——klar 的 HassTurnOn/Off 落在
+            # lock 域时走 _klar_direct → lock.lock/unlock，此前完全没被确证（D7 那条
+            # 「打开门锁=上锁」正是这个形态）。
+            _is_lock = (name in ("HassLock", "HassUnlock")
+                        or _lock_domain_target(args))
+            if _is_lock:
                 lock_notes.extend(await self._lock_unconfirmed(name, args))
             if not result.get("success"):
                 raw_err = str(result.get("error") or result.get("message") or "")
@@ -708,10 +730,14 @@ class Executor:
                 # 于是 v1.1.4 的动机案（"does not support set_cover_position"）被泛化
                 # 成"换个说法再试"，用户永远不知道是设备能力不足。
                 _ok, _bad, _errs = self._receipt([result])
-                if _bad and not _ok and _errs:
+                # v1.1.19 复审：逐台原因只用来**细化话术**，不能抹掉"结果不确定"
+                # （超时/连接/5xx）——那会让 last_run.indeterminate 变 False，
+                # 播报却说"我不自动再试"，下游复议/重试闸失去护栏。
+                _top_err = raw_err
+                if _bad and not _ok and _errs and not is_indeterminate(_top_err):
                     raw_err = _errs[0]
                 self.last_run = {"steps": len(steps), "applied": len(results),
-                                 "indeterminate": is_indeterminate(raw_err)}
+                                 "indeterminate": is_indeterminate(_top_err)}
                 reply = zh_error(raw_err, klar=(src == "klar"))
                 # P2-12 链失败定位：部分执行已成事实，如实说清第几步、还剩几步
                 # （保留"抱歉"字头——话术层诚实失败纪律被测试钉死）
@@ -742,7 +768,11 @@ class Executor:
             self.last_run = {"steps": len(steps), "applied": 0, "indeterminate": False}
             # v1.1.17：zh_error 自带"抱歉，"字头，旧写法再拼一次 ⇒ 播报成「抱歉，抱歉，…」。
             reply = zh_error(why, klar=plan.source == "klar")
-            if not reply.startswith("抱歉"):
+            # v1.1.19 复审：链里前面几步可能已真执行（本支在循环之后）——按 _step_say
+            # 的同款口径带上步序，别把部分执行播成整句没做（用户会整句重说=重复动作）
+            if len(steps) > 1 and len(results) > 1:
+                reply = self._step_say(len(results) - 1, steps, reply)
+            elif not reply.startswith("抱歉"):
                 reply = "抱歉，" + reply
             logger.info("[执行] %s %s → 逐实体全失败 | %s", plan.intent, plan.args, reply)
             return self._named(False, reply)

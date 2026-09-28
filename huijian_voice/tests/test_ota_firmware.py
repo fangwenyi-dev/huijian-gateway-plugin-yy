@@ -786,6 +786,11 @@ def test_issue_refuses_factory_image_even_when_small(tmp_path):
     st = fs.FirmwareStore(root=tmp_path, lock_path=lock)
     _drop(st, "huijian-s3-2.1.99.bin", data)
     st.scan_import()
-    assert st.latest() is not None, "小体积包应过容量闸（正是本闸要拦的场景）"
+    # v1.1.20：形态结论已折进行内 ⇒ 它不再出现在 latest()/可升级话术里（旧版只过容量闸，
+    # 于是在面板上被当成"最新可升级"，点下去才被 issue 拦）
+    assert st.latest() is None, st.latest()
+    rows = {r["version"]: r for r in st.versions()}
+    assert rows["2.1.99"]["ota_ok"] is False
+    assert "合并出厂镜像" in rows["2.1.99"]["ota_block_reason"], rows["2.1.99"]
     issued = st.issue("2.1.99", "aabbccddeeff")     # 签名是 (version, mac)——写反了会"查无此版"提前返回，钉变假绿
     assert issued is None, f"签发口必须拒合并镜像（形态闸），实得 {issued!r}"

@@ -1321,6 +1321,9 @@ class TtsEngine:
         # 云档=云端对应音色（可选）；**云失败回落=固定默认本地音色 sid28**——回落是
         # 应急通道，取最保守单音色，不跟 web 配置（可能是自定义名/云专属号）漂移。
         # （默认音色身份自 2026-09-19 拍板起=zf_044/sid28，见 _DEFAULT_SID。）
+        # 本批未含（有回归）：回落按"回落档默认音色"取——那版会让既有白盒钉（钉的就是
+        # 下面这条逐字行为）与端到端钉同时红，且下游引擎对越界 sid 的行为未实证；
+        # 转下批把钉一起改完再上。现在保持既有行为：硬取 _DEFAULT_SID(28)。
         sid = _DEFAULT_SID if fell_back else self.resolve_sid()
         speed = self._speed()
         if engine_out is not None:

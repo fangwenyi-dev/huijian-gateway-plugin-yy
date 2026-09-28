@@ -336,7 +336,10 @@ class Agent:
         """流式产出最终口播文本（按句 yield）。失败抛异常由 pipeline 兜底。
         体验批 P2-15：SSE 真流式——最终答案句读一合成即 yield，长答案感知延迟大降。"""
         messages = [{"role": "system", "content": SYSTEM_PROMPT + "\n\n当前设备清单：\n" + await self._device_brief()}]
-        messages += history[-int(self.settings.get("llm.history_rounds", 10)) * 2:]
+        # v1.1.20：0/负值都按"不带上下文"处理（旧式 history[-0*2:] == history[0:]
+        # 反而把**全量**历史喂给 LLM，负值更会变成"丢最前 N 条"）
+        _n = max(0, int(self.settings.get("llm.history_rounds", 10) or 0))
+        messages += history[-_n * 2:] if _n else []
         messages.append({"role": "user", "content": text})
         max_rounds = int(self.settings.get("llm.max_tool_rounds", 3))
         for _ in range(max_rounds + 1):

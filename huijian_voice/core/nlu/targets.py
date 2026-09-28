@@ -322,10 +322,14 @@ def sync_vocab(states: dict, aliases: dict | None = None,
     # lawn_mower/siren…）连词表都进不去，用户怎么叫都"没找到设备"——这与
     # "语音控 HA 全设备"的目标正面冲突。反转为排除只读/系统域后可控域自动全覆盖。
     per_word: dict[str, set[str]] = {}
+    dom_seen: set[str] = set()
     for eid, ent in (states or {}).items():
         dom = str(eid).split(".", 1)[0]
         if dom in _VOCAB_EXCLUDED_DOMAINS:
             continue
+        dom_seen.add(dom)          # v1.1.19 复审：域直接取自 entity_id 前缀——
+                                   # 旧实现由"名字 token"反推 ⇒ 名字切不出 2~8 字纯汉字时
+                                   # installed 为空（幻觉面回归 + 该域救援被误禁）
         fn = str(((ent or {}).get("attributes") or {}).get("friendly_name") or "")
         toks = _name_tokens(fn)
         names.update(toks)
@@ -351,7 +355,7 @@ def sync_vocab(states: dict, aliases: dict | None = None,
     _dyn_vocab = tuple(sorted(names, key=lambda w: (-len(w), w)))
     _dyn_set = frozenset(_dyn_vocab)
     # 本家装了哪些域（近音档 ⑦ 的"装得下"判据用，见 _rescuable_words）
-    _installed_domains = frozenset(d for ds in per_word.values() for d in ds)
+    _installed_domains = frozenset(dom_seen)
     merged = _dedup_keep_order(_STATIC_ORDER + list(_dyn_vocab))
     ALL_DEVICES = tuple(sorted(merged, key=len, reverse=True))
     ALL_SET = frozenset(merged)

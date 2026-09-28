@@ -126,13 +126,19 @@ STATE_QUESTION_ALT = re.compile(
     r"|查询.{0,10}状态|查一下.{0,10}状态|查.{0,10}状态)")
 
 
-_QUERY_TRIGGER_RE = re.compile(r"(状态|情况|哪些|列表)")
+# v1.1.19 复审：触发词必须是**疑问形**——裸「状态」会把祈使句一起吞掉（实测
+# 「把空调调到除湿状态」「空调调到睡眠状态」两档同时弃权 = 命令被吞，同义句换
+# 「…模式」就正常）。查询族自己的状态分支另有一套疑问判据（is_state_question）。
+_QUERY_TRIGGER_RE = re.compile(
+    r"(什么状态|啥状态|状态怎么样|状态如何|查.{0,6}状态|现在状态|目前状态"
+    r"|情况怎么样|情况如何|哪些|列表)")
 # 量纲疑问的**问句形**（v1.1.17 复审②）：命令句里不会出现"多少/多大/几度"这类
 # 疑问词（用户要设值就直接报数：调到26度/调到百分之三十），所以按疑问词判比按
 # 量纲词判安全——`looks_local_query` 那套量纲词（度/多少/电量）会把量纲**命令**
 # 一起拦掉（实测两条既有钉当场红），故不用它。词表短且闭合：
 # 多少 / 多大 / 多高 / 多低 / 多小 / 多亮 / 几度 / 几档 / 是多少 / 现在几点。
-_QUANTITY_Q_RE = re.compile(r"(多少|多大|多高|多低|多小|多亮|几度|几档|是多少|现在几点)")
+_QUANTITY_Q_RE = re.compile(
+    r"(多少|多大|多高|多低|多小|多亮|几度|几档|几盏|几个|几台|几只|是多少|现在几点)")
 
 
 def is_query_like(text: str) -> bool:
@@ -416,26 +422,31 @@ class QueryZone:
             v = float(val)
         except (TypeError, ValueError):
             return None
-        nm = attrs.get("friendly_name") or ""
-        prefix = f"{area}的" if area else ""
+        # v1.1.19 复审：名字里已含房间时**不再叠前缀**（线上实测念成「办公室的办公室射灯」；
+        # 跨房间回捞叠用户说的房间更糟——「客厅的卧室射灯」）。名字为空才用 区域+词。
+        nm = say_name(attrs.get("friendly_name") or "")
+        disp = nm or (f"{area}的{dev_word}" if area else dev_word)
         if attr_word in ("亮度",):
             pct = int(round(v * 100 / 255)) if 0 <= v <= 255 else int(round(v))
-            return f"{prefix}{nm or dev_word}亮度约 {pct}%。"
+            return f"{disp}亮度约 {pct}%。"
         if attr_word == "色温":
             # v1.0.62 P1-6：light 域 color_temp 惯例是 **mireds**（370 mired≈2700K），
             # 旧代码裸报「色温 370K」=量纲错标签（与 aqi 事件同族）。≤1999 判为
             # mireds 换算（mired 可视域 140-500 与 Kelvin 1700-6500 无交叠，判据稳）。
             kelvin = int(round(1_000_000 / v / 50) * 50) if 0 < v < 2000 else int(v)
-            return f"{prefix}{nm or dev_word}色温约 {kelvin}K。"
+            return f"{disp}色温约 {kelvin}K。"
         if attr_word in ("风量", "风速", "档位"):
             # v1.0.62 P1-6：无单位的小整数是「档位」语义（1..12），percentage
             # 才报百分比——把空调 2 档播成「风量 2%」也是错标签。
             u = str(attrs.get("unit_of_measurement") or "").strip().lower()
             if not u and v <= 12 and float(v).is_integer():
-                return f"{prefix}{nm or dev_word}现在是 {int(v)} 档。"
+                return f"{disp}现在是 {int(v)} 档。"
             pct = int(round(v)) if v <= 100 else int(round(v * 100 / 255))
-            return f"{prefix}{nm or dev_word}风量约 {pct}%。"
-        return f"{prefix}{nm or dev_word}{'设定' if '定' in attr_word else ''}{attr_word}是 {v:g}。"
+            return f"{disp}风量约 {pct}%。"
+        # 属性词自带「设定/目标」时不再叠字（线上实测念成「设定设定温度」）
+        _a = attr_word if ("设定" in attr_word or "目标" in attr_word) else (
+            f"设定{attr_word}" if attr_word == "温度" else attr_word)
+        return f"{disp}{_a}是 {v:g}。"
 
     async def _count_answer(self, area, text: str) -> Optional[str]:
         """体验批 P2-14②：开着/没关 设备计数与点名（≤3 具名，多则只报数）。"""
@@ -612,7 +623,10 @@ class QueryZone:
                  if e["entity_id"].split(".")[0] in (domains or ("light", "climate", "fan", "cover", "humidifier", "switch"))],
                 device_word)
             if not wider:
-                return f"没找到叫「{device_word}」的设备。" if device_word else None
+                if device_word:
+                    return f"没找到叫「{device_word}」的设备。"
+                # 无类别词（「厨房关了吗」）且本区没有可开关设备：别把 None 念进话术
+                return f"{area}里没有能开关的设备。" if area else None
             if area:
                 # 说的区域里没有这台，但全屋按名有 → 如实说明"本区没有"+ 实体名自带房间
                 e0 = wider[0]
@@ -628,7 +642,11 @@ class QueryZone:
         lines = []
         for e in ents[:3]:
             st = str(e.get("state", ""))
-            cn = states_cn.get(st, "开着" if st in on_words else f"处于 {st}")
+            # unavailable/unknown 不把英文念进播报（与 _attr_answer 的映射同口径）
+            cn = states_cn.get(st) or (
+                "现在不在线" if st == "unavailable" else
+                "状态未知" if st == "unknown" else
+                "开着" if st in on_words else f"处于 {st}")
             nm = say_name((e.get("attributes") or {}).get("friendly_name") or e["entity_id"])
             lines.append(f"{nm}{cn}")
         return "，".join(lines) + "。" if lines else None

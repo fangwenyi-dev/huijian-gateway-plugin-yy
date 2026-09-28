@@ -325,7 +325,9 @@ class FirmwareStore:
             # 旧形态闸只在签发/下发时生效 ⇒ 面板照样把 2.1.65（8.7MB 产线合并镜像）
             # 显示成"最新/可升级"，用户点下去才被拒（原因还只躺在加载项日志里）。
             # notes_zh 一直都在 row 里，但面板从不渲染 ⇒ 登记时写下的实话没人看得见。
-            _reason = ota_capacity_error(v, _to_int(row.get("size"), f"lock v{v}"))
+            _reason = (ota_capacity_error(
+                v, _to_int(row.get("size"), f"lock v{v}"))
+                or ota_image_error(self.public / fn))
             row["ota_ok"] = not _reason
             row["ota_block_reason"] = _reason
             rows[v] = row
@@ -346,7 +348,7 @@ class FirmwareStore:
                     row["notes_zh"] = lock_row["notes_zh"]
                     if lock_row["sha256"] and lock_row["sha256"] != e.get("sha256"):
                         row["sha_mismatch"] = True
-                _r2 = ota_capacity_error(v, _to_int(row.get("size"), f"index {fn}"))
+                _r2 = ota_capacity_error(v, _to_int(row.get("size"), f"index {fn}")) or                     ota_image_error(self.public / fn)
                 row["ota_ok"] = not _r2
                 row["ota_block_reason"] = _r2
                 rows[v] = row
