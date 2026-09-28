@@ -605,6 +605,36 @@ def _dyn_lookup_domain(n: str) -> list[str]:
     return []
 
 
+# 开关族动作的"主域"优先级（v1.1.24-B）：动态词表给的是**域并集**（同名字命中的
+# 所有实体域），开关动作若整包下发，集成会把兄弟实体一起打开——办公 .91 实锤：
+# 「打开办公室空调」的并集含 8 个 switch（睡眠模式/ECO/干燥/辅热/摆风/提示音）+
+# 指示灯，A 修（跳过不可服务域）落地后这些**全部会被真打开**（logbook 实证）。
+# 取并集里最"主控"的一个域，其余丢弃；无主域（纯 switch 设备）原样返回，放行。
+_TURN_DOMAIN_PRIORITY = ("climate", "water_heater", "media_player", "light", "cover",
+                         "fan", "humidifier", "vacuum", "lawn_mower", "lock", "valve",
+                         "alarm_control_panel", "siren", "input_boolean", "switch")
+
+
+def primary_turn_domains(doms) -> list[str]:
+    """域并集 → 开关动作用的主域（纯函数；空/单个/无主域一律原样）。"""
+    ds = [str(d) for d in (doms or []) if d]
+    if len(ds) <= 1:
+        return ds
+    for p in _TURN_DOMAIN_PRIORITY:
+        if p in ds:
+            return [p]
+    return ds
+
+
+def turn_domains(name: str) -> list[str]:
+    """开关族动作（TurnDeviceOn/Off）的目标域：domain_hint 的并集收窄到主域。
+
+    收窄只用于**开关语义**；属性句（"空调风速调到50%"要用 number/select）与
+    窗户（ControlWindow 走名字+按钮逻辑）都不经此函数——边界钉见
+    tests/test_v1124_turn_domain_narrow.py。"""
+    return primary_turn_domains(domain_hint(name))
+
+
 def domain_hint(name: str) -> list[str]:
     """设备名词表→HA 域提示（原 fast_path hint_domains 逻辑逐字移植）。
 

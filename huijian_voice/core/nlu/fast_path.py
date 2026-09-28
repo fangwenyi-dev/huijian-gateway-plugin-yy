@@ -901,7 +901,7 @@ class FastPath:
             if rest and not _WH_HEAD_RE.match(rest):
                 continue
             word = _wholehouse_word(rest or text)
-            doms = [str(d) for d in (T.domain_hint(word) if word else [])]
+            doms = [str(d) for d in (T.turn_domains(word) if word else [])]
             if not doms:
                 return None
             trace.append(f"全屋显式:{word}→domains={doms}")
@@ -918,7 +918,7 @@ class FastPath:
             intent_type = ("TurnDeviceOff" if m_tw.group(1)[0] == "关"
                            else "TurnDeviceOn")
             word = _wholehouse_word(text[:m_tw.start()].strip() or text)
-            doms = [str(d) for d in (T.domain_hint(word) if word else [])]
+            doms = [str(d) for d in (T.turn_domains(word) if word else [])]
             if not doms:
                 return None
             trace.append(f"全屋尾动:{word}→domains={doms}")
@@ -1617,14 +1617,20 @@ class FastPath:
         if (intent in ("TurnDeviceOn", "TurnDeviceOff") and _WHOLEHOUSE_RE.search(text)
                 and _WH_HEAD_RE.match(rest_text or "")):
             word = _wholehouse_word(rest_text or text)
-            doms = [str(d) for d in (T.domain_hint(word) if word else [])]
+            doms = [str(d) for d in (T.turn_domains(word) if word else [])]
             if doms:
                 args["target"] = [{"devices": [{"name": "", "domains": doms}]}]
                 trace.append(f"全屋显式:{word}→domains={doms}")
                 return Plan(intent=intent, args=args, source=source, utterance=text,
                             trace=trace, whole_house=True)
         if name or area:
-            device_item = {"name": name, "domains": T.domain_hint(name or "")} if name else {"domains": []}
+            # v1.1.24-B：**开关动作**取主域（域并集会让集成把同名字的兄弟实体一起
+            # 打开——办公 .91「打开办公室空调」会连带开 8 个模式开关+指示灯）；
+            # 其余意图（属性句要用 number/select 等）沿用并集，零扰动。
+            _hint = (T.turn_domains(name or "")
+                     if intent in ("TurnDeviceOn", "TurnDeviceOff")
+                     else T.domain_hint(name or ""))
+            device_item = {"name": name, "domains": _hint} if name else {"domains": []}
             entry: dict[str, Any] = {}
             if area:
                 entry["area"] = area

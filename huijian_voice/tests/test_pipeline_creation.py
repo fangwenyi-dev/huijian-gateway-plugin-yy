@@ -152,6 +152,30 @@ def test_creation_area_gate_fail_open_without_registry():
     assert r.ok and ex.calls, r.text
 
 
+def test_immediate_area_gate_blocks_unknown_area():
+    """v1.1.24：即时执行前的区域预检（与创建侧同口径）——连写句解析出的畸形区域
+    不再"发出去等集成报错"，而是当场如实拦下、不执行。"""
+    ex = Recorder()
+    r = asyncio.run(_pipe_reg(_RegHa(), ex)._cascade("打开办公室的射灯办公室的空调", "satA"))
+    assert r.ok is False and not ex.calls, (r.text, ex.calls)
+    assert "办公室的射灯办公室" in r.text, r.text
+
+
+def test_immediate_chain_area_gate():
+    """链发同样逐分句过闸（连写句在链里也拦）。"""
+    ex = Recorder()
+    r = asyncio.run(_pipe_reg(_RegHa(), ex)._cascade(
+        "打开办公室的射灯办公室的空调和办公室的平开窗", "satA"))
+    assert r.ok is False and not ex.calls, (r.text, ex.calls)
+
+
+def test_immediate_area_gate_fail_open_without_registry():
+    """反向钉：区域注册表未同步 ⇒ 照旧执行（fail-open 纪律）。"""
+    ex = Recorder()
+    r = asyncio.run(_pipe_reg(_RegHa(areas={}), ex)._cascade("打开办公室的射灯", "satA"))
+    assert ex.calls, r.text
+
+
 def test_scene_with_unlock_action_is_named_in_reply():
     """v1.1.22 口径（用户拍板）：创建/修改**不拦**，但含解锁族动作（D7：「关闭门锁」
     =解锁）必须在播报里点名——静默入库=埋一条以后无人值守的解锁。"""

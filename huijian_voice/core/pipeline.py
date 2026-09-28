@@ -732,6 +732,12 @@ class Pipeline:
                 logger.info("[级联] 过宽目标拦截（%s 全部设备）：%s", ob, plan.args)
                 return Reply(self._overbroad_say(ob), "clarify", ok=False,
                              trace=[f"过宽目标拦截:{ob}"])
+            bad_area = await self._plan_area_problem(plan)
+            if bad_area:
+                # v1.1.24：畸形/不存在区域当场拦下（连写句解析产物），不白跑 HA
+                logger.info("[级联] 区域解析不到 → 不执行（%s）：%s", bad_area, plan.args)
+                return Reply(self._area_say(bad_area), "clarify", ok=False,
+                             trace=[f"区域不存在:{bad_area}"])
             ask = self._confirm_ask(plan, origin)
             if ask is not None:
                 return ask
@@ -758,6 +764,12 @@ class Pipeline:
                     fb = None
                 if fb is not None:
                     fb = self._apply_context(fb, text, origin)
+                    bad_area = await self._plan_area_problem(fb)
+                    if bad_area:
+                        # v1.1.24：降级计划同样过区域预检（同口径，绝不带畸形区域下发）
+                        logger.info("[级联] 降级计划区域解析不到 → 不执行（%s）", bad_area)
+                        return Reply(self._area_say(bad_area), "clarify", ok=False,
+                                     trace=[f"降级区域不存在:{bad_area}"])
                     # v1.1.21：降级同样要过**过宽目标闸与歧义闸**（逐行审计实锤：
                     # 主路三道里只补了 confirm，`name=客厅` 这类"区域当设备名"的降级
                     # 计划会直接执行=一次动作打穿整个区域，含开关/门锁）
@@ -1187,9 +1199,7 @@ class Pipeline:
                 # v1.1.22：区域解析不到的动作绝不入库（否则场景触发时必半失败）
                 logger.info("[创建] 子句区域解析不到 → 整单拒收 %r（area=%r）",
                             clause, bad_area)
-                return Reply(f"抱歉，「{bad_area}」这个房间我没找到——这句可能没听全，"
-                             f"请把房间和设备说清楚再说一次（比如「打开办公室的射灯」）。",
-                             "creation", ok=False,
+                return Reply(self._area_say(bad_area), "creation", ok=False,
                              trace=[f"创建拒收:区域不存在:{bad_area}"])
             actions.append({"intent": plan.intent, "params": copy.deepcopy(plan.args)})
             echo_parts.append(clause)
@@ -1573,6 +1583,13 @@ class Pipeline:
                 # 链中分句过宽：整句不执行，直接引导（同单发口径）
                 return Reply(self._overbroad_say(ob), "clarify", ok=False,
                              trace=[f"链内过宽目标拦截:{ob}"])
+            bad_area = await self._plan_area_problem(p)
+            if bad_area:
+                # v1.1.24：链中分句区域解析不到 → 整链不执行（同单发口径）
+                logger.info("[级联] 链内分句区域解析不到 → 不执行（%s）：%s",
+                            bad_area, p.args)
+                return Reply(self._area_say(bad_area), "clarify", ok=False,
+                             trace=[f"链内区域不存在:{bad_area}"])
             if self._risky(p):
                 return None                          # 链中藏风险操作 → 不链发
             # risky 判定放到注入后：代词分句继承出「锁」类目标同样要拦
@@ -1837,28 +1854,46 @@ class Pipeline:
         （现场「我有点热」1/2 个动作没执行成功）。
         判据：动作目标的 area 必须在 **HA 区域注册表**（`ha._areas`）里存在；注册表
         未同步（_areas 空）⇒ 一律放行（fail-open，同 capability 纪律：宁漏放不误拒）。
-        只判区域名——设备名不在册不判（离线/隐藏实体在册，误拒风险高）。永不抛。"""
+        只判区域名——设备名不在册不判（离线/隐藏实体在册，误拒风险高）。永不抛。
+        v1.1.24：判据与即时执行侧共用 `capability.bad_target_area/registry_areas`。"""
         try:
-            ha = self.ha
-            if ha is None:
-                return None
             targets = (plan.args or {}).get("target")
             if not isinstance(targets, list) or not targets:
                 return None
-            await ha.states()                     # 顺带触发注册表 TTL 刷新
-            reg = {str(v).strip() for v in (getattr(ha, "_areas", {}) or {}).values()
-                   if str(v).strip()}
-        except Exception:  # noqa: BLE001 判不了=放行（宁漏放不误拒）
+            ha = getattr(self, "ha", None)      # 手工装配的管线可无 ha（fail-open）
+            if ha is None:
+                return None
+            reg = await capability.registry_areas(ha)
+            return capability.bad_target_area(targets, reg)
+        except Exception:  # noqa: BLE001
             return None
-        if not reg:
+
+    async def _plan_area_problem(self, plan: Optional[Plan]) -> Optional[str]:
+        """**即时执行**前的区域可解析性预检（v1.1.24，与创建侧同口径）：
+        主步 + extra_steps 的目标里，任一 area 在 HA 区域注册表里不存在 ⇒ 返回该名；
+        注册表未同步 ⇒ None（fail-open）。连写句解析出的畸形区域不再"发出去等集成
+        报错"，而是当场如实拦下。永不抛。"""
+        if plan is None:
             return None
-        for t in targets:
-            if not isinstance(t, dict):
-                continue
-            a = str(t.get("area") or "").strip()
-            if a and a not in reg:
-                return a
-        return None
+        try:
+            targets = list(((plan.args or {}).get("target") or []))
+            for st in (getattr(plan, "extra_steps", None) or []):
+                if isinstance(st, dict):
+                    targets += list(((st.get("args") or {}).get("target") or []))
+            if not targets:
+                return None
+            ha = getattr(self, "ha", None)      # 手工装配的管线可无 ha（fail-open）
+            if ha is None:
+                return None
+            reg = await capability.registry_areas(ha)
+            return capability.bad_target_area(targets, reg)
+        except Exception:  # noqa: BLE001
+            return None
+
+    @staticmethod
+    def _area_say(bad: str) -> str:
+        return (f"抱歉，「{bad}」这个房间我没找到——这句可能没听全，"
+                f"请把房间和设备说清楚再说一次（比如「打开办公室的射灯」）。")
 
     def _overbroad_area_target(self, plan: Optional[Plan]) -> Optional[str]:
         """target 只有"区域名当设备名"+空 domains（"客厅开灯"→name=客厅/domains=[]）

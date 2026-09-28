@@ -68,8 +68,13 @@ def test_auto_decimal_forms():
     assert cr.parse("当客厅温度超过26点就打开空调") is None   # 残缺小数宁缺勿错
 
 
-def test_auto_numeric_no_connector_拒绝():
-    assert cr.parse("当温度超过28度打开空调") is None  # 无锚点宁缺勿错
+def test_auto_numeric_no_connector_contract_v1124():
+    """v1.1.24 契约变更（原「无锚点宁缺勿错」按用户令放宽为"自然说法补全"）：
+    无连接词时 y 以**动作字**开头即认（「当温度超过28度打开空调」）；
+    y 不以动作字开头仍拒（半句绝不建单）。"""
+    c = cr.parse("当温度超过28度打开空调")
+    assert c and c["kind"] == "automation" and c["trigger"]["above"] == 28.0, c
+    assert cr.parse("当客厅有人活动") is None
 
 
 # ── 自动化·状态 ──────────────────────────────────────────────
@@ -157,6 +162,58 @@ def test_scene_delete_requires_explicit_name():
     for s in ("删除所有场景", "删了"):
         p = cr.parse(s)
         assert p is None or p.get("kind") != "delete_scene", s
+
+
+def test_auto_numeric_forms_without_dang_or_jiu():
+    """v1.1.24：数值自动化补两种自然口语形——无「当」前缀 / 无「就」连接词
+    （旧骨架要求「当…就」全齐，这两种最常说法的句子整句落兜底）。"""
+    for s in ("客厅温度超过28度就打开空调",
+              "当客厅温度超过28度时打开空调",
+              "客厅温度超过28度的时候打开空调"):
+        p = cr.parse(s)
+        assert p and p["kind"] == "automation" and p["trigger"]["above"] == 28.0, s
+        assert p["y"] == "打开空调", s
+    # 反向：无连接词时 y 必须以动作字开头（"有人活动"类半句绝不建单）
+    assert cr.parse("当客厅有人活动") is None
+    assert cr.parse("客厅温度超过28度了") is None
+
+
+def test_auto_delete_missing_word_orders():
+    """v1.1.24：自动化删除补场景侧已有的三种语序（第N条 / 我的 / 名词先行）。"""
+    p = cr.parse("删除第1条自动化")
+    assert p and p["kind"] == "delete_automation" and cr.auto_target(p["target"]) == 1, p
+    p = cr.parse("自动化1删了")
+    assert p and p["kind"] == "delete_automation" and cr.auto_target(p["target"]) == 1, p
+    p = cr.parse("删除我的自动化1")
+    assert p and p["kind"] == "delete_automation" and cr.auto_target(p["target"]) == 1, p
+    # 反向：既有语序不回归 + 批量语义仍不接
+    assert cr.auto_target(cr.parse("删除自动化2")["target"]) == 2
+    assert cr.parse("删除所有自动化") is None
+
+
+def test_scene_modify_noun_first_and_de_wart():
+    """v1.1.24：改场景补名词先行形；并修「把场景X的改成Y」把「的」抓进名字的 wart。"""
+    p = cr.parse("把我有点热场景改成关闭射灯")
+    assert p and p["kind"] == "modify_scene" and p["trigger_phrase"] == "我有点热", p
+    p = cr.parse("把场景晚安的改成关灯")
+    assert p and p["trigger_phrase"] == "晚安", p
+    assert cr.parse("场景晚安改成关灯")["trigger_phrase"] == "晚安"      # 反向
+
+
+def test_list_verbs_extended():
+    """v1.1.24：列表说法补「列一下/列出来/列个」（旧表只有 列出/查看/看看…）。"""
+    assert cr.parse("列一下场景")["kind"] == "list_scenes"
+    assert cr.parse("列出来自动化")["kind"] == "list_automations"
+    assert cr.parse("场景列表") is None            # 裸名词仍不接（设计）
+
+
+def test_scene_create_without_dang():
+    """v1.1.24：场景创建补无「当」的「我说X就Y」（含无连接词变体）。"""
+    p = cr.parse("我说下班了就关灯")
+    assert p and p["kind"] == "scene" and p["trigger_phrase"] == "下班了", p
+    p = cr.parse("我说下班了关灯")
+    assert p and p["kind"] == "scene" and p["trigger_phrase"] == "下班了", p
+    assert cr.parse("打开客厅的灯") is None         # 反向：普通命令不得被创建句吞
 
 
 def test_scene_delete_verb_first_name_middle():

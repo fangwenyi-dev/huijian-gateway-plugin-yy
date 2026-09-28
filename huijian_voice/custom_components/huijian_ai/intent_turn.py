@@ -177,9 +177,17 @@ class TurnDeviceIntentBase(intent.IntentHandler):
                 control_targets.append({"name": item.name, "area": item.area_name})
 
         if not control_targets and unsupported:
+            # 暂停语义话术原样保留（有钉）；其余服务（开关/锁…）域不支持时给通用话术——
+            # v1.1.24：域不支持本服务的候选现在走"跳过"路径（见 handle_match_target），
+            # 全部候选都被跳过时才算失败，且话术不能再挂"暂停"字样。
+            if service == "huijian_pause":
+                return {
+                    "success": False,
+                    "error": "暂不支持暂停该设备：" + "、".join(unsupported[:3]),
+                }
             return {
                 "success": False,
-                "error": "暂不支持暂停该设备：" + "、".join(unsupported[:3]),
+                "error": "这些设备不支持该操作：" + "、".join(unsupported[:3]),
             }
         return {
             "success": True,
@@ -429,9 +437,16 @@ class TurnDeviceIntentBase(intent.IntentHandler):
             return
 
         if not hass.services.has_service(state.domain, service):
-            raise intent.IntentHandleError(
-                f"Service {service} does not support entity {state.entity_id}"
+            # v1.1.24（场景「我有点热」1/3 动作失败根因，HA 系统日志实锤：
+            # "Service turn_on does not support entity select.xiaomi_mc9_aeaf_fan_level"）：
+            # 宽域目标（加载项动态词表的域并集含 select/number 等不可 turn_on 的域）会把
+            # 该域实体一起带进候选——旧式 raise 让**一个** select 把整条动作判失败。
+            # 按"不适用"返回 False：调用方跳过并继续，其余实体照常执行。
+            _LOGGER.info(
+                "Skip entity %s: domain %s does not support service %s",
+                state.entity_id, state.domain, service,
             )
+            return False
 
         # Fall back to homeassistant.turn_on/off
         service_data: dict[str, Any] = {ATTR_ENTITY_ID: state.entity_id}

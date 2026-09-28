@@ -188,7 +188,9 @@ DATASET_SENTENCES = [
     ("打开卧室的主灯", "TurnDeviceOn", "卧室", "主灯", ["light"]),
     ("关闭吊灯", "TurnDeviceOff", None, "吊灯", ["light"]),
     ("打开客厅的落地扇", "TurnDeviceOn", "客厅", "落地扇", ["fan"]),
-    ("打开空气净化器", "TurnDeviceOn", None, "空气净化器", ["fan", "humidifier"]),
+    # v1.1.24-B 契约变更：开关动作的目标域从"并集"收窄为主域——净化器本家同时暴露
+    # fan+humidifier 两个实体，旧形态把并集全带（集成会把两类实体一起开）；现取主域 fan。
+    ("打开空气净化器", "TurnDeviceOn", None, "空气净化器", ["fan"]),
     ("打开客厅百叶窗", "TurnDeviceOn", "客厅", "百叶窗", ["cover"]),
 ]
 

@@ -18,6 +18,7 @@ from typing import AsyncIterator, Optional
 import aiohttp
 
 from . import const
+from . import capability
 
 from .nlu.schema import ADDRESSABLE_ATTRIBUTES
 
@@ -410,6 +411,22 @@ class Agent:
         if (name in _SCENE_WRITE_TOOLS
                 and not self.settings.get("llm.allow_scene_write", True)):
             return False, "语音场景的创建/删除没开启"
+        # v1.1.24：写场景/自动化前做**区域可解析性**预检（与本地创建侧同口径）——
+        # LLM 的 actions 里带一个 HA 注册表里不存在的区域，入库后触发必半失败；
+        # 注册表未同步 ⇒ 放行（fail-open，同 capability 纪律）。
+        if isinstance(args, dict):
+            acts = args.get("actions")
+            if isinstance(acts, list):
+                targets = []
+                for a in acts:
+                    if isinstance(a, dict) and isinstance(a.get("params"), dict):
+                        targets += list((a["params"].get("target") or []))
+                if targets:
+                    reg = await capability.registry_areas(self.ha)
+                    bad = capability.bad_target_area(targets, reg)
+                    if bad:
+                        return False, (f"「{bad}」这个房间在 Home Assistant 里不存在，"
+                                       f"动作没执行——请核对房间名后重试")
         plan = Plan(intent=name, args=args, source="llm")
         return await self.executor.run(plan)
 

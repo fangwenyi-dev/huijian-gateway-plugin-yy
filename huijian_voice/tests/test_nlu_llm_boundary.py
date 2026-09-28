@@ -523,6 +523,35 @@ def test_direct_whole_house_not_shrunk_by_satellite_area():
                                                           "domains": ["light"]}]}]
 
 
+class _AreaHA:
+    """只读替身：区域注册表（_areas）+ states（预检取数口用）。"""
+
+    def __init__(self, areas=None):
+        self._areas = {"a1": "办公室"} if areas is None else areas
+        self._states = {}
+
+    async def states(self):
+        return self._states
+
+
+def test_llm_scene_write_rejects_unknown_area():
+    """v1.1.24：LLM 工具通道写场景同样过区域预检（与本地创建侧同口径）。"""
+    ex = Recorder()
+    ag = Agent(S(**{"llm.enabled": True, "llm.base_url": "http://x/v1"}), _AreaHA(), ex)
+    bad = {"trigger_phrase": "晚安",
+           "actions": [{"intent": "TurnDeviceOn",
+                        "params": {"target": [{"area": "办公室的射灯办公室",
+                                               "devices": [{"name": "空调"}]}]}}]}
+    ok, say = asyncio.run(ag._tool("HassCreateVoiceScene", bad))
+    assert ok is False and "办公室的射灯办公室" in say and not ex.calls, say
+    good = {"trigger_phrase": "晚安",
+            "actions": [{"intent": "TurnDeviceOn",
+                         "params": {"target": [{"area": "办公室",
+                                                "devices": [{"name": "空调"}]}]}}]}
+    ok2, _ = asyncio.run(ag._tool("HassCreateVoiceScene", good))
+    assert ok2 is True and ex.calls
+
+
 def test_llm_scene_write_gate_still_applies():
     ex = Recorder()
     ag_on = Agent(S(**{"llm.enabled": True, "llm.base_url": "http://x/v1"}), None, ex)

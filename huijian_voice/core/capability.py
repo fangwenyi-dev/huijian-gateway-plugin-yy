@@ -267,3 +267,37 @@ def _ask_hint(ents: list[dict]) -> str:
         if str(e.get("entity_id", "")).startswith("binary_sensor."):
             return f"{a.get('friendly_name') or e.get('entity_id')}是不是开着"
     return "它现在是什么状态"
+
+
+# ── 区域可解析性预检（v1.1.24）──────────────────────────────────
+# 办公实锤：连写句「打开办公室的射灯办公室的空调」被解析成 area='办公室的射灯办公室'
+# 的畸形目标——创建入库后触发必半失败；即时执行则白跑一趟集成。
+# 判据只认"注册表里确实没有"这一种确定态：注册表未同步（_areas 空）⇒ 一律放行，
+# 与模块头同一纪律（宁漏放不误拒）。
+def bad_target_area(targets, reg_areas) -> Optional[str]:
+    """target 槽列表里第一个不在注册表里的 area；reg_areas 空 ⇒ None（判不了，放行）。"""
+    try:
+        if not reg_areas:
+            return None
+        for t in targets or []:
+            if not isinstance(t, dict):
+                continue
+            a = str(t.get("area") or "").strip()
+            if a and a not in reg_areas:
+                return a
+        return None
+    except Exception:  # noqa: BLE001 判不了=放行
+        return None
+
+
+async def registry_areas(ha) -> set:
+    """HA 区域注册表名集合（未同步=空集）。区域预检的共用取数口：
+    先 await 一次 states（真客户端会顺带按 TTL 拉注册表），再读 `_areas`。永不抛。"""
+    try:
+        if ha is None:
+            return set()
+        await ha.states()
+        areas = getattr(ha, "_areas", {}) or {}
+        return {str(v).strip() for v in areas.values() if str(v).strip()}
+    except Exception:  # noqa: BLE001 判不了=空集（调用方按 fail-open 处理）
+        return set()
