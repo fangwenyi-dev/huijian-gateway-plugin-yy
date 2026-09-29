@@ -13,6 +13,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util.json import JsonObjectType
 
 from .intent_device_shared import WINDOW_KEYWORDS, split_actions_by_device
+from .intent_result import fold_action_ok
 from .intent_helper import validate_slots_safely
 
 _LOGGER = logging.getLogger(__name__)
@@ -433,11 +434,9 @@ class HassTriggerVoiceSceneIntent(intent.IntentHandler):
                 # {"success": False} 返回值——零动作生效也回「已执行场景」。
                 # 本文件 S1 折算的存在即意图反证。折叠值与 IntentResponse
                 # 对象双形态判据。
-                ok = True
-                if isinstance(result, dict):
-                    ok = result.get("success") is not False
-                elif getattr(result, "success", True) is False:
-                    ok = False
+                # v1.1.29 复核 A5：折算收口到 intent_result.fold_action_ok（同族第 4 处
+                # 漏网：SetDeviceMode 族只回 {"results":[…]}，无 success 键时旧判据恒真）。
+                ok, _err = fold_action_ok(result)
                 if ok:
                     executed_actions.append(
                         {"intent": intent_name, "result": "success", "detail": result}

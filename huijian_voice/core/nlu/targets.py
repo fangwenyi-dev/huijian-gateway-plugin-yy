@@ -997,7 +997,12 @@ _COORD_VERBISH = ("打开", "开启", "关闭", "关掉", "关上", "调高", "�
 
 
 def _coord_ends_device(seg: str) -> bool:
-    return any(seg.endswith(d) for d in _ALL_MIN2)
+    # 尾词判据与拒猜路同源（v1.1.29 复核 A4）：≥2 字设备词**或**单字通用词
+    # （灯/窗/门）——旧式只认前者 ⇒
+    # 「打开客厅的灯和空调」既不扩链也不拒猜（单发吃一腿、
+    # 另一腿静默丢还回「好」）。
+    return (any(seg.endswith(d) for d in _ALL_MIN2)
+            or any(seg.endswith(d) for d in _SINGLE_GENERIC))
 
 
 # M2（2026-09-23 深审）：候选⑤特批的单字通用设备词（parse_target 认它们做
@@ -1048,7 +1053,10 @@ def coord_clauses(text: str) -> list[str]:
             return []
         if any(v in s for v in _COORD_VERBISH):
             return []                       # 片内藏动词=正常连排/复合句，交原通道
-        if not _coord_ends_device(s):
+        if not _coord_refuse_seg_device(s):
+            # 判据与拒猜路**同源**（v1.1.29 复核 A4）：旧式只认 ≥2 字设备尾词，单字
+            # 通用词（灯/窗/门）在这里是盲区 ⇒「打开客厅的灯和空调」既不扩链也不拒猜，
+            # 单发吃掉一腿、另一腿静默丢，还回「好」。
             return []                       # 任何一片不是已知设备尾词 → 不扩
         fixed.append(s)
     area = _area_of_prefix(fixed[0]) or ""

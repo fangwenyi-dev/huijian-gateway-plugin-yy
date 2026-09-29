@@ -228,7 +228,8 @@ class VoiceScenesListView(HomeAssistantView):
 
 
 class VoiceSceneDeleteView(HomeAssistantView):
-    requires_auth = False
+    # v1.1.29 复核 A11：破坏性写（delete/put）——同上令牌闸。
+    requires_auth = True
     url = "/api/huijian-ai/voice-scenes/{scene_id}"
     name = "api:huijian-ai:voice-scenes:delete"
 
@@ -297,7 +298,9 @@ class AutomationLogView(HomeAssistantView):
 
 
 class TestSceneView(HomeAssistantView):
-    requires_auth = False
+    # v1.1.29 复核 A11：真执行端点（ha_intent.async_handle，物理动作）——与
+    # huijian/http.py 的「写命令通道必须 HA 令牌」同规（匿名可被局域网任意客户端触发）。
+    requires_auth = True
     url = "/api/huijian-ai/test-scene"
     name = "api:huijian-ai:test-scene"
 
@@ -371,7 +374,8 @@ class TestSceneView(HomeAssistantView):
 
 
 class TestAutomationView(HomeAssistantView):
-    requires_auth = False
+    # v1.1.29 复核 A11：真执行端点（mgr._execute_actions）——同上令牌闸。
+    requires_auth = True
     url = "/api/huijian-ai/test-automation"
     name = "api:huijian-ai:test-automation"
 
@@ -722,7 +726,8 @@ class AutomationsListView(HomeAssistantView):
 
 
 class AutomationDeleteView(HomeAssistantView):
-    requires_auth = False
+    # v1.1.29 复核 A11：破坏性写（delete/put）——同上令牌闸。
+    requires_auth = True
     url = "/api/huijian-ai/automations/{automation_id}"
     name = "api:huijian-ai:automations:delete"
 

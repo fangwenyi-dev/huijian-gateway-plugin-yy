@@ -174,6 +174,13 @@ _LEG_NOOP_DOMAINS = {"light", "fan", "switch", "humidifier", "input_boolean", "l
 _LEG_WINDOW_DESIRED = {"open": ("open",), "close": ("closed",), "closed": ("closed",)}
 
 
+# 「动作=上锁」的意图集（v1.1.29 复核 A1）：TurnDeviceOn×lock 与 HassLock/
+# HassTurnOn 同义（集成 intent_turn.py:288 on=lock）——漏了它 ⇒ 上锁成功反报
+# 「还没确认到已解锁」、真没锁上反被静默放行。TurnDeviceOff/HassTurnOff/
+# HassToggle 在 lock 域都落 unlock（同文件 else 支）⇒ 不在此列。
+_LOCK_WANT_LOCKED = ("HassLock", "HassTurnOn", "TurnDeviceOn")
+
+
 def _lock_domain_target(args: dict) -> bool:
     """目标是否为 lock 域（v1.1.19：锁确证按域判，不看意图名）。永不抛。"""
     try:
@@ -404,7 +411,7 @@ class Executor:
         # v1.1.22：按 D7 语义判方向，不按意图名——klar 的 HassTurnOn×lock 落的是
         # `lock.lock`（:1002-1003，_KLAR_ECHO_LOCK 同为"上锁"），旧式非 HassLock
         # 一律取 "unlocked" ⇒ 上锁成功反报「还没确认到已解锁」。
-        want = "locked" if name in ("HassLock", "HassTurnOn") else "unlocked"
+        want = "locked" if name in _LOCK_WANT_LOCKED else "unlocked"
         try:
             rf = getattr(self.ha, "refresh_states", None)
             if rf is not None:

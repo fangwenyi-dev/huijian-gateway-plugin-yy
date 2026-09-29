@@ -88,6 +88,10 @@ def _scene_ns(result_factory):
     exec(compile(_extract_func_src(CC / "intent_helper.py",  # noqa: S102
                                    "validate_slots_safely"),
                  "<intent_helper.extract>", "exec"), ns)
+    # v1.1.29：成败折算已收口到 intent_result.fold_action_ok——真源注入（漂移即红），
+    # 与上面的 validate_slots_safely 同规。
+    exec(compile((CC / "intent_result.py").read_text(encoding="utf-8"),  # noqa: S102
+                 "<intent_result.py>", "exec"), ns)
     exec(compile(code, "<extract>", "exec"), ns)  # noqa: S102
     ns["get_voice_scene_store"] = lambda hass: Store()
     intent_obj = types.SimpleNamespace(hass=None, slots={}, context=None)
@@ -117,6 +121,8 @@ def test_h3_scene_all_good_still_success():
 # ── H3 自动化侧 ─────────────────────────────────────────────────────
 def _auto_results(response):
     ns = {"_LOGGER": _Log(), "DOMAIN": "huijian_ai"}
+    exec(compile((CC / "intent_result.py").read_text(encoding="utf-8"),  # noqa: S102
+                 "<intent_result.py>", "exec"), ns)
     async def _handle(**kw):
         return response
     ns["ha_intent"] = types.SimpleNamespace(async_handle=_handle)
@@ -169,3 +175,30 @@ def test_h4_press_multi_buttons_consumers():
         ", failed_msgs = await _press_multi_buttons")
         for f in ("intent_turn.py", "intent_window_control.py"))
     assert unpacked == total - 1, "有消费点未解包 failed_msgs"
+
+
+# ── v1.1.29 复核 A5：{"results":[…]} 形态的两条消费链（同族第 4 处漏网） ──
+def test_a5_scene_replay_results_shape_all_failed():
+    """SetDeviceMode 族只回 {"results":[…]}（无 success 键）⇒ 逐台全失败仍播
+    「已执行场景：X」。旧判据 `get("success") is not False` 无键即恒真。"""
+    out = _scene_ns(lambda name: {"results": [{"success": False,
+                                               "error": "does not support set_mode"}]})
+    assert out["success"] is False, out
+    assert "已执行场景" not in (out.get("message") or ""), out
+
+
+def test_a5_scene_replay_results_shape_one_ok():
+    seq = {"TurnDeviceOn": {"results": [{"success": True}]},
+           "TurnDeviceOff": {"results": [{"success": True}]}}
+    out = _scene_ns(lambda name: seq[name])
+    assert out["success"] is True and "已执行场景" in out.get("message", ""), out
+
+
+def test_a5_automation_results_shape_all_failed():
+    r = _auto_results({"results": [{"name": "x", "success": False, "error": "不支持"}]})
+    assert r == [("TurnDeviceOn", False, "不支持")], r
+
+
+def test_a5_automation_results_shape_any_ok():
+    r = _auto_results({"results": [{"success": False}, {"success": True}]})
+    assert r and r[0][1] is True, r

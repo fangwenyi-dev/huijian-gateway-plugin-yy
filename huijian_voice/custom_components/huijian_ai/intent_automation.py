@@ -14,6 +14,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util.json import JsonObjectType
 
 from .const import CONF_DEBOUNCE_MINUTES, DEFAULT_DEBOUNCE_MINUTES, DOMAIN
+from .intent_result import fold_action_ok
 from .entity_resolve_cn import cn_classes as _cn_classes
 from .entity_resolve_cn import norm as _cn_norm
 from .entity_resolve_cn import pick as _cn_pick
@@ -358,6 +359,13 @@ class AutomationStore:
             data = await self._load_data()
 
             automation_id = f"automation_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            # v1.1.29 复核 A6：与 intent_voice_scene.py 同病同修——秒级时间戳同秒两次
+            # 创建会算出同一 ID，后写顶掉前写（第一条连同 trigger 一起丢）而两次都回成功。
+            if automation_id in data.get("automations", {}):
+                n = 1
+                while f"{automation_id}_{n}" in data.get("automations", {}):
+                    n += 1
+                automation_id = f"{automation_id}_{n}"
             automation = {
                 "automation_id": automation_id,
                 "trigger": trigger,
@@ -712,18 +720,19 @@ class AutomationManager:
                 # IntentResponse(result_type=ERROR) 与自定义 dict {"success":
                 # False} 两型折叠失败此前仍记 True——成败必须读返回值内容，
                 # 不能只读异常（本仓铁律：绝不吃一扇谎报成功）。
-                ok = True
-                if isinstance(response, dict):
-                    ok = response.get("success") is not False
-                elif getattr(response, "success", True) is False:
-                    ok = False
+                # v1.1.29 复核 A5：折算收口到 intent_result.fold_action_ok——同族第 4 处
+                # 漏网（SetDeviceMode 族只回 {"results":[…]}，无 success 键时旧判据恒真）。
+                ok, _err = fold_action_ok(response)
                 if ok:
                     results.append((str(intent_name), True, ""))
                 else:
+                    # v1.1.29：顶层无 error 时用折算出的逐台真因（如 {"results":[…]} 的
+                    # 行内 error），别退成笼统的「执行未成功」。
                     if isinstance(response, dict):
-                        err = str(response.get("error") or "执行未成功")
+                        err = str(response.get("error") or "") or _err or "执行未成功"
                     else:
-                        err = str(getattr(response, "error", None) or "执行未成功")
+                        err = (str(getattr(response, "error", None) or "")
+                               or _err or "执行未成功")
                     _LOGGER.error("Automation action folded failure: %s: %s",
                                   intent_name, err)
                     results.append((str(intent_name), False, err))

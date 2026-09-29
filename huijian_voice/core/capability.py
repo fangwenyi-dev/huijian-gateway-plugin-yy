@@ -25,7 +25,10 @@ from typing import Any, Optional
 # HA 域能力位（legacy supported_features，与 core 各域 const 同值）
 _LIGHT_BRIGHTNESS = 1
 _LIGHT_COLOR_TEMP = 2
-_LIGHT_COLOR = 8           # 含 rgb/hs/xy（现代 HA 由 supported_color_modes 表达）
+# v1.1.29 复核 A7：8 是 LightEntityFeature.FLASH（本仓 light.py:373 无条件置它），
+# legacy「可调色」位是 16（SUPPORT_COLOR，含 rgb/hs/xy）——取 8 ⇒ 本仓自有灯族全部
+# 绕过调色预裁（播「颜色已设为绿」而灯只是变冷白），且误拒 legacy 彩色灯。
+_LIGHT_COLOR = 16
 _COVER_SET_POSITION = 4
 _FAN_SET_SPEED = 1
 

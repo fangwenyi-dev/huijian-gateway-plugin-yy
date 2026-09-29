@@ -525,7 +525,9 @@ class Pipeline:
         # P1 音乐批：端点→最近点歌记账（P2a 前卫星实体不报 media_title 时，
         # 「现在放的是什么歌」的兜底事实源；有界+TTL，重启即清）
         self._music_last: "OrderedDict[str, dict]" = OrderedDict()
-        self._last_list: Optional[str] = None   # 上次清单播报对象（"删第2条"回指）
+        # 上次清单播报对象（"删第2条"回指）：**按 origin 分桶 + TTL**（v1.1.29 复核 A2
+        # ——旧式全局单值：另一台卫星可零确认删掉自己没听过的场景/自动化，且永不过期）。
+        self._last_list: dict[str, tuple[str, float]] = {}
         self._last_target: dict[str, dict] = {}
         self._origin_ts: dict[str, float] = {}      # LRU 清扫用
         # P2-13 待确认环
@@ -1180,7 +1182,7 @@ class Pipeline:
         x = c["trigger_phrase"]
         if not x:
             listed = await self._object_list({"kind": "list_scenes"}, text, origin)
-            if self._last_list is None:              # 空清单：已给创建引导
+            if self._peek_last_list(origin) is None:  # 空清单：已给创建引导
                 return listed
             listed.text = (f"要删哪个场景？{listed.text}。"
                            f"说「删除场景名字」或「删第N条」都行")
@@ -1280,7 +1282,7 @@ class Pipeline:
                 await self.scenes.refresh(force=True)
                 rows = self.scenes.all() if hasattr(self.scenes, "all") else []
             if not rows:
-                self._last_list = None
+                self._set_last_list(origin, None)
                 say = "你还没有创建过语音场景，说「当我说晚安，就关闭客厅灯」就能创建一个"
             else:
                 from .admin_api import _hv_action_cn
@@ -1298,7 +1300,7 @@ class Pipeline:
                     parts.append(f"{i}，{body}")
                 more = f"；其余{len(rows)-5}个在管理页看" if len(rows) > 5 else ""
                 say = f"目前有{len(rows)}个语音场景：{'；'.join(parts)}{more}"
-                self._last_list = "scene"
+                self._set_last_list(origin, "scene")
             self._remember_turn(origin, text, say)
             return Reply(say, "creation", True, [f"列场景:{len(rows)}"])
         rows = await self._automation_rows()
@@ -1306,7 +1308,7 @@ class Pipeline:
             return Reply("暂时读不到自动化列表，稍后再试", "creation", ok=False,
                          trace=["列自动化失败"])
         if not rows:
-            self._last_list = None
+            self._set_last_list(origin, None)
             say = ("你还没有语音自动化，说「当客厅温度超过28度就打开空调」"
                    "或「每天早上7点帮我打开客厅窗帘」就能创建")
         else:
@@ -1315,21 +1317,41 @@ class Pipeline:
                               if isinstance(a, dict))
             more = f"，其余{len(rows)-5}条在管理页看" if len(rows) > 5 else ""
             say = f"目前有{len(rows)}条语音自动化：{items}{more}"
-            self._last_list = "automation"
+            self._set_last_list(origin, "automation")
         self._remember_turn(origin, text, say)
         return Reply(say, "creation", True, [f"列自动化:{len(rows)}"])
+
+    def _set_last_list(self, origin: str, kind: Optional[str]) -> None:
+        """清单回指锚点写入（kind=None 即清本 origin）。"""
+        if kind:
+            self._last_list[origin] = (kind, time.time())
+        else:
+            self._last_list.pop(origin, None)
+
+    def _peek_last_list(self, origin: str) -> Optional[str]:
+        hit = self._last_list.get(origin)
+        return hit[0] if hit else None
+
+    def _take_last_list(self, origin: str) -> Optional[str]:
+        """取本 origin 的清单锚点（一次性；超 TTL 即失效）。"""
+        hit = self._last_list.pop(origin, None)
+        if not hit:
+            return None
+        kind, ts = hit
+        ttl = float(self.settings.get("dialog.context_ttl_s", CONTEXT_TTL_S))
+        return kind if (time.time() - ts) <= ttl else None
 
     async def _index_delete(self, c: dict, text: str, origin: str) -> Reply:
         """「删第N条」= 上一次清单播报的第 N 项（清单说完紧跟着删的自然交互）。
         无上下文如实反问；执行后清上下文（清单已失效，防旧编号误删）。"""
         n = c["n"]
-        kind = self._last_list
+        kind = self._take_last_list(origin)
         if kind is None:
             return Reply(f"要删的第{n}条是什么？先说「有哪些自动化」或「有哪些场景」"
                          f"听一遍编号清单，再说「删第{n}条」",
                          "creation", ok=False, trace=["删第N条:无清单上下文"])
         if kind == "automation":
-            self._last_list = None
+            self._set_last_list(origin, None)
             return await self._automation_delete({"target": str(n)}, text, origin)
         rows = self.scenes.all() if hasattr(self.scenes, "all") else []
         if not rows or n > len(rows):
@@ -1339,7 +1361,7 @@ class Pipeline:
             return Reply(f"场景一共{len(rows)}个，没有第{n}条",
                          "creation", ok=False, trace=[f"删第{n}条:越界"])
         x = str(rows[n - 1].get("trigger_phrase") or "")
-        self._last_list = None
+        self._set_last_list(origin, None)
         return await self._scene_delete({"trigger_phrase": x}, text, origin)
 
     def _auto_hits(self, rows: list, tgt) -> list:
@@ -1375,7 +1397,7 @@ class Pipeline:
         if tgt is None:                            # 裸删：列编号，让用户点名
             items = "；".join(self._auto_say(i, a) for i, a in enumerate(rows[:5], 1)
                               if isinstance(a, dict))
-            self._last_list = "automation"          # 清单编号即锚点，「删第N条」直接可用
+            self._set_last_list(origin, "automation")  # 清单编号即锚点，「删第N条」直接可用
             return Reply(f"要删哪一条？你说「删除自动化序号」：{items}",
                          "creation", True, trace=["删自动化:引导"])
         hit = self._auto_hits(rows, tgt)
@@ -1574,16 +1596,24 @@ class Pipeline:
         return f"抱歉，「{clause}」这句我没听懂具体要做什么，先不创建了。{demo}"
 
     # ── P2-12 复合句 ───────────────────────────────────────────
-    async def _try_compound(self, text: str, origin: str) -> Optional[Reply]:
+    async def _chain_decide(self, text: str, origin: str
+                            ) -> tuple[Optional[Reply], Optional[Plan], list, bool]:
+        """复合句逐腿裁决（**零执行**）→ (拦截话术, 合链计划, 逐腿计划, 含退下旗)。
+
+        v1.1.29 复核 A12：从 _try_compound **原样抽出**——调试面板（dry_run）必须展示
+        真实会被执行的裁决结果，而旧 dry_run 不含复合链 ⇒ 面板说「未命中」，设备其实
+        已按链执行过。本函数不跑任何设备指令、不记账（真流量入口仍是 _try_compound，
+        执行与记账都在它那半段）。
+        """
         if not self.settings.get("dialog.chain_enabled", True):
-            return None
+            return (None, None, [], False)
         # 场景契约恒最高优先（模块头裁决①）：整句就是某个触发词时**绝不切分**——
         # 契约句必须走单发通路交给 fast_path 的 scene 判定，否则「当我说X」会被
         # 连排切分当设备指令做掉（与 fast_path 侧同一纪律）。
         # getattr：部分单测手工装配的 Pipeline 没有 scenes 字段（真机恒有）。
         _sc = getattr(self, "scenes", None)
         if _sc is not None and _sc.check(text) == text:
-            return None
+            return (None, None, [], False)
         clauses = split_compound(text)
         if not clauses:
             # 无连接词的动词连排（2026-09-10 真机：连排双动作只执行了后一个）
@@ -1594,31 +1624,41 @@ class Pipeline:
             # 任一分句听不懂→整句拒猜（fast_path 同形守卫兜住回退单发那一步）。
             clauses = T.coord_clauses(text)
         if not clauses:
-            return None
+            return (None, None, [], False)
         pairs = await asyncio.gather(*[self._match_pair(c) for c in clauses])
         plans: list[Plan] = []
         chain_spec: Optional[dict] = None       # 链内回指：同句先行分句的具名目标
         for (fpp, klp), clause in zip(pairs, clauses):
             p = select_primary_plan(fpp, klp, self._known_areas())
             if p is None:
-                return None                          # 任一分句不中 → 整句回退单发
+                return (None, None, [], False)   # 任一分句不中 → 整句回退单发
             # 上下文注入按分句文本（先前误用整句文本，"它"会误标到首句）；
             # 链内先行目标优先，跨轮目标/卫星区域兜底。
             p = self._apply_context(p, clause, origin, seed=chain_spec)
             ob = self._overbroad_area_target(p)
             if ob:
                 # 链中分句过宽：整句不执行，直接引导（同单发口径）
-                return Reply(self._overbroad_say(ob), "clarify", ok=False,
-                             trace=[f"链内过宽目标拦截:{ob}"])
+                return (Reply(self._overbroad_say(ob), "clarify", ok=False,
+                              trace=[f"链内过宽目标拦截:{ob}"]), None, [], False)
             bad_area = await self._plan_area_problem(p)
             if bad_area:
                 # v1.1.24：链中分句区域解析不到 → 整链不执行（同单发口径）
                 logger.info("[级联] 链内分句区域解析不到 → 不执行（%s）：%s",
                             bad_area, p.args)
-                return Reply(self._area_say(bad_area), "clarify", ok=False,
-                             trace=[f"链内区域不存在:{bad_area}"])
+                return (Reply(self._area_say(bad_area), "clarify", ok=False,
+                              trace=[f"链内区域不存在:{bad_area}"]), None, [], False)
             if self._risky(p):
-                return None                          # 链中藏风险操作 → 不链发
+                return (None, None, [], False)   # 链中藏风险操作 → 不链发
+            ask = self._ambiguity_ask(p, origin)
+            if ask is not None:
+                # v1.1.29 复核 A3：链这条腿此前没有歧义闸——单发会 clarify 的同名目标，
+                # 加个「然后」就原样下发（集成按名子串匹配 ⇒ 孪生一起动）。clarify
+                # （零下发、信息全）直接如实回；confirm 退回单发通路——挂单腿确认环会让
+                # 「确认」只执行这一腿（其余腿静默丢），退前清掉挂起防误执行。
+                if ask.source == "clarify":
+                    return (ask, None, [], False)
+                self._confirm.pop(origin, None)
+                return (None, None, [], False)
             # risky 判定放到注入后：代词分句继承出「锁」类目标同样要拦
             s = self._spec_of(p)
             if s is not None:
@@ -1631,7 +1671,7 @@ class Pipeline:
         if end_in_chain:
             plans = [p for p in plans if p.intent != END_DIALOGUE_INTENT]
             if not plans:
-                return None
+                return (None, None, [], False)
         first = plans[0]
         chain_notes = [t for p in plans[1:] if FLAG_CHAIN_ANAPHORA in p.flags
                        for t in p.trace if t.startswith(f"{TRACE_TAG_CHAIN}:")]
@@ -1648,6 +1688,13 @@ class Pipeline:
                       extra_steps=[{"name": p.intent, "args": p.args, "source": p.source,
                                     "utterance": p.utterance or ""}
                                    for p in plans[1:]])
+        return (None, merged, plans, end_in_chain)
+
+    async def _try_compound(self, text: str, origin: str) -> Optional[Reply]:
+        """复合句：分句全命中才链发（P2-12）。裁决在 _chain_decide，执行在本函数。"""
+        reply, merged, plans, end_in_chain = await self._chain_decide(text, origin)
+        if reply is not None or merged is None:
+            return reply
         ok, speech = await self.executor.run(merged)
         if ok:
             for p in plans:
@@ -1830,8 +1877,15 @@ class Pipeline:
         self._gc_origins()
 
     def _gc_origins(self) -> None:
-        """origin 桶有界（64 台卫星封顶），超量按最久未用裁。"""
-        for table in (self._turns, self._last_target, self._confirm):
+        """origin 桶有界（64 台卫星封顶），超量按最久未用裁。
+
+        v1.1.29 复核 A2：`_last_list` 也并入本表；getattr 容忍——手工装配的管线
+        替身（`Pipeline.__new__`）只补它关心的属性，不该因本表多一项就炸。
+        """
+        for name in ("_turns", "_last_target", "_confirm", "_last_list"):
+            table = getattr(self, name, None)
+            if not isinstance(table, dict):
+                continue
             if len(table) <= 64:
                 continue
             victims = sorted(self._origin_ts.items(), key=lambda kv: kv[1])
@@ -2425,8 +2479,14 @@ class Pipeline:
             if not llm_on:
                 out["final"] = _NLU_OFF_TEXT
             return out
+        # v1.1.29 复核 A12：面板必须展示**真实会被执行**的裁决——真流量里复合链
+        # 优先于单发（_cascade 里 _try_compound 在 _match_pair 之前），旧 dry_run
+        # 不含它 ⇒ 面板说「未命中」而设备其实已按链执行。复用同一条逐腿裁决
+        # （零执行、零记账；origin 固定 "panel"）。
+        chain_reply, chain_plan, _chain_legs, _chain_end = await self._chain_decide(
+            text, "panel")
         fp_plan, kl_plan = await self._match_pair(text)   # 与真流量同构（并行）
-        plan = select_primary_plan(fp_plan, kl_plan, self._known_areas())
+        plan = chain_plan or select_primary_plan(fp_plan, kl_plan, self._known_areas())
 
         def _dump(p):
             return None if p is None else {
@@ -2436,6 +2496,13 @@ class Pipeline:
                 "whole_house": bool(getattr(p, "whole_house", False))}
         out = {"nlu_enabled": True, "plan": _dump(plan),
                "fast_path": _dump(fp_plan), "klar": _dump(kl_plan)}
+        if chain_plan is not None:
+            out["compound"] = True               # 这句会走复合链（逐腿）
+        elif chain_reply is not None:
+            # 链被闸拦下（过宽/区域/歧义）：如实显示拦截话术，而不是「未命中」
+            out["compound"] = True
+            out["blocked"] = chain_reply.text
+            out["final"] = chain_reply.text
         if plan is None:
             try:
                 out["query_answer"] = await self.query.answer(text)

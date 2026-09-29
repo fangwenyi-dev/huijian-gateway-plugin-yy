@@ -149,7 +149,8 @@ def test_bare_scene_delete_lists_and_never_deletes():
     r = _casc(pipe, "删除场景")
     assert r.ok and "要删哪个场景" in r.text and "晚安" in r.text
     assert ex.calls == []                        # 引导 ≠ 执行（绝不瞎删）
-    assert pipe._last_list == "scene"            # 编号锚点已立
+    assert pipe._peek_last_list("test") == "scene"   # 编号锚点已立（按 origin 分桶）
+    assert pipe._peek_last_list("other") is None     # 别的 origin 拿不到（v1.1.29 A2）
     r2 = _casc(pipe, "删第1条")                   # 紧接着按编号删，本地可用
     assert r2.ok and "晚安" in r2.text
     assert ex.calls[-1].intent == "HassDeleteVoiceScene"
@@ -162,7 +163,7 @@ def test_bare_automation_delete_sets_anchor():
     pipe = _pipe(executor=ex)
     r = _casc(pipe, "删除自动化")
     assert r.ok and "要删哪一条" in r.text
-    assert pipe._last_list == "automation"
+    assert pipe._peek_last_list("test") == "automation"
     r2 = _casc(pipe, "删第2条")
     assert r2.ok and "已删除" in r2.text
     dele = [p for p in ex.calls if p.intent == "HassDeleteAutomation"]

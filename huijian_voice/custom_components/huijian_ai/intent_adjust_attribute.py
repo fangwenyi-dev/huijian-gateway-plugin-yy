@@ -222,7 +222,10 @@ def parse_delta(raw: str):
     elif raw.startswith("#"):
         # color hex value
         raw = raw.upper()
-        hex_color_pattern = r"^#([0-9A-F]{3,6})$"
+        # v1.1.29 复核 A10：消费端只处理 3/6 位（3 位展开、否则按 6 位切片）——旧闸
+        # 放行 4/5 位 ⇒ 4 位在 int(...) 抛 ValueError 逃出 handler（加载项拿不到结构化
+        # 失败），5 位静默算出色偏（#FFFFF → RGB(255,255,15)）还回 success。
+        hex_color_pattern = r"^#([0-9A-F]{3}|[0-9A-F]{6})$"
         m = re.search(hex_color_pattern, raw)
         if not m:
             return

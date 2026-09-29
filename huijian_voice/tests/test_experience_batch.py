@@ -1107,3 +1107,68 @@ def test_executor_multistep_failure_localizes_step():
     ok, reply = arun(ex.run(plan))
     assert not ok and reply.startswith("抱歉")
     assert "第 2 步没成功" in reply
+
+
+# ── v1.1.29 复核 A3：链逐腿补歧义闸（端到端） ──────────────────────
+def test_chain_leg_ambiguity_clarifies_instead_of_dispatching():
+    """单发会 clarify 的同名目标，加个「然后」也不许原样下发。
+
+    旧码链上只有过宽/区域/风险三道闸（无歧义闸）⇒ 集成按 name 子串把孪生一起动。"""
+    ex = RecExecutor()
+    fp = Lane(table={
+        "打开灯": _p("TurnDeviceOn", _tgt(area="", name="灯")),
+        "关闭窗帘": _p("TurnDeviceOff", _tgt(area="", name="窗帘")),
+    })
+    two = {"light.a": {"entity_id": "light.a", "state": "off",
+                       "attributes": {"friendly_name": "射灯"}},
+           "light.b": {"entity_id": "light.b", "state": "off",
+                       "attributes": {"friendly_name": "射灯"}}}
+    p = _pipe(fp=fp, ex=ex, ha=HA(states=two))
+    r = arun(p.handle("打开灯然后关闭窗帘"))
+    assert r.source == "clarify", (r.source, r.text, r.trace)
+    assert ex.plans == [], "未收敛却在链里下发了"
+
+
+def test_chain_still_fires_when_leg_target_is_unambiguous():
+    """反向守卫：目标无歧义时链照旧整链执行（新闸不许把正常链打死）。"""
+    ex = RecExecutor()
+    fp = Lane(table={
+        "关闭办公室射灯": _p("TurnDeviceOff", _tgt(area="办公室", name="射灯")),
+        "关闭办公室平开窗": _p("ControlWindow", _tgt(area="办公室", name="平开窗")),
+    })
+    one = {"light.office": {"entity_id": "light.office", "state": "on",
+                            "attributes": {"friendly_name": "办公室射灯"}}}
+    p = _pipe(fp=fp, ex=ex, ha=HA(states=one))
+    r = arun(p.handle("关闭办公室射灯关闭办公室平开窗"))
+    assert r.source == "chain" and len(ex.plans) == 1, (r.source, r.trace)
+
+
+# ── v1.1.29 复核 A12：调试面板必须展示真实会被执行的裁决（含复合链） ──
+def test_a12_dry_run_shows_compound_chain():
+    fp = Lane(table={
+        "关闭办公室射灯": _p("TurnDeviceOff", _tgt(area="办公室", name="射灯")),
+        "关闭办公室平开窗": _p("ControlWindow", _tgt(area="办公室", name="平开窗")),
+    })
+    one = {"light.office": {"entity_id": "light.office", "state": "on",
+                            "attributes": {"friendly_name": "办公室射灯"}}}
+    ex = RecExecutor()
+    p = _pipe(fp=fp, ex=ex, ha=HA(states=one))
+    out = arun(p.dry_run("关闭办公室射灯关闭办公室平开窗"))
+    assert out.get("compound") is True, out
+    assert out["plan"] and [s["name"] for s in out["plan"]["extra_steps"]] == ["ControlWindow"], out["plan"]
+    assert ex.plans == [], "面板 dry_run 绝不许执行设备指令"
+
+
+def test_a12_dry_run_reports_chain_blocked():
+    """链被闸拦下（同名孪生 clarify）时，面板如实给拦截话术而非「未命中」。"""
+    fp = Lane(table={
+        "打开灯": _p("TurnDeviceOn", _tgt(area="", name="灯")),
+        "关闭窗帘": _p("TurnDeviceOff", _tgt(area="", name="窗帘")),
+    })
+    two = {"light.a": {"entity_id": "light.a", "state": "off",
+                       "attributes": {"friendly_name": "射灯"}},
+           "light.b": {"entity_id": "light.b", "state": "off",
+                       "attributes": {"friendly_name": "射灯"}}}
+    p = _pipe(fp=fp, ex=RecExecutor(), ha=HA(states=two))
+    out = arun(p.dry_run("打开灯然后关闭窗帘"))
+    assert out.get("compound") is True and "射灯" in (out.get("blocked") or ""), out

@@ -226,13 +226,18 @@ _DEVSTATE_TO = {
 _AUTO_TIME_RE = re.compile(
     r"^每天(?P<am>早上|上午|中午|凌晨|下午|晚上)?\s*"
     r"(?P<h>[0-9]{1,2}|[零一二两三四五六七八九十]+)\s*点\s*"
-    r"(?P<m>半|[0-9一二三四五六七八九十]{1,3}分|一刻|三刻)?(?:的)?(?:时候|时)?"
+    r"(?P<m>半|[0-9零一二三四五六七八九十]{1,3}分|一刻|三刻)?(?:的)?(?:时候|时)?"
     r"[，,、\s]*(?:就|帮我|请|要|给|把)?(?P<y>.+)$")
 
 # 动作子句强连接词（并/并且/然后/再/同时/、）——比 _COMPOUND 宽，创建专用；
 # "再"不要求前置逗号（X 场景里"关窗帘再开灯"无歧义）。
 _Y_SPLIT = re.compile(
     r"\s*(?:并且|并|然后(?:再|把)?|接着|之后|同时|再|[，,、])\s*")
+
+# 时间残片（v1.1.29 复核 A8）：y 若只剩分钟短语（"十分/十五分"）＝这句其实没有
+# 动作。`(?P<y>.+)$` 必须非空 ⇒ 句尾分钟短语被回溯让给 y ——「每天七点十分」于是被
+# 建成 07:00 + 动作="十分"，而「每天七点」（无 y）本来就是 None（如实拒建）。
+_TIME_RESIDUE_RE = re.compile(r"^(?:半|一刻|三刻|[0-9零〇一二三四五六七八九十]{1,3}分?)$")
 
 _CN_UNIT_STRIP = re.compile(r"(度|摄氏度|℃|%|％)$")
 _Y_POLITE = re.compile(r"^(?:帮我|请|要|来|给我|麻烦)+")
@@ -299,6 +304,10 @@ def _hour_minute(h_raw: str, am: str, m_raw: str) -> Optional[str]:
         m = int(mv)
     if am in ("下午", "晚上") and h <= 11:
         h += 12
+    # v1.1.29 复核 A9：口语「晚上12点/晚上十二点」= 午夜 00:00；旧式 h==12 既不进
+    # 上面的 +12、也不进凌晨的 12→0 ⇒ 建出正午触发（一天只在想不到的时刻动一次）。
+    if am == "晚上" and h == 12:
+        h = 0
     # v1.1.27：「中午」此前一律置 12 点（`h = 12`），实测「每天中午一点打开书房灯」
     # 得到 12:00——用户说的是 13 点（真机早一小时触发）。中文口语里中午 1~3 点
     # 就是 13~15 点（"中午一点"绝无 01:00 解释）；11/12 点维持原判据。
@@ -568,7 +577,7 @@ def parse(text: str) -> Optional[dict[str, Any]]:
     if m:
         hm = _hour_minute(m.group("h"), m.group("am") or "", m.group("m") or "")
         y = _clean_y(m.group("y"))
-        if hm is None or len(y) < 2:
+        if hm is None or len(y) < 2 or _TIME_RESIDUE_RE.match(y):
             return None
         desc = f"每天{m.group('am') or ''}{m.group('h')}点"
         return {"kind": "automation", "desc": desc, "trigger": {"at": hm}, "y": y}

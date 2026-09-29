@@ -330,12 +330,12 @@ def test_index_delete_scene_anaphora():
     # 编号=删除锚点（1.0.34/1.0.36 公告口径；此前只有自动化侧有编号，场景侧漏了，
     # 用户听着无编号的清单没法说「删第N条」）。编号必须按 rows 位置从 1 起。
     assert "1，晚安" in r.text and "2，午休" in r.text, r.text
-    assert pipe._last_list == "scene"
+    assert pipe._peek_last_list("test") == "scene"
     r = _casc(pipe, "删第2条")
     assert r.ok and "午休" in r.text
     assert ex.calls[-1].intent == "HassDeleteVoiceScene"
     assert ex.calls[-1].args == {"trigger_phrase": "午休"}
-    assert pipe._last_list is None                  # 删后清锚，防旧编号误删
+    assert pipe._peek_last_list("test") is None     # 删后清锚，防旧编号误删
     r = _casc(pipe, "删第1条")
     assert not r.ok and "先说" in r.text            # 无上下文如实反问
 
