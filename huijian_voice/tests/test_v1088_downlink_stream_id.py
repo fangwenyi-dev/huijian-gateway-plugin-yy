@@ -231,7 +231,7 @@ def _fake_transport(Dict, items, proto=2, restart_budget=None):
         async def _drain_stale(self):
             pass
 
-        async def restart_connection(self, why):
+        async def restart_connection(self, why, **kw):
             self.restarts.append(why)
 
     return F()

@@ -549,7 +549,7 @@ class WsTransport:
         except Exception as err:
             self.ws_log("heartbeat ping failed: %s", err)
 
-    async def restart_connection(self, reason: str = "") -> None:
+    async def restart_connection(self, reason: str = "", generation: int | None = None) -> None:
         """拆掉当前连接、保留自动重连并立即续连（v1.0.45）。
 
         介于"不动"与 stop() 之间：调用方判定本连接的对话状态已被污染
@@ -557,7 +557,22 @@ class WsTransport:
         请求），与其在旧流上猜，不如换连接——重连后 `_create_streams` 给出
         全新 stream 对，残留物理归零。`_connect_now` 同时叫醒正处于退避的
         循环，下一请求不必空等 3~60s。
+
+        v1.1.27（代次闸）：`generation` = 调用方认领这条连接时记下的
+        `_conn_gen`。旧轮收口常常**晚到**——消费者被取消/超时后才走到 finally，
+        此刻新一轮可能已建好新连接——旧形态无条件 close 会把**新**连接拆掉，
+        且 `_create_streams` 随之把新连接的协商结果 `_proto` 归零（新轮 detect
+        已发出却等不到 stream_start 回声，白等一整个同步窗）。带代次后：不是
+        当前代次即整段跳过（不关连接、不置 is_connected、不叫醒退避），只留痕。
         """
+        if generation is not None and generation != self._conn_gen:
+            self.logger.warning(
+                "restart_connection 请求来自旧代次（gen=%s 当前=%s）——不拆新连接: %s",
+                generation,
+                self._conn_gen,
+                reason,
+            )
+            return
         self.logger.warning("Restarting websocket connection: %s", reason)
         ws = self._current_ws
         self._is_connected = False

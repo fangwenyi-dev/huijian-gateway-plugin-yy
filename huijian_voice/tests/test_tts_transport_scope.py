@@ -92,7 +92,7 @@ class FakeTransport:
     async def send_message(self, payload):
         self.sent.append(payload)
 
-    async def restart_connection(self, reason):
+    async def restart_connection(self, reason, **kw):   # v1.1.27：收口清算带 generation（代次闸）
         self.restarts.append(reason)
 
 

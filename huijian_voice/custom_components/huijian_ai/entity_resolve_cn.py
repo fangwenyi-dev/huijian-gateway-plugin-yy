@@ -103,14 +103,24 @@ def detect_classes(desc: str) -> tuple[list[str], str]:
     return classes, rest
 
 
+def _cmp(s: str) -> str:
+    """比较用归一：小写、去「的」、去空白。
+
+    中文无空格分词，「的」是描述侧的高频虚词而实体名侧常没有——两侧必须
+    统一归一后才能互比（旧实现只去名侧的「的」，描述侧由 detect_classes
+    把「的」折成空格 ⇒ 「客厅的空调」两边都不中）。
+    """
+    return norm(s).replace("的", "").replace(" ", "")
+
+
 def _name_hit(cand: dict, token: str) -> bool:
-    """单个残串 token 对实体名/id 的子串命中。实体名侧先去「的」，
-    让描述「办公室温度」与实体名「办公室的温度」互相兼容。"""
+    """单个残串 token 对实体名/id 的子串命中（两侧统一 _cmp 归一）。"""
     if not token:
         return False
-    name = norm(cand.get("name", "")).replace("的", "")
-    eid = norm(cand.get("entity_id", ""))
-    return token in name or token in eid
+    t = _cmp(token)
+    if not t:
+        return False
+    return t in _cmp(cand.get("name", "")) or t in _cmp(cand.get("entity_id", ""))
 
 
 def pick(desc: str, cands: list[dict], areas: dict[str, str]) -> dict:
@@ -129,14 +139,18 @@ def pick(desc: str, cands: list[dict], areas: dict[str, str]) -> dict:
       area_hit / classes / residue 解析中间量（供话术与调试）。
     """
     d = norm(desc)
-    classes, residue = detect_classes(d)
     hit_tokens = [t for t in areas if t and t in d]
     area_hit = max(hit_tokens, key=len) if hit_tokens else None
+    # v1.1.27（批7）：区域词必须在**类别切分之前**屏蔽。旧顺序先 detect_classes
+    # 再定区域，「门厅的温度」里的「门」被单字兜底吞成 device_class=door →
+    # 候选池混入门磁，区域里名字带「厅」的门磁反成唯一命中者（错绑门磁并报
+    # 成功）。屏蔽后类别集只剩 temperature。
+    d_masked = norm(d.replace(area_hit, " ")) if area_hit else d
+    classes, residue = detect_classes(d_masked)
     canon = areas.get(area_hit or "", "")
 
-    # 残串去掉区域词：「办公室空调温度」的名字线索是「空调」而非「办公室空调」
-    residue_clean = norm(residue.replace(area_hit, " ")) if area_hit else residue
-    d_clean = norm(d.replace(area_hit, " ")) if area_hit else d
+    # 残串已不含区域词（切分前屏蔽），此处仅保留历史字段语义
+    residue_clean = residue
 
     cls_pool = [c for c in cands if (not classes) or (c.get("dc") or "") in classes]
 
@@ -170,8 +184,12 @@ def pick(desc: str, cands: list[dict], areas: dict[str, str]) -> dict:
             return _amb([c["entity_id"] for c in narrowed])
         # 该区域无候选：先给「整串名字命中」的老数据一次机会（friendly_name
         # 习惯内嵌区域名的用户），仍无果才判区域缺失——跨区守卫成立但不倒退。
+        # v1.1.27：只用**整串**描述当 token（原形态即可，_name_hit 内部已统一
+        # 去「的」/空白）。旧实现并列喂 d_clean（区域已屏蔽的残段），而该残段
+        # 常常只剩类别词（「办公室的温度」→「温度」）——子串匹配把别的区域的
+        # 「卧室温度」判成命中，R3 跨区错绑从这个口子复活。
         if classes:
-            nm = [c for c in cls_pool if _name_hit(c, d) or _name_hit(c, d_clean)]
+            nm = [c for c in cls_pool if _name_hit(c, d)]
             if len(nm) == 1:
                 return _ok(nm[0]["entity_id"])
             if len(nm) > 1:
@@ -179,7 +197,7 @@ def pick(desc: str, cands: list[dict], areas: dict[str, str]) -> dict:
             return {"best": None, "ambiguous": [], "no_in_area": True,
                     "others": [c["entity_id"] for c in cls_pool if not _in_area(c)][:5],
                     "area_hit": area_hit, "classes": classes, "residue": residue_clean}
-        nm = [c for c in cands if _name_hit(c, d) or _name_hit(c, d_clean)]
+        nm = [c for c in cands if _name_hit(c, d)]
         if len(nm) == 1:
             return _ok(nm[0]["entity_id"])
         return _amb([c["entity_id"] for c in nm])

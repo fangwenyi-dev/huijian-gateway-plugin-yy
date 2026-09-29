@@ -299,10 +299,13 @@ class ModelStore:
                 continue
             dest = base / name
             imp = self.import_dir / name
-            if dest.exists() and imp.exists():
-                imp.unlink(missing_ok=True)   # 导入口残留让位已就位文件（防反复重下）
             if dest.exists():
+                # v1.1.27 项4：清导入口必须**以 dest 校验通过为前置**。旧序先
+                # unlink(imp) 再校验 dest——dest 是坏字节时救急包已被销毁、坏 dest
+                # 也删了，只剩跨境网络一条路（离线/断网现场只能干等）。
                 if not ef.get("sha256") or self._sha_ok(dest, ef["sha256"]):
+                    if imp.exists():
+                        imp.unlink(missing_ok=True)   # 导入口残留让位已就位文件（防反复重下）
                     continue
                 dest.unlink(missing_ok=True)  # 坏字节：重取（导入口→urls 同序）
             if imp.exists():

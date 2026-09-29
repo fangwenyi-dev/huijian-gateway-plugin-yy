@@ -46,11 +46,18 @@ class HuijianSttEntity(BaseEntity):
             entry_type=dr.DeviceEntryType.SERVICE,
         )
         self._attr_supported_languages = ["en", "zh", "zh-Hans"]
-        self._attr_supported_codecs = [AudioCodecs.PCM, AudioCodecs.OPUS]
-        self._attr_supported_formats = [AudioFormats.WAV, AudioFormats.OGG]
-        self._attr_supported_channels = [x for x in AudioChannels]
-        self._attr_supported_bit_rates = [x for x in AudioBitRates]
-        self._attr_supported_sample_rates = [x for x in AudioSampleRates]
+        # v1.1.27（申报面对齐实现，H7 假成功同族）：旧形态申报**全量**
+        # codecs/formats/channels/bit_rates/sample_rates（含 OPUS/OGG/48k/双声道），
+        # 而下游 `wav_to_opus` 只剥 RIFF 头、之后一律按 16bit PCM 解帧——交
+        # 48k/OGG/OPUS 时音频被当乱码编码，端到端仍回 SUCCESS（管线播"乱码
+        # 转写"，现场只看见"识别瞎"。OPUS 并不真走 wav_to_opus：本引擎的
+        # opus 出口是编码侧，入口只认 WAV/PCM）。故申报面收窄到实现真正支持
+        # 的形态；不支持形态在 `async_process_audio_stream` 入口如实 ERROR。
+        self._attr_supported_codecs = [AudioCodecs.PCM]
+        self._attr_supported_formats = [AudioFormats.WAV]
+        self._attr_supported_channels = [AudioChannels.CHANNEL_MONO]
+        self._attr_supported_bit_rates = [AudioBitRates.BITRATE_16]
+        self._attr_supported_sample_rates = [AudioSampleRates.SAMPLERATE_16000]
         self.opus_encoder = opuslib.Encoder(
             self.opus_sample_rate, self.opus_channels, opuslib.APPLICATION_VOIP
         )
@@ -93,6 +100,29 @@ class HuijianSttEntity(BaseEntity):
             metadata.bit_rate,
             metadata.sample_rate,
         )
+        unsupported = [
+            f"{name}={got}"
+            for name, got, want in (
+                ("format", metadata.format, AudioFormats.WAV),
+                ("codec", metadata.codec, AudioCodecs.PCM),
+                ("channel", metadata.channel, AudioChannels.CHANNEL_MONO),
+                ("bit_rate", metadata.bit_rate, AudioBitRates.BITRATE_16),
+                ("sample_rate", metadata.sample_rate,
+                 AudioSampleRates.SAMPLERATE_16000),
+            )
+            if got != want
+        ]
+        if unsupported:
+            # v1.1.27：申报面（supported_*）已收窄，但调用方仍可能绕过声明把
+            # 48k/OGG/OPUS 直接塞进来（旧形态会按 16k/mono/PCM 硬解=乱码，却
+            # 照样回 SUCCESS）。入口如实拒收，不再制造假成功。
+            _LOGGER.error(
+                "STT 收到未支持的音频形态（%s）——本引擎只支持 16kHz/mono/16bit "
+                "PCM-WAV（wav_to_opus 仅剥 RIFF 头后按 16bit PCM 解帧，其它形态会被"
+                "当乱码编码）。按 ERROR 如实收口。",
+                "、".join(unsupported),
+            )
+            return SpeechResult(None, SpeechResultState.ERROR)
         # H7/M9/M10（2026-09-23 深审批5）：整轮听写交给 transport.recognize
         # 统一持锁+发送超时+残帧清算（TTS v1.0.45 三件套迁移）。旧形态三罪：
         # ①发送裸调无超时，悬挂 writer 永久阻塞；②超时/连接死仍回

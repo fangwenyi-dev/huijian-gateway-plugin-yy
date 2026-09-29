@@ -2,6 +2,19 @@
   "_doc": "ESP32 卫星固件发布锁（OTA 方案 Phase 2）。releases 每条=一个可下发版本：version(x.y.z)/file(public 目录内落盘名)/urls(按容灾顺序 GitHub→Gitee，私有仓须内嵌一次性访问串)/sha256(64hex 必填，缺=拒下载)/size/notes_zh(对外话术，受内部文档禁发约束)/min_compatible。镜像内置文件之外，/data/firmware/firmware.lock.json 同名整文件优先（现场热修不重打镜像）。版本值以固件仓 release 实测为准，禁止凭记忆填写。",
   "releases": [
     {
+      "version": "2.1.72",
+      "file": "huijian-s3-2.1.72.bin",
+      "urls": [
+        "https://gh-proxy.com/https://github.com/fangwenyi-dev/huijian-gateway-plugin-yy/releases/download/v1.1.27/huijian-s3-2.1.72.bin",
+        "https://github.com/fangwenyi-dev/huijian-gateway-plugin-yy/releases/download/v1.1.27/huijian-s3-2.1.72.bin",
+        "https://gitee.com/fangwenyi-dev/huijian-gateway-plugin-yy/releases/download/v1.1.27/huijian-s3-2.1.72.bin"
+      ],
+      "sha256": "86dd358ed3203ed1488da2d7e2c1e40bd82eaab0b5506ef68f5ec4917945bf1b",
+      "size": 2579936,
+      "notes_zh": "修「播报刚说完马上喊唤醒词喊不醒（要说两次）」：根因不是唤醒率/AEC/音量，而是播报收尾约 3 秒的归属窗把已检出的唤醒词静默丢弃（那一刻状态判定误认成「已在听」直接 return，而麦已关、没人接这句话）；台架同段音频对照=窗外 6/6 全醒、窗内 2/2 全丢。现改为收尾窗内唤醒即打断并重开一轮，并新增一条自证日志行。**出货默认值零变化**。bin 为 v2.1.72 发布构建（app 镜像 2,579,936B，版本戳与 md5 均与固件仓 release 正文逐字对账），由固件仓镜像至本公开 release",
+      "min_compatible": "2.1.36"
+    },
+    {
       "version": "2.1.71",
       "file": "huijian-s3-2.1.71.bin",
       "urls": [

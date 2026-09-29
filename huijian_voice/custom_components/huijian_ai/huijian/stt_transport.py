@@ -181,6 +181,10 @@ class SttTransport(WsTransport):
             if not await self.ensure_connected():
                 return None, "WebSocket connection unavailable"
             self._drain_stale()
+            # v1.1.27（代次闸）：记下本轮开局时所用连接的代次——发送段失败与
+            # "未以转录收口"的清算都带上它。旧账晚到（新连接已建）时不得关掉
+            # 新连接（同 TTS :403 注释：新连接 _proto 会被归零，新轮白等同步窗）。
+            round_gen = getattr(self, "_conn_gen", None)   # 桩缺不判（旧语义）
             # rid mint（fail-open：任何异常=0=旧协议，绝不打死识别链）。
             rid = 0
             try:
@@ -252,7 +256,8 @@ class SttTransport(WsTransport):
                 raise
             except Exception as err:  # noqa: BLE001（含 TimeoutError）
                 self.logger.warning("STT 发送段失败（已发 %d 帧）: %s", frames, err)
-                await self.restart_connection(f"STT 发送段失败: {err}")
+                await self.restart_connection(f"STT 发送段失败: {err}",
+                                             generation=round_gen)
                 return None, f"Send failed: {err}"
             _LOGGER.debug("STT 发送完成：%d 帧，等待转录", frames)
             text = None
@@ -304,8 +309,10 @@ class SttTransport(WsTransport):
                 return None, f"Receive failed: {err}"
             finally:
                 if text is None:
+                    # v1.1.27：带本轮开局代次——旧账晚到不得拆新连接（见上方注释）
                     await self.restart_connection(
-                        "STT 未以转录消息收口（超时/异常），断连清算残留")
+                        "STT 未以转录消息收口（超时/异常），断连清算残留",
+                        generation=round_gen)
             if text is None and claimed_gen is not None and \
                     getattr(self, "_conn_gen", claimed_gen) != claimed_gen:
                 # 换连 break：显式 error（不得 (None,None) 让调用方猜成功）。

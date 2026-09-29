@@ -225,7 +225,7 @@ def test_client_recognize_attaches_rid_when_negotiated():
         async def hello():
             return None
 
-        async def restart(*a):
+        async def restart(*a, **kw):
             return None
 
         class R:
@@ -290,7 +290,7 @@ def test_client_consumer_skips_crossed_reply():
         async def hello():
             return None
 
-        async def restart(*a):
+        async def restart(*a, **kw):
             restarts.append(a)
 
         class R:

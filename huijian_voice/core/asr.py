@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import re
 import threading
@@ -70,6 +71,17 @@ class AsrEngine:
         self.last_reason = ""
 
     # ── 引擎选择 ────────────────────────────────────────────────
+    def _set_reason(self, msg: str, sink: dict | None = None) -> None:
+        """分因双写：进程级 last_reason（面板/状态页读）+ **本轮 sink**。
+
+        v1.1.27 项1：AsrEngine 全进程唯一（main.py 单例），last_reason 是单槽——
+        两台卫星/两轮并发时谁最后写谁赢，会话若在**自己没调引擎的轮次**（静音/
+        解码器缺失）去读它，就会把上一轮/另一台卫星的分因说成本轮的话。
+        故分因必须能按轮取回：调用方传 sink dict，本轮各取各的。"""
+        self.last_reason = msg
+        if sink is not None:
+            sink["reason"] = msg
+
     def _primary_kind(self) -> str:
         k = str(self.settings.get("stt.local_model", "sensevoice") or "sensevoice")
         return k if k in _KIND_KEY else "sensevoice"
@@ -128,7 +140,7 @@ class AsrEngine:
         rec._hj_kind = kind    # 路径随 recognizer 走：快照语义 + 无标记替身默认 pf 路径
         return rec
 
-    def _load_one(self, kind: str) -> bool:
+    def _load_one(self, kind: str, sink: dict | None = None) -> bool:
         """单引擎加载：**只查在盘**，缺失则丢给后台补下载并立即失败（快败）。
         2026-09-26 改：这里原本是同步 `store.ensure(key)`——在请求热路径（executor
         线程）里跑三级跨境下载，一挂就是分钟级；而 `main.py::_loop_models` 本来就在
@@ -143,13 +155,15 @@ class AsrEngine:
             except Exception as e:  # noqa: BLE001
                 logger.warning("[STT] 触发后台补下载失败(%s): %s", key, e)
             logger.warning("[STT] 模型未就绪(%s)，已交后台补取——本轮快败", key)
-            self.last_reason = f"模型资产缺失({key})，已转后台补下载（本轮不等待）"
+            self._set_reason(
+                f"模型资产缺失({key})，已转后台补下载（本轮不等待）", sink)
             return False
         try:
             rec = self._build_recognizer(kind, d)
         except Exception as e:
             logger.error("[STT] 模型加载失败(%s): %s", kind, e)
-            self.last_reason = f"模型加载失败({kind}): {type(e).__name__}: {e}"
+            self._set_reason(
+                f"模型加载失败({kind}): {type(e).__name__}: {e}", sink)
             return False
         with self._lock:
             self._rec = rec
@@ -157,26 +171,28 @@ class AsrEngine:
         logger.warning("[STT] %s 已加载 @ %s", _KIND_LABEL.get(kind, kind), d)
         return True
 
-    def ensure_loaded(self) -> bool:
+    def ensure_loaded(self, sink: dict | None = None) -> bool:
         """同步加载（调用方放 to_thread）。已加载直接 True。
-        主档优先；主档缺失/损坏自动回落 Paraformer 兼容档（fail-open）。"""
+        主档优先；主档缺失/损坏自动回落 Paraformer 兼容档（fail-open）。
+        sink：本轮分因出参（见 _set_reason），冷却/失败分因按轮取回。"""
         with self._lock:
             if self._rec is not None:
                 return True
             if self._loading:
-                self.last_reason = "模型正在加载（冷启动双载闩拦下本轮）"
+                self._set_reason("模型正在加载（冷启动双载闩拦下本轮）", sink)
                 return False
             self._loading = True
         try:
             primary = self._primary_kind()
-            if self._load_one(primary):
+            p1: dict = {}
+            if self._load_one(primary, p1):
                 return True
-            primary_reason = self.last_reason
-            if primary == "sensevoice" and self._load_one("paraformer"):
+            primary_reason = str(p1.get("reason") or self.last_reason)
+            if primary == "sensevoice" and self._load_one("paraformer", sink):
                 return True
             # 两档都起不来时说的是**所选**那档：现场要听到"你配的 SenseVoice 没下来"，
             # 不是回落尝试链的最后一条。
-            self.last_reason = primary_reason or self.last_reason
+            self._set_reason(primary_reason or self.last_reason, sink)
             return False
         finally:
             with self._lock:
@@ -203,20 +219,32 @@ class AsrEngine:
         return ok
 
     def unload(self) -> bool:
-        """True=已卸载；False=推理在飞本轮跳过（调用方下一轮再试）。"""
+        """True=已卸载；False=推理/加载在飞本轮跳过（调用方下一轮再试）。"""
         with self._lock:
             if self._busy:
                 logger.info("[STT] 推理进行中，本轮跳过卸载")
+                return False
+            if self._loading:
+                # v1.1.27 项2：与 ensure_loaded(:166) / rebind_primary(:191) 同护栏。
+                # 旧式只查 _busy——冷载/换绑在飞时本函数清掉的正是 _load_one 马上
+                # 要写回的空位：卸载空转 + 面板据返回值谎报"STT 已卸载"（admin_api
+                # _reload_models），下一句又冒出新引擎，现场对不上账。
+                logger.info("[STT] 模型加载/换绑在飞，本轮跳过卸载")
                 return False
             self._rec = None
             logger.warning("[STT] 模型已卸载（省电档）")
             return True
 
     # ── 识别 ────────────────────────────────────────────────────
-    async def transcribe_pcm(self, pcm_s16: bytes) -> str:
-        """整句 s16le@16k → 文本。云档优先（若配置），失败回落本地。"""
+    async def transcribe_pcm(self, pcm_s16: bytes, reason_out: dict | None = None) -> str:
+        """整句 s16le@16k → 文本。云档优先（若配置），失败回落本地。
+
+        reason_out：本轮具名分因出参（v1.1.27 项1）。会话侧一律走
+        transcribe_pcm_with_reason 取本轮分因；本参数同时服务多连接各取各的。"""
         self.last_used = time.time()
         self.last_reason = ""
+        if reason_out is not None:
+            reason_out["reason"] = ""
         prov = str(self.settings.get("stt.provider", "local_paraformer"))
         if prov.startswith("cloud"):
             cloud = self.settings.get("stt.cloud") or {}
@@ -226,7 +254,8 @@ class AsrEngine:
                 logger.warning("[STT] 云识别失败(%s) → 回落本地（v4.1-②）", e)
         if not self.ready():
             loop = asyncio.get_running_loop()
-            ok = await loop.run_in_executor(None, self.ensure_loaded)
+            ok = await loop.run_in_executor(
+                None, functools.partial(self.ensure_loaded, reason_out))
             if not ok:
                 # 轮次级分因：设备侧只看到 stt.text=""，与真静音同形。没有这一行，
                 # "说了没反应"只能靠翻加载日志猜时间戳对齐。
@@ -234,9 +263,20 @@ class AsrEngine:
                                self.model_key, self.last_reason or "加载日志见上")
                 return ""
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._local_transcribe, pcm_s16)
+        return await loop.run_in_executor(
+            None, functools.partial(self._local_transcribe, pcm_s16, reason_out))
 
-    def _local_transcribe(self, pcm_s16: bytes) -> str:
+    async def transcribe_pcm_with_reason(self, pcm_s16: bytes) -> tuple[str, str]:
+        """本轮识别 + **本轮**具名分因（v1.1.27 项1）。
+
+        与 transcribe_pcm 的差别只在分因取法：本方法不读进程级 last_reason（会被
+        他轮/他卫星覆盖），分因全部经本轮 sink 快照带回。会话侧据此把"静音 /
+        引擎没就绪 / 音频解码失败"三类同形空结果拆成三句话。"""
+        sink: dict = {}
+        text = await self.transcribe_pcm(pcm_s16, reason_out=sink)
+        return text, str(sink.get("reason") or "")
+
+    def _local_transcribe(self, pcm_s16: bytes, reason_out: dict | None = None) -> str:
         # F1 双保险：锁内快照当代 rec + busy 计数。此后即便 reaper/reload 把
         # self._rec 置 None，本地快照仍持引用（旧对象析构推迟到本调用返回），
         # 绝不出现「旧 stream 喂新 recognizer」的跨代 UB。分派按 rec 自带
@@ -247,7 +287,7 @@ class AsrEngine:
             rec = self._rec
             if rec is None:
                 # 在载 recognizer 被 reaper/reload 摘走：与静音同形，补分因
-                self.last_reason = "推理在飞时引擎被卸载（省电档/reload）"
+                self._set_reason("推理在飞时引擎被卸载（省电档/reload）", reason_out)
                 return ""
             self._busy += 1
         try:

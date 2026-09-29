@@ -354,6 +354,20 @@ class FirmwareStore:
                 rows[v] = row
         return sorted(rows.values(), key=lambda r: vkey(r["version"]), reverse=True)
 
+    @staticmethod
+    def _upgradable(row: dict) -> bool:
+        """可升级目标判据（v1.1.27 单点）：在盘、哈希对账过、非 0 字节、且过
+        容量+形态双闸（ota_ok）。`versions()` 行里 ota_ok/ota_block_reason 已是
+        双闸结论，这里只做"能不能当升级目标"的合成。
+
+        latest() 与 status()["latest"]（面板数据面：清单顶部的"最新/可升级"）
+        **必须同判据**——旧 status() 只查 在盘+哈希，于是 8.7MB 产线合并镜像
+        （或小体积合并镜像）在面板上被显示成"最新版本"，点「升级」必被设备分区闸拒。
+        """
+        return bool(row and row.get("on_disk") and not row.get("sha_mismatch")
+                    and _to_int(row.get("size")) > 0
+                    and row.get("ota_ok", True))     # 0 字节包不入围（F-07）
+
     def latest(self) -> dict | None:
         """可升级目标＝最新**可 OTA** 的版本（v1.1.17 复审）。
 
@@ -363,9 +377,7 @@ class FirmwareStore:
         只是带 ota_ok=false 与原因。
         """
         for r in self.versions():
-            if (r.get("on_disk") and not r.get("sha_mismatch")
-                    and _to_int(r.get("size")) > 0
-                    and r.get("ota_ok", True)):        # 0 字节包不入围（F-07）
+            if self._upgradable(r):
                 return r
         return None
 
@@ -459,11 +471,43 @@ class FirmwareStore:
                 self._downloading.discard(version)
 
     # ── 一次性领取令牌 ──────────────────────────────────────────────
-    def capacity_error(self, version: str) -> str:
-        """按账目 size 查容量闸；""＝可下发。给 API 层出**精确**拒因用（issue() 已自拦，
-        但那里只能回 None，面板会糊成「不在盘」）。"""
+    def ota_block_reason(self, version: str) -> str:
+        """该版本**不可下发**的具名真因（"" ＝ 无可指责之处，交调用方按"不在盘"话术）。
+        给 API 层出**精确**拒因用（issue() 已自拦，但那里只能回 None，面板会糊成
+        「该版本不在盘（投递口放包或先「拉取」）」）。
+
+        v1.1.27 收口（逐行审计实锤）：旧 `capacity_error()` 只查容量闸，而 issue()
+        是**容量 + 形态 + 在盘 size/账目复核 + sha 对账 + URL 预算**五闸——一个小到
+        能进槽的产线合并镜像被形态闸拒时，API 层拿到 "" ⇒ 面板回"该版本不在盘"，
+        用户反复重投/重拉，而真因（载荷形态错了）永不露头。本方法按 issue() 的
+        **各条拒签支路**逐条给因，与 `versions()` 行的 `ota_block_reason` 同源。
+        """
         row = next((r for r in self.versions() if r["version"] == version), None)
-        return "" if row is None else ota_capacity_error(version, row.get("size"))
+        if row is None or not row.get("on_disk"):
+            return ""                       # 确实不在盘：调用方话术已如实
+        if row.get("sha_mismatch"):
+            return (f"v{version} 在盘包 sha256 与登记不符（拒签）——"
+                    f"请重新投递或重拉，别用这份字节")
+        try:
+            actual = (self.public / row["file"]).stat().st_size
+        except OSError as e:
+            logger.warning("[固件] v%s 在盘复核失败：%s", version, e)
+            # 账上有、盘上读不到＝拒签（旧 issue() 同样在此返回 None）；"不在盘"
+            # 的话术不适用，必须另给真因，否则面板会引导用户去"重新投递"已投过的包
+            return f"v{version} 在盘文件读不到（复核失败），拒签——请重新投递或重拉"
+        if actual <= 0 or actual != _to_int(row.get("size")):
+            return (f"v{version} 在盘 {actual}B 与账目 {row.get('size')}B 不符"
+                    f"（或为 0 字节），拒签——请重新投递")
+        if len(quote(row["file"])) > _FN_URL_BUDGET:
+            return (f"v{version} 文件名 quote 后超 BLE 代发 URL 预算"
+                    f"（{_FN_URL_BUDGET}B），不可下发")
+        return (ota_capacity_error(version, row.get("size"))
+                or ota_image_error(self.public / row["file"]))
+
+    def capacity_error(self, version: str) -> str:
+        """历史名（= `ota_block_reason` 的旧语义子集）：保留给既有调用点/钉，
+        语义已扩到全部拒签支路，新代码请直调 `ota_block_reason`。"""
+        return self.ota_block_reason(version)
 
     def issue(self, version: str, mac: str = "") -> dict | None:
         row = next((r for r in self.versions() if r["version"] == version and r["on_disk"]
@@ -473,29 +517,13 @@ class FirmwareStore:
         # 在盘复核（v1.0.65 审查批）：0 字节拒签（F-07：设备按 content_length==0
         # 拒收，白烧令牌）；size 与索引账不符=收编后被外部改过，拒签（F-OTA-02
         # 第二道闸）。
-        try:
-            actual = (self.public / row["file"]).stat().st_size
-        except OSError as e:
-            logger.warning("[固件] v%s 在盘复核失败：%s", version, e)
-            return None
-        if actual <= 0 or actual != _to_int(row.get("size")):
-            logger.warning("[固件] v%s 在盘 size=%s 与账目 %s 不符（或为 0），拒签——请重新投递",
-                           version, actual, row.get("size"))
-            return None
-        # BLE string8 帧长预算（F-06）：URL 总长 >255B 设备侧静默截断 → 404 且令牌已烧
-        if len(quote(row["file"])) > _FN_URL_BUDGET:
-            logger.warning("[固件] v%s 文件名超 URL 预算（%sB），不可 BLE 代发：%s",
-                           version, _FN_URL_BUDGET, _clip(row["file"]))
-            return None
-        # 载荷容量闸：超槽的包签出去也必被设备拒（见 OTA_SLOT_BYTES 处注释），这里先拦，
-        # 免得白烧一枚 10min 令牌并让面板以为"已下发"。
-        if (cap := ota_capacity_error(version, row.get("size"))):
-            logger.warning("[固件] %s", cap)
-            return None
-        # 形态闸（v1.1.17 复审）：容量闸只看 size ⇒ 一个"小到能进槽"的产线合并镜像
-        # 照样过闸——而它含 bootloader/分区表/otadata，装进 app 槽必炸。按字节判型。
-        if (img := ota_image_error(self.public / row["file"])):
-            logger.warning("[固件] v%s %s", version, img)
+        # 拒因**单一来源**（v1.1.27）：在盘/账目复核、URL 预算、容量闸、形态闸四道
+        # 统一走 `ota_block_reason`——与 API 层/面板拿到的真因逐字同源。旧形态这里
+        # 与 capacity_error() 各写一遍（后者还只抄了容量闸），于是"小体积产线合并
+        # 镜像被拒"在面板上糊成"该版本不在盘"，加一道闸就再漂一次。
+        why = self.ota_block_reason(version)
+        if why:
+            logger.warning("[固件] %s", why)
             return None
         tok = secrets.token_hex(16)
         now = time.time()
@@ -537,7 +565,9 @@ class FirmwareStore:
 
     def status(self) -> dict:
         rows = self.versions()
-        lat = next((r for r in rows if r["on_disk"] and not r.get("sha_mismatch")), None)
+        # v1.1.27：与 latest() 同判据（旧实现只查 在盘+哈希 ⇒ 面板把不可 OTA 的
+        # 版本显示成"最新"）。
+        lat = next((r for r in rows if self._upgradable(r)), None)
         return {
             "latest": lat["version"] if lat else "",
             "items": rows,

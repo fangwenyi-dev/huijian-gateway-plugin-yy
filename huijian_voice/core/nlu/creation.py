@@ -299,7 +299,12 @@ def _hour_minute(h_raw: str, am: str, m_raw: str) -> Optional[str]:
         m = int(mv)
     if am in ("下午", "晚上") and h <= 11:
         h += 12
-    if am == "中午" and h < 11:
+    # v1.1.27：「中午」此前一律置 12 点（`h = 12`），实测「每天中午一点打开书房灯」
+    # 得到 12:00——用户说的是 13 点（真机早一小时触发）。中文口语里中午 1~3 点
+    # 就是 13~15 点（"中午一点"绝无 01:00 解释）；11/12 点维持原判据。
+    if am == "中午" and 1 <= h <= 3:
+        h += 12
+    elif am == "中午" and h < 11:
         h = 12
     if am == "凌晨" and h == 12:
         h = 0
@@ -496,14 +501,17 @@ def parse(text: str) -> Optional[dict[str, Any]]:
         x = _TRAIL_CONJ.sub("", m.group("x").strip())
         x = re.sub(r"(?:的)?(?:时候|时|后)$", "", x).strip().rstrip("的")
         y = _clean_y(m.group("y"))
-        if len(x) >= 1 and len(y) >= 2:
+        # v1.1.27：触发词长度 **≥2**。旧式 ≥1 允许建出「灯」「门」这类单字触发词
+        # ——单字前缀命中一切后续句子（「灯坏了」被当触发词），且与既有场景构不成
+        # 可判别的等值/最长前缀关系。拒建（回因=单字无判别力），交上层如实说明。
+        if len(x) >= 2 and len(y) >= 2:
             return {"kind": "scene", "trigger_phrase": x, "y": y}
         return None
     m = _SCENE_RE2.match(t)
     if m:
         x = m.group("x").strip().rstrip("的")
         y = _clean_y(m.group("y") + m.group("y2"))
-        if len(x) >= 1 and len(y) >= 2:
+        if len(x) >= 2 and len(y) >= 2:            # 同上：单字触发词拒建
             return {"kind": "scene", "trigger_phrase": x, "y": y}
         return None
 

@@ -184,6 +184,9 @@ class SttSession(BaseSession):
         self._pcm = bytearray()
         self._decoder: Optional[audio.OpusPcmDecoder] = None
         self._dec_err = False
+        # v1.1.27 项6：本轮解码失败帧数（与 _pcm 同生命期，收束时随分因带出）。
+        # 旧式单帧异常静默 b"" —— 整帧语音丢失/整轮空在生产日志不可见。
+        self._dec_fail = 0
         self._pcm_overflow_warned = False
         self._task: Optional[asyncio.Task] = None
         # v1.0.92（与 TTS Stage-1 对偶）：轮次身份。客户端在 listen start
@@ -204,6 +207,7 @@ class SttSession(BaseSession):
             state = obj.get("state")
             if state == "start":
                 self._pcm.clear()          # 新一轮 utterance（含 realtime restart）
+                self._dec_fail = 0         # 失败帧计数与缓冲同生命期
                 r = self._parse_rid(obj)
                 if r:
                     self._rid = r          # v1.0.92：本轮身份（不带=沿用 0=legacy）
@@ -221,7 +225,13 @@ class SttSession(BaseSession):
                 logger.error("[STT] opus 解码器不可用（libopus 缺失），回传空文本")
         if self._decoder:
             try:
-                self._pcm += self._decoder.decode(data)
+                n0 = int(getattr(self._decoder, "failed_frames", 0) or 0)
+                pcm = self._decoder.decode(data)
+                # v1.1.27 项6：解码器内部吞掉的失败帧按计数增量并入本轮（帧损坏
+                # 或 libopus 异常一律可见），不再只留 debug 一行。
+                self._dec_fail += max(
+                    0, int(getattr(self._decoder, "failed_frames", 0) or 0) - n0)
+                self._pcm += pcm
                 # v1.0.41 审查 S16：单会话硬上限——16k s16 ≈32KB/s，开放局域网
                 # （require_token=false）下设备狂发二进制帧且不发 stop 时，旧实现
                 # 内存无界涨（WS 帧大小上限对分帧累加无效）。溢出丢最旧保最新
@@ -233,6 +243,7 @@ class SttSession(BaseSession):
                         logger.warning("[STT] 单会话语音超上限 %dKB，丢最旧保顶（异常长流？）",
                                        self._MAX_PCM_BYTES // 1024)
             except Exception:
+                self._dec_fail += 1
                 logger.debug("[STT] 解码异常帧 len=%d", len(data), exc_info=True)
 
     async def _transcribe_and_reply(self, rid: int = 0) -> None:
@@ -252,18 +263,35 @@ class SttSession(BaseSession):
                 await self._reply_stt("", self._task_rid)
         pcm = bytes(self._pcm)
         self._pcm.clear()
+        dec_fail = self._dec_fail      # v1.1.27：本轮失败帧数随轮快照（并清零）
+        self._dec_fail = 0
         self._task_rid = rid
-        self._task = asyncio.create_task(self._run(pcm, rid))
+        self._task = asyncio.create_task(
+            self._run(pcm, rid, dec_fail, self._dec_err))
 
-    async def _run(self, pcm: bytes, rid: int = 0) -> None:
+    async def _run(self, pcm: bytes, rid: int = 0,
+                   dec_fail: int = 0, dec_err: bool = False) -> None:
+        """单轮转写 + 收束。**分因只由本轮事实产生**（v1.1.27 项1）：
+
+        旧实现在空文本时回落读进程级 `asr.last_reason` 单槽——AsrEngine 全进程
+        唯一（main.py:77/91），静音轮/解码器缺失轮自己根本没调引擎，读到的却是
+        上一轮或另一台卫星的残值（"用户没说话"被说成"模型资产缺失"）；而
+        `_dec_err`（libopus 缺）轮既无 reason 也无兜底，与真静音逐字节同形。
+        现在：静音轮不读任何槽位；引擎已就绪但本轮空结果时取**本轮**分因
+        （transcribe_pcm_with_reason）；解码器缺失/丢帧各有具名因。"""
         text = ""
-        reason = ""
+        reason = ""       # 本轮具名分因
+        eng_reason = ""
         try:
             if pcm:
-                text = await asyncio.wait_for(
-                    self.ctx.asr.transcribe_pcm(pcm), timeout=const.STT_RESULT_BUDGET_S)
-            elif not self._dec_err:
-                text = ""       # 静音：契约要求仍回一条 text:""
+                text, eng_reason = await asyncio.wait_for(
+                    self._transcribe_via_engine(pcm), timeout=const.STT_RESULT_BUDGET_S)
+            elif dec_err:
+                reason = "opus 解码器不可用（libopus 缺失），本轮音频未解码"
+            elif dec_fail:
+                reason = f"音频解码失败 {dec_fail} 帧（帧损坏），本轮无可识别音频"
+            else:
+                text = ""       # 真静音：契约要求仍回一条 text:""
         except asyncio.TimeoutError:
             logger.warning("[STT] 识别超预算 %ss", const.STT_RESULT_BUDGET_S)
             reason = f"识别超预算 {const.STT_RESULT_BUDGET_S}s"
@@ -275,11 +303,33 @@ class SttSession(BaseSession):
         except Exception:
             logger.exception("[STT] 识别异常")
             reason = "识别异常（详见加载项日志）"
+        if not text and not reason and eng_reason:
+            reason = eng_reason
+        if not text and not reason and dec_fail:
+            # 部分帧丢失但音频仍进了引擎（识别结果可能已缺字）：不覆盖引擎分因、
+            # 也不改写"静音"结论，只在无话可说时点名缺了几帧。
+            reason = f"音频解码失败 {dec_fail} 帧（结果可能缺字）"
+        if not text and dec_fail:
+            logger.warning("[STT] 本轮 %d 帧 opus 解码失败，空结果已带因回报", dec_fail)
+        if text:
+            reason = ""      # 成功轮不带分因（老客户端逐字节不变）
         await self._reply_stt(text, rid, reason)
 
+    async def _transcribe_via_engine(self, pcm: bytes) -> tuple[str, str]:
+        """调引擎识别并取回**本轮**具名分因。
+
+        真 AsrEngine 有 transcribe_pcm_with_reason（分因走本轮 sink，多连接互不
+        污染，v1.1.27）；旧替身/三方桩没有该方法 → 退回 last_reason **后读**（仅
+        限"本轮确实调过引擎"的路径，冻结既有协议钉的替身形制）。"""
+        asr = self.ctx.asr
+        inv = getattr(asr, "transcribe_pcm_with_reason", None)
+        if callable(inv):
+            return await inv(pcm)
+        text = await asr.transcribe_pcm(pcm)
+        return text, ("" if text else self._asr_reason())
+
     def _asr_reason(self) -> str:
-        """空文本时的具名分因。此前"引擎没就绪"与"用户没说话"在设备侧逐字节同形
-        （asr.py:199 注释自认只能靠翻日志猜时间戳对齐），现场无从区分。"""
+        """引擎进程级槽位（仅作无 per-round 通道的旧替身兜底，见 _transcribe_via_engine）。"""
         return str(getattr(getattr(self.ctx, "asr", None), "last_reason", "") or "")
 
     async def _reply_stt(self, text: str, rid: int = 0, reason: str = "") -> None:
@@ -287,10 +337,11 @@ class SttSession(BaseSession):
         msg = {"type": "stt", "text": text or ""}
         if rid:
             msg["rid"] = rid
-        # 只在"空文本且确有分因"时带 reason，避免给正常轮次添噪声键（契约新增可选键，
-        # 老客户端忽略即可；有它设备/集成才能把"没听懂"与"服务没就绪"说成两句话）。
-        if not text and (reason or self._asr_reason()):
-            msg["reason"] = (reason or self._asr_reason())[:160]
+        # 只在"空文本且确有**本轮**分因"时带 reason，避免给正常轮次添噪声键（契约
+        # 新增可选键，老客户端忽略即可）。v1.1.27 项1：这里不得再回落读 asr 的
+        # 进程级 last_reason——静音轮读到的是上一轮/另一台卫星的陈旧分因。
+        if not text and reason:
+            msg["reason"] = reason[:160]
         await self.send_json(msg)
 
     async def on_close(self) -> None:

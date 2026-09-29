@@ -47,6 +47,22 @@ async def _json_body(request) -> dict:
         return {}
 
 
+def _bridge_ok(ha) -> bool:
+    """HA 桥可用判据（v1.1.27，单点）：**真连通**（`.reachable`）且凭证已配置（`.ok`）。
+
+    旧写法只看 `.ok`（＝凭证已配置，见 ha_client 注释）⇒ HA 掉线时面板把「网络不通」
+    误报成「集成没有台账接口——请把 custom_components/huijian_ai 升级后重启 HA」，
+    用户照着错指引升级集成，真因永不露头（同 admin_api:75 用 `.reachable` 的口径）。
+    `.ok=False` 时 ha_client 的一切请求原地返回（发不出去）⇒ 同样按"桥不可用"拒：
+    否则会白签一枚 10min 令牌、面板显示"已下发"（旧钉 test_dispatch_bridge_down_no_issue
+    钉的正是这条）。永不抛（判不了＝不可用，failing closed）。"""
+    try:
+        return bool(ha and getattr(ha, "reachable", False)
+                    and getattr(ha, "ok", True))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def setup(app, ctx):
     async def _devices(request):
         store = getattr(ctx, "firmware", None)
@@ -55,7 +71,9 @@ def setup(app, ctx):
             latest = await asyncio.to_thread(store.latest) if store else None
         except Exception as e:  # noqa: BLE001 面板数据面永不抛
             logger.warning("[OTA] 固件仓状态读取失败: %s", e)
-        bridge_ok = bool(ctx.ha and getattr(ctx.ha, "ok", False))
+        # v1.1.27：可达判据单点 `_bridge_ok`（真连通 + 凭证在），旧写法只看 `.ok`
+        # ⇒ HA 掉线被误报成「集成没有台账接口，请升级 huijian_ai 并重启 HA」。
+        bridge_ok = _bridge_ok(ctx.ha)
         led = await ctx.ha.rest_get(_SATELLITES_PATH) if ctx.ha else None
         devices = (led or {}).get("devices")
         if devices is None:
@@ -127,15 +145,20 @@ def setup(app, ctx):
             logger.warning("[OTA] 签发异常: %s", e)
             res = None
         if not res:
-            # 容量闸单独出精确拒因：糊成「不在盘」会让人反复重新投递/重拉，而真因是
-            # 账上登记的载荷类型错了（合并出厂镜像 ≠ app 镜像），重投多少次都没用。
+            # 拒签真因单独出精确话术：糊成「不在盘」会让人反复重新投递/重拉，而真因可能
+            # 是账上登记的载荷类型错了（合并出厂镜像 ≠ app 镜像），重投多少次都没用。
+            # v1.1.27：判据改 `ota_block_reason`（旧 `capacity_error` 只查容量闸，小体积
+            # 合并镜像被形态闸拒时拿到 "" ⇒ 真因永不露头）；且**放线程**读——同函数其余
+            # store 调用（latest/issue/status/download）一律 to_thread，本处旧写法在
+            # :8000 事件循环线程里同步扫盘（import 目录扫描 + 逐包读头）。
             cap = ""
             try:
-                cap = store.capacity_error(version) if version else ""
+                cap = (await asyncio.to_thread(store.ota_block_reason, version)
+                       if version else "")
             except Exception:  # noqa: BLE001
                 cap = ""
             if cap:
-                logger.warning("[OTA] 签发被容量闸拦下：%s", cap)
+                logger.warning("[OTA] 签发被拒（具名真因）：%s", cap)
                 return web.json_response({"success": False, "error": cap}, status=400)
             return web.json_response({
                 "success": False,
@@ -186,13 +209,15 @@ def setup(app, ctx):
             logger.warning("[OTA] dispatch 签发异常: %s", e)
             res = None
         if not res:
+            # 同 `_issue`：拒因单一来源（ota_block_reason）且放线程（v1.1.27）。
             cap = ""
             try:
-                cap = store.capacity_error(version) if version else ""
+                cap = (await asyncio.to_thread(store.ota_block_reason, version)
+                       if version else "")
             except Exception:  # noqa: BLE001
                 cap = ""
             if cap:
-                logger.warning("[OTA] dispatch 被容量闸拦下 v%s mac=%s：%s", version, mac, cap)
+                logger.warning("[OTA] dispatch 被拒 v%s mac=%s：%s", version, mac, cap)
                 return web.json_response({"success": False, "error": cap,
                                           "version": version}, status=400)
             return web.json_response(
@@ -203,7 +228,9 @@ def setup(app, ctx):
                 "success": False,
                 "error": "加载项无可路由局域网地址——设备白名单闸只收私网字面 IPv4"}, status=503)
         url = f"http://{host}:{const.WS_PORT}/firmware/{quote(res['file'])}?t={res['token']}"
-        bridge_ok = bool(ctx.ha and getattr(ctx.ha, "ok", False))
+        # v1.1.27：可达判据单点 `_bridge_ok`——旧写法只看 `.ok`，HA 掉线时会把
+        # "中继不可用"错报成"桥在但设备不受理"。
+        bridge_ok = _bridge_ok(ctx.ha)
         if not bridge_ok:
             return web.json_response({
                 "success": False, "error": "HA 桥未连接，无法中继到设备", "version": version},
@@ -232,7 +259,8 @@ def setup(app, ctx):
         if not mac:
             return web.json_response({"success": False, "error": "mac 必填"}, status=400)
         enabled = bool(body.get("enabled", False))
-        bridge_ok = bool(ctx.ha and getattr(ctx.ha, "ok", False))
+        # v1.1.27：同 `_dispatch`——可达判据单点 `_bridge_ok`，不用裸 `.ok`。
+        bridge_ok = _bridge_ok(ctx.ha)
         if not bridge_ok:
             return web.json_response({"success": False, "error": "HA 桥未连接"}, status=502)
         ack = await ctx.ha.rest_write("POST", "/api/huijian-ai/satellites/continuous",

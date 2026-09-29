@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import importlib
+import secrets
 import time
 from functools import partial
 from pathlib import Path
@@ -15,12 +17,20 @@ from aioesphomeapi import TextMode as EsphomeTextMode
 from aioesphomeapi import TextState
 from homeassistant.components.text import TextEntity, TextMode
 from homeassistant.core import callback
+from homeassistant.exceptions import HomeAssistantError
 
 from .entity import (EsphomeEntity, convert_api_error_ha_error,
                      esphome_state_property, platform_async_setup_entry)
 from .enum_mapper import EsphomeEnumMapper
 
 PARALLEL_UPDATES = 0
+
+# v1.1.27（凭据/隐私面）：播报兜底路（edge-tts → /local）音频的存活预算。
+# /local 是免鉴权静态面，任何落盘文件都等于"局域网内人人可取"；正常形态下设备
+# 是随下随播（秒级），故给足取流+播放余量后**播完即删**，并以本值做全目录 TTL 兜底
+# 清扫（早退/异常路径、进程重启后遗留的老文件一并收口）。
+_TTS_FILE_TTL_S = 180
+
 
 TEXT_MODES: EsphomeEnumMapper[EsphomeTextMode, TextMode] = EsphomeEnumMapper(
     {
@@ -57,6 +67,14 @@ def _get_edge_tts_voice(hass_language: str) -> str:
         return EDGE_TTS_VOICES[hass_language]
     base_lang = hass_language.split("-")[0] if "-" in hass_language else hass_language
     return EDGE_TTS_VOICES.get(base_lang, "zh-CN-XiaoxiaoNeural")
+
+
+def _unlink_quiet(path: Path) -> None:
+    """删文件：不存在/被占用/权限问题都只留痕，绝不把收口链炸掉（v1.1.27）。"""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        _LOGGER.debug("播报音频删除失败（按 TTL 兜底清扫再收）: %s", path)
 
 
 class EsphomeText(EsphomeEntity[TextInfo, TextState], TextEntity):
@@ -116,7 +134,10 @@ class EsphomeText(EsphomeEntity[TextInfo, TextState], TextEntity):
                     # 主通道显式关前置音：无「叮~」，正文合成推流直达。
                     {"entity_id": satellite_id, "message": value,
                      "preannounce": False},
-                    blocking=False,
+                    # v1.1.27（假成功根修）：blocking=False = 派发即返回、服务端异常
+                    # 被 HA 折叠成日志（调用方永远看不见）——两路全挂也报成功。
+                    # 改 blocking=True：announce 真失败才落进 except 走回退/如实报错。
+                    blocking=True,
                 )
                 return
             except Exception:  # noqa: BLE001
@@ -124,10 +145,20 @@ class EsphomeText(EsphomeEntity[TextInfo, TextState], TextEntity):
                     "播报语音走 assist_satellite.announce 失败，回退 edge-tts URL 路",
                     exc_info=True,
                 )
+        played = False
+        play_err: Exception | None = None
         try:
-            await self._play_tts(value)
-        except Exception:
+            played = await self._play_tts(value)
+        except Exception as err:  # noqa: BLE001
             _LOGGER.warning("TTS 播放失败", exc_info=True)
+            play_err = err
+        if not played:
+            # v1.1.27：两条路都没成必须如实失败——旧形态静默 return，自动化/用户
+            # 以为播报已下发（设备其实一声不响），排障链断在集成里。
+            raise HomeAssistantError(
+                f"播报语音失败：assist_satellite.announce 与 edge-tts URL 两路均未成功"
+                f"（文本 {value[:40]!r}；回退路错误：{play_err!r}）"
+            )
 
     def _find_satellite(self) -> str | None:
         """查同设备 assist_satellite 实体（播报语音推流主通道入口）。"""
@@ -141,8 +172,17 @@ class EsphomeText(EsphomeEntity[TextInfo, TextState], TextEntity):
                 return entry.entity_id
         return None
 
-    async def _play_tts(self, text: str) -> None:
-        """使用 edge-tts 生成 MP3 音频，通过 media_player 播放。"""
+    async def _play_tts(self, text: str) -> bool:
+        """edge-tts 生成 MP3，经 media_player 播 URL；返回 True=已下发。
+
+        v1.1.27（审计批 E1，本函数三处收口）：
+        · 文件名不可猜：旧 `tts_<毫秒>.mp3` 落在**免鉴权** /local，局域网内可枚举
+          探测播报内容；改 `secrets.token_urlsafe`（不可猜）。
+        · 播完即删：下发后按 `_TTS_FILE_TTL_S` 起延迟删除任务（设备取流+播放预算）；
+          `finally` 再兜一道——早退路径（无播放器/写盘失败/播放异常）当场删，
+          旧形态这些路径一个文件都不清（只裁"最新 10 个"，等于只进不出）。
+        · 如实返回成败：早退一律 `return False`（旧形态 return None，调用方当成功）。
+        """
         try:
             # 惰性 import 但必须离环：edge_tts 顶层级联加载 certifi 并执行
             # ssl.load_verify_locations——在事件循环内是阻塞调用，HA 2026.8
@@ -154,7 +194,7 @@ class EsphomeText(EsphomeEntity[TextInfo, TextState], TextEntity):
             )
         except ImportError:
             _LOGGER.warning("edge-tts 未安装，无法播放 TTS")
-            return
+            return False
         voice = _get_edge_tts_voice(self.hass.config.language)
         communicate = edge_tts.Communicate(text, voice)
         mp3_data = b""
@@ -164,54 +204,73 @@ class EsphomeText(EsphomeEntity[TextInfo, TextState], TextEntity):
 
         if not mp3_data:
             _LOGGER.warning("edge-tts 生成的音频为空: %s", text)
-            return
+            return False
 
         www_dir = Path(self.hass.config.path("www"), "huijian_tts")
-        await self.hass.async_add_executor_job(
-            partial(www_dir.mkdir, parents=True, exist_ok=True)
-        )
-
-        timestamp = int(time.time() * 1000)
-        mp3_path = www_dir / f"tts_{timestamp}.mp3"
-        await self.hass.async_add_executor_job(mp3_path.write_bytes, mp3_data)
-
-        from homeassistant.helpers.network import get_url
-
+        mp3_path: Path | None = None
         try:
-            base_url = get_url(self.hass, prefer_external=False)
-        except Exception:
-            base_url = (
-                f"http://{self.hass.config.api.host}:{self.hass.http.server_port}"
+            await self.hass.async_add_executor_job(
+                partial(www_dir.mkdir, parents=True, exist_ok=True)
             )
+            # v1.1.27：不可猜命名（旧 tts_<毫秒>.mp3 可枚举/可撞车）
+            mp3_path = www_dir / f"tts_{secrets.token_urlsafe(16)}.mp3"
+            await self.hass.async_add_executor_job(mp3_path.write_bytes, mp3_data)
 
-        url = f"{base_url}/local/huijian_tts/tts_{timestamp}.mp3"
+            from homeassistant.helpers.network import get_url
 
-        media_player_entity_id = await self._find_media_player()
-        if media_player_entity_id is None:
-            _LOGGER.warning("未找到媒体播放器实体，无法播放 TTS")
-            return
+            try:
+                base_url = get_url(self.hass, prefer_external=False)
+            except Exception:
+                base_url = (
+                    f"http://{self.hass.config.api.host}:{self.hass.http.server_port}"
+                )
 
-        await self.hass.services.async_call(
-            "media_player",
-            "play_media",
-            {
-                "entity_id": media_player_entity_id,
-                "media_content_id": url,
-                "media_content_type": "music",
-                "announce": True,
-            },
-            blocking=False,
-        )
+            url = f"{base_url}/local/huijian_tts/{mp3_path.name}"
 
-        await self.hass.async_add_executor_job(self._cleanup_old_tts_files, www_dir)
+            media_player_entity_id = await self._find_media_player()
+            if media_player_entity_id is None:
+                _LOGGER.warning("未找到媒体播放器实体，无法播放 TTS")
+                return False
+
+            await self.hass.services.async_call(
+                "media_player",
+                "play_media",
+                {
+                    "entity_id": media_player_entity_id,
+                    "media_content_id": url,
+                    "media_content_type": "music",
+                    "announce": True,
+                },
+                blocking=False,
+            )
+            # 播完即删：设备取流+播放预算后由后台任务删除（不赌"设备何时取完"）
+            try:
+                self.hass.async_create_background_task(
+                    self._expire_tts_file(mp3_path), "huijian_tts_expire")
+            except Exception:  # noqa: BLE001 无此 API（老 core/替身）不阻断播放
+                _LOGGER.debug("延迟删除任务未挂上，按 TTL 兜底清扫", exc_info=True)
+            mp3_path = None          # 已交给延迟任务，finally 不重复删
+            return True
+        finally:
+            if mp3_path is not None:
+                # 早退/中途异常：当场删（旧形态这些路径永不清理）
+                await self.hass.async_add_executor_job(_unlink_quiet, mp3_path)
+            await self.hass.async_add_executor_job(self._cleanup_old_tts_files, www_dir)
+
+    async def _expire_tts_file(self, mp3_path: Path) -> None:
+        """播完即删（v1.1.27）：设备取流+播放预算后删除免鉴权面上的播报音频。"""
+        await asyncio.sleep(_TTS_FILE_TTL_S)
+        await self.hass.async_add_executor_job(_unlink_quiet, mp3_path)
 
     async def _find_media_player(self) -> str | None:
         """查找与本设备关联的媒体播放器实体ID。"""
         from homeassistant.helpers import entity_registry as er
 
-        device_id = self.device_entry.id
-        if not device_id:
+        # v1.1.27：device_entry 可能缺失（静态信息未到/条目尚未挂设备）——
+        # 同文件 _find_satellite 早有同款守卫，此处曾裸取 .id（AttributeError）
+        if self.device_entry is None or not self.device_entry.id:
             return None
+        device_id = self.device_entry.id
 
         entity_reg = er.async_get(self.hass)
 
@@ -233,10 +292,25 @@ class EsphomeText(EsphomeEntity[TextInfo, TextState], TextEntity):
         return None
 
     def _cleanup_old_tts_files(self, www_dir: Path) -> None:
-        """删除旧的TTS文件，只保留最新10个。"""
-        files = sorted(www_dir.iterdir(), key=lambda f: f.stat().st_mtime, reverse=True)
-        for f in files[10:]:
-            f.unlink(missing_ok=True)
+        """清扫 /local/huijian_tts：TTL 超期即删，另留"最多 10 个"上限兜底。
+
+        v1.1.27（审计批 E1）：旧形态只按"最新 10 个"裁剪 —— 正常播报留下的
+        文件永远不清（只有攒够 10 个才动），早退路径（无播放器/合成失败/异常）
+        更是一个都不删，免鉴权 /local 于是只进不出。现以 mtime 与
+        `_TTS_FILE_TTL_S` 比对为主判据（进程重启/延迟任务没挂上的遗留也一并收口）。
+        """
+        now = time.time()
+        try:
+            files = sorted(
+                www_dir.iterdir(), key=lambda f: f.stat().st_mtime, reverse=True)
+        except OSError:
+            return
+        for idx, f in enumerate(files):
+            try:
+                if idx >= 10 or now - f.stat().st_mtime > _TTS_FILE_TTL_S:
+                    f.unlink(missing_ok=True)
+            except OSError:  # 竞态删除/权限问题：清扫尽力而为，不抛
+                continue
 
 
 async_setup_entry = partial(

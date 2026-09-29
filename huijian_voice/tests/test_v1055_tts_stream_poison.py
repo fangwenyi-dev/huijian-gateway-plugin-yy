@@ -335,7 +335,7 @@ class _FakeTransport:
     async def _drain_stale(self):
         pass
 
-    async def restart_connection(self, why):
+    async def restart_connection(self, why, **kw):   # v1.1.27：带 generation
         self.restarts.append(why)
 
 

@@ -74,11 +74,23 @@ class SceneCache:
             pass
 
     def check(self, text: str) -> str | None:
-        """等值或前缀命中（fast_path _check_scene 原语义）。"""
+        """等值优先 → **最长**前缀命中（v1.1.27）。
+
+        旧实现按缓存序"先命中即返回"：先建「关灯」后建「关灯睡觉」时，
+        「关灯睡觉」被短触发词「关灯」吃掉——fast_path 的等值闸（phrase == text）
+        落空、后续前缀兜底拿到的也是短词，用户被明确告知过"说 X 就 Y"的句子
+        触发了**另一个**场景。全等仍最高优先（「开灯亮度50」不得被「开灯」前缀
+        吞成场景）；前缀并列同长时按缓存序取先出现者（确定性不依赖 set 序）。
+        """
+        if not text:
+            return None
+        if text in self._triggers:                 # 全等优先（最精确语义）
+            return text
+        best: str | None = None
         for s in self._triggers:
-            if text == s or text.startswith(s):
-                return s
-        return None
+            if s and text.startswith(s) and (best is None or len(s) > len(best)):
+                best = s
+        return best
 
     async def verify_or_refresh(self, phrase: str) -> bool:
         """触发词最终核验：缓存命中，或强刷一次后命中（原双查语义）。"""

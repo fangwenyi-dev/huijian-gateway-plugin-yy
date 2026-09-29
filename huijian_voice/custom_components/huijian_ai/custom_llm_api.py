@@ -1,3 +1,12 @@
+"""慧尖控制面 LLM Tool API（HA custom LLM API 面）。
+
+注：本模块顶部的 `from __future__ import annotations` 是**可导入性前提**——
+`_should_include_entity` 的返回注解 `tuple[bool, er.RegistryEntry | None]` 里
+`er` 只在函数内局部 import（懒载纪律），类体求值期无此名 → 无本行则整包
+import 即 NameError（v1.1.27 复查实证；本文件长期无人 import 才未暴露）。
+"""
+from __future__ import annotations
+
 import logging
 import time
 
@@ -110,6 +119,70 @@ def _args_targets_lock(arguments):
     except (TypeError, AttributeError):
         return False
     return False
+
+
+# v1.1.27（批7 P0-2）：场景两链的动作级风险闸。原闸只扫调用参数**顶层**
+# target，而场景/自动化的动作藏在 actions[].params.target 里——
+# `HassCreateVoiceScene{actions:[{intent:TurnDeviceOff,params:{target:[{devices:
+# [{name:大门,domains:[lock]}]}]}}]}` 一句话造出「免确认关大门（=解锁）」，
+# 之后 `HassTriggerVoiceScene`（args 只有 trigger_phrase）回放全程免确认。
+# 触发链的 args 里没有动作面 → 回查场景库取存量动作再判（同一把闸）。
+_RISKY_SCENE_INTENTS = frozenset({"HassCreateVoiceScene", "HassTriggerVoiceScene"})
+
+
+def scene_actions_hit_risk(actions) -> bool:
+    """actions（任意嵌套）里是否含「免确认解锁/撤防」动作。永不抛。
+
+    判据与顶层闸同源（_args_targets_lock 域闭包 + 中文词表 + alarm 域/entity_id），
+    只是改为**递归**遍历动作节点——场景动作形如 {intent|name, params|parameters}，
+    风险实体不在参数顶层 target 就是在 params.target，故按「意图节点」取参后复用。
+    """
+    stack = [actions]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, dict):
+            name = cur.get("intent") or cur.get("name")
+            if isinstance(name, str) and name in _RISKY_LOCK_OFF_INTENTS:
+                params = cur.get("params")
+                if not isinstance(params, dict):
+                    params = cur.get("parameters")
+                if isinstance(params, dict) and _args_targets_lock(params):
+                    return True
+            stack.extend(
+                v for v in cur.values() if isinstance(v, (dict, list, tuple))
+            )
+        elif isinstance(cur, (list, tuple)):
+            stack.extend(cur)
+    return False
+
+
+def _response_text(response) -> str:
+    """response（dict 折叠形 / HA IntentResponse 对象）→ LLM 可读文本（≤200 字）。
+
+    v1.1.27（批7 P0-1）：旧实现只 `str(response)[:200]` 且 success 恒 True——
+    执行面失败（handler 折成 {"success": False} 或 IntentResponse.success=False）
+    会被播成「办好了」。此处只做文本抽取，成败判定由调用点读 success。
+    """
+    text = ""
+    if isinstance(response, dict):
+        for key in ("message", "result", "error", "speech"):
+            value = response.get(key)
+            if value:
+                text = str(value)
+                break
+        if not text:
+            text = str(response)
+    else:
+        text = str(getattr(response, "error", None) or "")
+        if not text:
+            # r2（金标复测）：真 IntentResponse 用 speech["plain"]["speech"] 承载
+            # 话术；旧式 str(response) 会回 "<…object at 0x…>" 给 LLM。
+            sp = getattr(response, "speech", None)
+            if isinstance(sp, dict) and isinstance(sp.get("plain"), dict):
+                text = str(sp["plain"].get("speech") or "")
+        if not text:
+            text = str(response)
+    return text[:200] + "..." if len(text) > 200 else text
 
 
 def _device_schema():
@@ -478,13 +551,45 @@ class HuijianControlAPI(llm.API):
             return await self._call_intent(hass, intent_type, tool_input.tool_args, llm_context)
         return handler
 
+    async def _scene_chain_hits_risk(
+        self, hass: HomeAssistant, intent_type: str, arguments: dict
+    ) -> bool:
+        """场景创建/触发两链的风险扫描（v1.1.27；见 _RISKY_SCENE_INTENTS 注释）。
+
+        触发链 args 只有 trigger_phrase，动作面在场景库里 → 回查存量动作再判。
+        库读取异常按放行处理（fail-open，与 _args_targets_lock 同口径）并留痕。
+        """
+        if intent_type not in _RISKY_SCENE_INTENTS:
+            return False
+        args = arguments if isinstance(arguments, dict) else {}
+        if scene_actions_hit_risk(args.get("actions")):
+            return True
+        if intent_type != "HassTriggerVoiceScene":
+            return False
+        phrase = str(args.get("trigger_phrase") or "").strip()
+        if not phrase:
+            return False
+        try:
+            from .intent_voice_scene import get_voice_scene_store
+
+            scene = await get_voice_scene_store(hass).get_scene_by_trigger(phrase)
+        except Exception as err:  # noqa: BLE001 —— 闸不可因库故障变拒绝
+            _LOGGER.warning(
+                "[custom_llm_api] 场景「%s」风险校验失败，放行交执行面：%s",
+                phrase, err)
+            return False
+        return scene_actions_hit_risk((scene or {}).get("actions"))
+
     async def _call_intent(self, hass: HomeAssistant, intent_type: str, arguments: dict, llm_context: llm.LLMContext) -> dict:
         arguments = await self._enrich_target_domains(hass, arguments)
         # v1.0.62 P0-3 同构闸（见文件头 _args_targets_lock 注释）：置于 enrich
         # 之后——LLM 常不写 domains、只给中文设备名，enrich 会按 HA 真实状态回填
         # domains，锁设备在此刻才现形，故必须在回填后判。命中即拒并回话术给 LLM，
         # 引导用户回主语音通道走确认。与加载项 agent._tool C2 同构语义。
-        if intent_type in _RISKY_LOCK_OFF_INTENTS and _args_targets_lock(arguments):
+        # v1.1.27：闸面扩到场景两链（actions 递归 + 触发链回查场景库）。
+        if (intent_type in _RISKY_LOCK_OFF_INTENTS
+                and _args_targets_lock(arguments)) or \
+                await self._scene_chain_hits_risk(hass, intent_type, arguments):
             _LOGGER.warning("[custom_llm_api] 拒绝风险目标 %s（解锁/撤防引导至确认流）",
                             intent_type)
             return {"success": False,
@@ -511,7 +616,36 @@ class HuijianControlAPI(llm.API):
             _LOGGER.error("Intent %s unexpected error: %s", intent_type, e)
             return {"success": False, "error": f"Unexpected error: {e}"}
 
-        result_text = str(response)
-        if len(result_text) > 200:
-            result_text = result_text[:200] + "..."
+        # v1.1.27（批7 P0-1）：读 response 的 success/error 如实折算——旧实现
+        # 一律 {"success": True, "result": str(response)}，执行面失败（handler
+        # 折叠 dict / IntentResponse.success=False）被 LLM 播成「办好了」。
+        result_text = _response_text(response)
+        if isinstance(response, dict):
+            if "success" in response:
+                ok = response.get("success") is not False
+                err = str(response.get("error") or "")
+            elif isinstance(response.get("results"), list):
+                # r2（金标复测）：SetDeviceMode 族只回 {"results":[…]}（无 success
+                # 键）——旧式 `get("success") is not False` 恒真 ⇒ 逐台全失败仍被
+                # 播「办好了」。按逐台行折算：任一台成功＝该步可用，全败＝失败。
+                rows = [r for r in response["results"] if isinstance(r, dict)]
+                ok = any(r.get("success") for r in rows) if rows else True
+                err = next((str(r.get("error")) for r in rows
+                            if not r.get("success") and r.get("error")), "")
+            else:
+                ok, err = True, ""
+        else:
+            succ = getattr(response, "success", None)
+            if succ is None:
+                # 真 HA IntentResponse **没有** .success 属性（失败以
+                # response_type=ERROR 表达）——旧判据 getattr(...,True) 恒真 ⇒
+                # 真机每一次失败都被报成功。
+                rtype = getattr(response, "response_type", None)
+                ok = str(getattr(rtype, "name", "") or "").upper() != "ERROR"
+                err = str(getattr(response, "error_code", "") or "")
+            else:
+                ok = succ is not False
+                err = str(getattr(response, "error", "") or "")
+        if not ok:
+            return {"success": False, "error": err or result_text}
         return {"success": True, "result": result_text}

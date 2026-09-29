@@ -161,27 +161,52 @@ def get_entity_name(entity_entry: er.RegistryEntry, state: State) -> str:
 class AreaInfo:
     name: str
     id: str
+    # v1.1.27：别名**另存集合**。旧版把 aliases 展平进同一个 list 再取 [0]，
+    # 而 HA 的 aliases 是 set（无序）⇒ name 可能拿到别名，本模块所有
+    # `entity_area.name != 口述区域名` 的比较随之随机丢候选（同一句话时对时错）。
+    aliases: frozenset[str] = frozenset()
+
+    def matches(self, area_name: str) -> bool:
+        """区域名命中判定：注册名或任一别名都算（用户口述两种都要认）。"""
+        want = _norm_area_name(area_name)
+        if not want:
+            return False
+        if want == _norm_area_name(self.name):
+            return True
+        return any(want == _norm_area_name(a) for a in self.aliases)
+
+
+def _norm_area_name(value: str | None) -> str:
+    """区域名比对归一：去空白与「的」、小写（注册名常带尾空格、口述常带「的」）。"""
+    return (str(value or "").replace(" ", "").replace("\u3000", "")
+            .replace("的", "").lower())
+
+
+def _area_info(area, area_id: str) -> AreaInfo:
+    """AreaInfo 唯一构造入口：name 恒取注册名，别名进集合（v1.1.27）。"""
+    aliases = getattr(area, "aliases", None) or ()
+    return AreaInfo(
+        name=str(getattr(area, "name", "") or ""),
+        id=area_id,
+        aliases=frozenset(str(a) for a in aliases),
+    )
 
 
 def get_entity_area(
     hass: HomeAssistant, entity_entry: er.RegistryEntry
 ) -> AreaInfo | None:
-    area_names = []
     area_registry = ar.async_get(hass)
     device_registry = dr.async_get(hass)
     if entity_entry.area_id and (
         area := area_registry.async_get_area(entity_entry.area_id)
     ):
-        area_names.extend(area.aliases)
-        area_names.append(area.name)
-        return AreaInfo(id=entity_entry.area_id, name=area_names[0])
+        return _area_info(area, entity_entry.area_id)
     elif entity_entry.device_id and (
         device := device_registry.async_get(entity_entry.device_id)
     ):
         if device.area_id and (area := area_registry.async_get_area(device.area_id)):
-            area_names.extend(area.aliases)
-            area_names.append(area.name)
-            return AreaInfo(id=device.area_id, name=area_names[0])
+            return _area_info(area, device.area_id)
+    return None
 
 
 @dataclass
@@ -219,6 +244,8 @@ class HaTargetItem(TypedDict):
 class StateWithAreaConstraint:
     states: list[State]
     unset_area_constraint: bool
+    # v1.1.27：本命中组来自哪个 device.name（逐目标名称过滤用；旧版只认第一个）
+    requested_name: str | None = None
 
 
 def _entity_area_id(hass: HomeAssistant, entity_id: str) -> str | None:
@@ -282,7 +309,12 @@ async def _match_with_constraints(
         #   真机"没找到设备"）。空列表语义必须是"不按域过滤"=None。
         devices = target.get("devices") or [{"domains": []}]
         for device in devices:
-            area_name = target.get("area")
+            # v1.1.27：area 空串（LLM/REST 会传，加载项按 targets.py 注释不再写）
+            # ＝「未点名区域」，绝不能当"有区域约束"用——旧版把它折成
+            # unset_area_constraint=True，在建候选时把挂区域下的实体整批剔掉。
+            raw_area = target.get("area")
+            area_name = raw_area or None
+            requested_name = str(device.get("name") or "").strip() or None
             expanded_domains = _expand_domains(device.get("domains") or [])
             all_expanded_domains.update(expanded_domains)
             match_constraints = intent.MatchTargetsConstraints(
@@ -308,52 +340,156 @@ async def _match_with_constraints(
                     found_states.append(
                         StateWithAreaConstraint(
                             states=fallback,
-                            unset_area_constraint=(area_name == ""),
+                            unset_area_constraint=(raw_area == ""),
+                            requested_name=requested_name,
                         )
                     )
                 continue
             found_states.append(
                 StateWithAreaConstraint(
                     states=match_result.states,
-                    unset_area_constraint=(area_name == ""),
+                    unset_area_constraint=(raw_area == ""),
+                    requested_name=requested_name,
                 )
             )
 
     return found_states, all_expanded_domains
 
 
-def _build_candidate_entities(
+def _build_entities_for_item(
     hass: HomeAssistant,
-    found_states: list[StateWithAreaConstraint],
+    item: StateWithAreaConstraint,
     # er.Registry 在 HA 2026.x 已移除（仅剩 EntityRegistry）——注解是运行期求值的，
     # 挂错名字 = import 即炸、全集成瘫（2026-09 E2E 实证）。真栈 E2E 兼做冒烟。
     entity_registry: er.EntityRegistry,
 ) -> list[EntityInfo]:
-    """Build candidate EntityInfo list from matched states."""
+    """单个 target×device 命中组的候选实体（v1.1.27：逐组构建，供逐目标过滤）。"""
     candidate_entities: list[EntityInfo] = []
 
-    for item in found_states:
-        for state in item.states:
-            if state.state == "unavailable":
-                continue
-            entity_entry = entity_registry.async_get(state.entity_id)
-            if not entity_entry:
-                continue
-            entity_area = get_entity_area(hass, entity_entry)
-            if item.unset_area_constraint and entity_area:
-                continue
-            entity_name = get_entity_name(entity_entry, state)
-            candidate_entities.append(
-                EntityInfo(
-                    name=entity_name,
-                    area=entity_area,
-                    state=state,
-                    entity=entity_entry,
-                    on_off="off" if state.state == "off" else "on",
-                )
+    for state in item.states:
+        if state.state == "unavailable":
+            continue
+        entity_entry = entity_registry.async_get(state.entity_id)
+        if not entity_entry:
+            continue
+        entity_area = get_entity_area(hass, entity_entry)
+        # v1.1.27：旧版此处 `if item.unset_area_constraint and entity_area: continue`
+        # 把"空 area"当成"有区域约束"用——LLM/REST 传 area:""（=未点名区域）时，
+        # 挂在区域下的实体被整批剔除（"打开灯"直接把有区域的灯全丢）。空串语义
+        # 是"未点名区域"，没有任何过滤依据：HA 匹配层已按区域过滤，加载项亦不再
+        # 写 ""（core/nlu/targets.py 空 area 注释）。
+        entity_name = get_entity_name(entity_entry, state)
+        candidate_entities.append(
+            EntityInfo(
+                name=entity_name,
+                area=entity_area,
+                state=state,
+                entity=entity_entry,
+                on_off="off" if state.state == "off" else "on",
             )
+        )
 
     return candidate_entities
+
+
+def _build_candidate_entities(
+    hass: HomeAssistant,
+    found_states: list[StateWithAreaConstraint],
+    entity_registry: er.EntityRegistry,
+) -> list[EntityInfo]:
+    """Build candidate EntityInfo list from matched states."""
+    return [
+        entity
+        for item in found_states
+        for entity in _build_entities_for_item(hass, item, entity_registry)
+    ]
+
+
+def _build_candidate_groups(
+    hass: HomeAssistant,
+    found_states: list[StateWithAreaConstraint],
+    entity_registry: er.EntityRegistry,
+) -> list[list[EntityInfo]]:
+    """逐命中组的候选（与 found_states 同序同长）——v1.1.27 逐目标名称过滤用。"""
+    return [_build_entities_for_item(hass, item, entity_registry)
+            for item in found_states]
+
+
+def _narrow_by_name(
+    hass: HomeAssistant,
+    group: list[EntityInfo],
+    requested_name: str | None,
+) -> list[EntityInfo]:
+    """按**本组** device.name 收窄候选（档序=旧版全局过滤：精确名→前缀→设备名→
+    entity_id 子串；全档不中时原样返回，与旧版"宁宽不误剔"同口径）。
+
+    v1.1.27：旧版只取第一个 device.name 做**全局**过滤——多目标句「关灯和空调」
+    里"灯"会把"空调"整组静默剔掉却照回 success。改为逐组过滤后合并，每组只认
+    自己的名字。
+    """
+    if not group or not requested_name:
+        return group
+    name_lower = requested_name.lower().strip()
+
+    exact_matches = [e for e in group if (e.name or "").lower() == name_lower]
+    if exact_matches:
+        _LOGGER.info(
+            "Exact name match found: %d entities (filtered from %d)",
+            len(exact_matches), len(group),
+        )
+        return exact_matches
+
+    # 无精确匹配时，尝试前缀匹配（如 name='窗户' 匹配 '2号测试窗户' 等）
+    prefix_matches = [
+        e for e in group if (e.name or "").lower().startswith(name_lower)
+    ]
+    if prefix_matches:
+        _LOGGER.info(
+            "Prefix name match found: %d entities (filtered from %d)",
+            len(prefix_matches), len(group),
+        )
+        return prefix_matches
+
+    # ── 设备名匹配 ──
+    # 当实体名不匹配请求名时（如 has_entity_name=True 的网关按钮，
+    # 实体名 "开启" vs 设备名 "开窗器 01"），通过设备注册表查找
+    dev_reg = dr.async_get(hass)
+    device_matches = []
+    for e in group:
+        entity_entry = e.entity
+        if not entity_entry.device_id:
+            continue
+        device = dev_reg.async_get(entity_entry.device_id)
+        if not device:
+            continue
+        device_name = device.name_by_user or device.name or ""
+        if (
+            name_lower in device_name.lower()
+            or device_name.lower() in name_lower
+        ):
+            device_matches.append(e)
+    if device_matches:
+        _LOGGER.info(
+            "Device name match found: %d entities (filtered from %d via device name)",
+            len(device_matches), len(group),
+        )
+        return device_matches
+
+    # ── Entity ID 子串匹配 ──（最终兜底）
+    # 当设备名也匹配不上时（如实体无 device_id），
+    # 尝试用请求名匹配 entity_id（如 entity_id 含设备标识）
+    entity_id_matches = [
+        e for e in group
+        if getattr(getattr(e, "entity", None), "entity_id", None)
+        and name_lower in e.entity.entity_id.lower()
+    ]
+    if entity_id_matches:
+        _LOGGER.info(
+            "Entity ID match found: %d entities (filtered from %d via entity_id)",
+            len(entity_id_matches), len(group),
+        )
+        return entity_id_matches
+    return group
 
 
 async def match_intent_entities(
@@ -368,7 +504,8 @@ async def match_intent_entities(
         hass, targets, intent_obj.assistant
     )
     all_expanded_domains = domains1.copy()
-    candidate_entities = _build_candidate_entities(hass, found_states, entity_registry)
+    groups = _build_candidate_groups(hass, found_states, entity_registry)
+    candidate_entities = [e for group in groups for e in group]
 
     # 第二轮：无 assistant 回退
     if len(candidate_entities) == 0:
@@ -380,11 +517,14 @@ async def match_intent_entities(
             hass, targets, None
         )
         all_expanded_domains.update(domains2)
-        candidate_entities = _build_candidate_entities(hass, found_states2, entity_registry)
+        found_states = found_states2
+        groups = _build_candidate_groups(hass, found_states2, entity_registry)
+        candidate_entities = [e for group in groups for e in group]
 
-    # ── 精确名称优先过滤 ──
-    # 如果 LLM 指定了 name，优先匹配完全相同的实体名
-    # 这样可以避免 HA 子串匹配导致的过匹配问题
+    # ── 精确名称优先过滤（v1.1.27：逐目标/逐 device 各自过滤后再合并）──
+    # 旧版只取**第一个** device.name 做全局过滤：多目标句「关掉灯和空调」里"灯"
+    # 会把"空调"整组静默剔掉却照回 success（点名两台只落地一台，加载项侧看不出来）。
+    # 现按命中组各用自己 device.name 收窄，再按序合并去重。
     requested_name = None
     for target in targets:
         for device in target.get("devices") or []:   # area-only 目标无 devices 键
@@ -395,70 +535,18 @@ async def match_intent_entities(
         if requested_name:
             break
 
-    if requested_name:
-        name_lower = requested_name.lower().strip()
-        exact_matches = [e for e in candidate_entities if e.name.lower() == name_lower]
-        if exact_matches:
-            _LOGGER.info(
-                "Exact name match found: %d entities (filtered from %d)",
-                len(exact_matches),
-                len(candidate_entities),
-            )
-            candidate_entities = exact_matches
-        else:
-            # 无精确匹配时，尝试前缀匹配（如 name='窗户' 匹配 '2号测试窗户' 等）
-            prefix_matches = [
-                e for e in candidate_entities if e.name.lower().startswith(name_lower)
-            ]
-            if prefix_matches:
-                _LOGGER.info(
-                    "Prefix name match found: %d entities (filtered from %d)",
-                    len(prefix_matches),
-                    len(candidate_entities),
-                )
-                candidate_entities = prefix_matches
-            else:
-                # ── 设备名匹配 ──
-                # 当实体名不匹配请求名时（如 has_entity_name=True 的网关按钮，
-                # 实体名 "开启" vs 设备名 "开窗器 01"），通过设备注册表查找
-                dev_reg = dr.async_get(hass)
-                device_matches = []
-                for e in candidate_entities:
-                    entity_entry = e.entity
-                    if not entity_entry.device_id:
-                        continue
-                    device = dev_reg.async_get(entity_entry.device_id)
-                    if not device:
-                        continue
-                    device_name = device.name_by_user or device.name or ""
-                    if (
-                        name_lower in device_name.lower()
-                        or device_name.lower() in name_lower
-                    ):
-                        device_matches.append(e)
-                if device_matches:
-                    _LOGGER.info(
-                        "Device name match found: %d entities (filtered from %d via device name)",
-                        len(device_matches),
-                        len(candidate_entities),
-                    )
-                    candidate_entities = device_matches
-                else:
-                    # ── Entity ID 子串匹配 ──（最终兜底）
-                    # 当设备名也匹配不上时（如实体无 device_id），
-                    # 尝试用请求名匹配 entity_id（如 entity_id 含设备标识）
-                    entity_id_matches = [
-                        e
-                        for e in candidate_entities
-                        if name_lower in e.entity.entity_id.lower()
-                    ]
-                    if entity_id_matches:
-                        _LOGGER.info(
-                            "Entity ID match found: %d entities (filtered from %d via entity_id)",
-                            len(entity_id_matches),
-                            len(candidate_entities),
-                        )
-                        candidate_entities = entity_id_matches
+    if groups:
+        narrowed: list[EntityInfo] = []
+        seen_entity_ids: set[str] = set()
+        for item, group in zip(found_states, groups):
+            for entity_info in _narrow_by_name(hass, group, item.requested_name):
+                entity_id = entity_info.state.entity_id
+                if entity_id in seen_entity_ids:
+                    continue
+                seen_entity_ids.add(entity_id)
+                narrowed.append(entity_info)
+        if narrowed:
+            candidate_entities = narrowed
 
     # ── 设备注册表级兜底（第5级） ──
     # 前4级匹配全部失败（如按钮实体名"开窗器 开启"完全不包含
@@ -503,10 +591,11 @@ async def match_intent_entities(
                     and entity_entry.domain not in all_expanded_domains
                 ):
                     continue
-                # 回退匹配时同样遵守 area 约束
+                # 回退匹配时同样遵守 area 约束（v1.1.27：名或**别名**都算命中——
+                # 旧版严格 != 本名比较，区域名一旦被别名顶替就把候选全丢）
                 if requested_area:
                     entity_area = get_entity_area(hass, entity_entry)
-                    if entity_area and entity_area.name != requested_area:
+                    if entity_area and not entity_area.matches(requested_area):
                         continue
                 state = hass.states.get(entity_entry.entity_id)
                 if not state or state.state == "unavailable":
@@ -542,7 +631,10 @@ async def match_intent_entities(
             if entity_entry is None or entity_entry.hidden_by or entity_entry.disabled_by:
                 continue
             entity_area = get_entity_area(hass, entity_entry)
-            if area_req and (entity_area is None or entity_area.name != area_req):
+            # v1.1.27：与上面第 5 级同一判据——区域**名或别名**都算命中
+            if area_req and (
+                entity_area is None or not entity_area.matches(area_req)
+            ):
                 continue
             candidate_entities.append(
                 EntityInfo(

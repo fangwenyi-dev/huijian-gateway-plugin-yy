@@ -303,14 +303,17 @@ def select_primary_plan(fp: Optional[Plan], kl: Optional[Plan],
 
     v1.0.92：known_areas 传入时启用「控制步目标证据」闸——见
     _klar_write_without_target_evidence。"""
+    if fp is not None and fp.source == "scene":
+        # scene 契约**恒最高优先**（模块头裁决①／fast_path:1060-1066）：等值触发词
+        # 是用户自己绑的"说 X 就 Y"。查询闸此前压在它前面（先把 fp 置 None）⇒
+        # 疑问形触发词的场景永不触发（用户明明被告知"以后说 X 就 Y"）。
+        return fp
     # v1.1.19 复审（线上实测）：查询句两档都不得执行。闸此前只在 klar 支里，
     # 而引擎关/缺失/熔断（常规降级态）时 fp 会成为唯一计划 ⇒
     # 「客厅空调开多少度」被字面表接成 TurnDeviceOn 真执行。
     if fp is not None and is_query_like(getattr(fp, "utterance", "") or ""):
         fp = None
     if fp is not None:
-        if fp.source == "scene":
-            return fp
         if fp.intent in HUIJIAN_ONLY_INTENTS or _mentions_window_device(fp.args):
             return fp
     if kl is not None:
@@ -395,7 +398,11 @@ _CONFIRM_ANN_MAX_EXTRA = 30.0        # 播报补偿封顶（防超长提示把 T
 _VOCAB_SYNC_S = 30.0                 # P2-17 动态词表节流
 
 # P2-13 风险意图：解锁（含 D7 反转形态 TurnDeviceOff×锁）与删除族。
-_RISKY_INTENTS = frozenset({"HassUnlock", "HassDeleteVoiceScene", "HassDeleteAutomation"})
+# v1.1.27：同族锁动作一并入闸——上锁同样是不可逆的门禁动作（此前只认 HassUnlock，
+# 「锁上大门」无确认环直拔门锁）。HassTurnOn×lock 仍不在闸内（D7 语义下那是"上锁"
+# 的安全向形态，见 _plan_has_risky_step）。
+_RISKY_INTENTS = frozenset({"HassUnlock", "HassLock",
+                            "HassDeleteVoiceScene", "HassDeleteAutomation"})
 _CONFIRM_YES = frozenset({"确认", "确定", "是的", "是", "对", "对呀", "嗯", "好", "好的",
                           "好吧", "执行", "继续吧", "yes", "ok", "y"})
 _CONFIRM_NO = frozenset({"取消", "不", "不要", "不用", "别", "算了", "不确认", "no", "n"})
@@ -1947,7 +1954,8 @@ class Pipeline:
            名为空）此前旁路确认环，「解锁大门」被引擎接地后直接拔锁；
         2) 多分句 plan 的 extra_steps 此前完全不设防——「关灯并且解锁大门」
            主步 HassTurnOff light.x 不风险，第二步解锁裸奔。
-        HassTurnOn×lock=上锁（D7 安全向），不在闸内。"""
+        HassTurnOn×lock=上锁（D7 安全向），不在闸内；显式 HassLock（「锁上大门」）
+        v1.1.27 起同族入闸——上锁也是不可逆的门禁动作。"""
         pairs = [(plan.intent, plan.args or {})]
         pairs += [(st.get("name"), st.get("args") or {})
                   for st in (getattr(plan, "extra_steps", None) or [])
@@ -1962,10 +1970,11 @@ class Pipeline:
 
     @staticmethod
     def _risky_actions_note(actions: list) -> str:
-        """入库动作里含**解锁族**时的点名尾注（v1.1.22 用户拍板：创建/修改**不拦**，
+        """入库动作里含**锁族**时的点名尾注（v1.1.22 用户拍板：创建/修改**不拦**，
         但必须在播报里点名）。D7 反转语义（「关闭门锁」=解锁）静默入库 = 埋一条以后
-        无人值守的解锁；风险判据与确认环 `_plan_has_risky_step` 同一张表。返回 ""＝
-        无可点名项。永不抛（拼注失败=不加注，不改成败）。"""
+        无人值守的解锁；v1.1.27 起 HassLock（上锁）同族在表，动词按方向取。判据与
+        确认环 `_plan_has_risky_step` 同一张表。返回 ""＝无可点名项。永不抛（拼注
+        失败=不加注，不改成败）。"""
         try:
             for a in actions or []:
                 if not isinstance(a, dict):
@@ -1977,10 +1986,11 @@ class Pipeline:
                         and T.args_target_lock(params)):
                     what = "、".join(_target_names(params) or _target_areas(params)
                                      or ["某台设备"])
-                    return f"（注：含解锁{what}的动作，触发时会直接执行）"
+                    verb = "上锁" if intent == "HassLock" else "解锁"
+                    return f"（注：含{verb}{what}的动作，触发时会直接执行）"
             return ""
         except Exception:  # noqa: BLE001 注可缺，动作入库不受影响
-            logger.exception("[创建] 解锁点名拼装异常（不加注）")
+            logger.exception("[创建] 锁族点名拼装异常（不加注）")
             return ""
 
     def _confirm_ttl(self, text: str) -> float:
@@ -2011,6 +2021,7 @@ class Pipeline:
             # C2 配套：多步 plan 的问句按**风险步**取目标——主步是灯、第二步
             # 才解锁时，拿主步 args 问「解锁该设备」会问错对象。
             rargs = args
+            rverb = None
             for st in (getattr(plan, "extra_steps", None) or []):
                 if not isinstance(st, dict):
                     continue
@@ -2019,10 +2030,16 @@ class Pipeline:
                         sn in ("TurnDeviceOff", "HassTurnOff", "HassToggle")
                         and T.args_target_lock(sa)):
                     rargs = sa
+                    # v1.1.27：风险步的**方向**按意图取（HassLock=上锁；
+                    # 其余风险步＝解锁族，含 D7 反转形态 TurnDeviceOff×锁）。
+                    rverb = "上锁" if sn == "HassLock" else "解锁"
                     break
             what = "、".join(_target_names(rargs) or _target_areas(rargs)
                              or ["该设备"])
-            act = f"解锁{what}"
+            # v1.1.27：HassLock 进闸后旧写法会把"上锁"问成"解锁"（语义反转，
+            # 用户按「确认」时以为在解锁）——按意图名取动词，主步同理。
+            verb = rverb or ("上锁" if plan.intent == "HassLock" else "解锁")
+            act = f"{verb}{what}"
         text = f"接下来要{act}，说「确认」执行，或说「取消」放弃"
         self._confirm[origin] = {"plan": plan, "ts": time.time(),
                                  "ttl": self._confirm_ttl(text)}
@@ -2031,8 +2048,12 @@ class Pipeline:
                      ok=True, trace=list(getattr(plan, "trace", [])) + ["确认环:挂起"])
 
     # ── v1.1.4 第 3 步：歧义目标确认（复用 P2-13 的 是/否/改口三态）────────
+    # v1.1.27：补三族进闸。本方法 docstring 自述的实锤案「平开窗」正落在
+    # ControlWindow 上（名=平开窗 命中隔壁「测试平开窗」），锁族（开门禁）同属
+    # "动错设备"最贵的一类——它们此前整族旁路，点了名多台就当批量语义直接执行。
     _AMB_INTENTS = ("TurnDeviceOn", "TurnDeviceOff", "PauseDevice",
-                    "AdjustDeviceAttribute", "SetDeviceMode")
+                    "AdjustDeviceAttribute", "SetDeviceMode",
+                    "ControlWindow", "HassLock", "HassUnlock")
 
     def _ambiguity_ask(self, plan, origin):
         """点了名、却在本家匹配到**多台不同设备**时先问一句再动。

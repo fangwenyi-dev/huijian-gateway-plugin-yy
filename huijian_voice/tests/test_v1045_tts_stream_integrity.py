@@ -275,7 +275,7 @@ def _bare_transport(mod2):
     t.ensure_connected = _aye
     t.restart_calls = []
 
-    async def restart(reason=""):
+    async def restart(reason="", **kw):
         t.restart_calls.append(reason)
     t.restart_connection = restart
 

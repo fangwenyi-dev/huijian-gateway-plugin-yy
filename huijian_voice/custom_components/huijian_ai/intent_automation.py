@@ -430,6 +430,7 @@ class AutomationManager:
         self._store = get_automation_store(hass)
         self._unsub = None
         self._unsub_time = None
+        self._starting = False
         self._tracked_entity_ids: set[str] = set()
         self._triggered_cache: dict[str, float] = {}
         self._trigger_logs: list[dict] = []
@@ -466,19 +467,27 @@ class AutomationManager:
             self._trigger_logs = self._trigger_logs[-self._max_logs :]
 
     async def async_start(self):
-        _LOGGER.info("AutomationManager starting...")
-        await self._update_tracked_entities()
-        self._unsub = self._hass.bus.async_listen(
-            EVENT_STATE_CHANGED,
-            self._async_state_changed,
-        )
-        if self._unsub_time is None:
-            self._unsub_time = async_track_time_change(
-                self._hass, self._async_time_tick, second=0)
-        _LOGGER.info(
-            "AutomationManager started - monitoring %s entities",
-            len(self._tracked_entity_ids),
-        )
+        # v1.1.27（批7）：幂等——get_automation_manager 懒建时会排一次武装，
+        # async_setup/创建路径又显式 await 一次，两次并发不得双登记监听。
+        if self._starting or self._unsub is not None:
+            return
+        self._starting = True
+        try:
+            _LOGGER.info("AutomationManager starting...")
+            await self._update_tracked_entities()
+            self._unsub = self._hass.bus.async_listen(
+                EVENT_STATE_CHANGED,
+                self._async_state_changed,
+            )
+            if self._unsub_time is None:
+                self._unsub_time = async_track_time_change(
+                    self._hass, self._async_time_tick, second=0)
+            _LOGGER.info(
+                "AutomationManager started - monitoring %s entities",
+                len(self._tracked_entity_ids),
+            )
+        finally:
+            self._starting = False
 
     async def _update_tracked_entities(self):
         automations = await self._store.get_all_automations()
@@ -493,13 +502,28 @@ class AutomationManager:
     async def async_refresh_tracked_entities(self):
         await self._update_tracked_entities()
 
+    def stop_listeners(self) -> None:
+        """幂等注销监听（同步：unload 路径只能同步调）。永不抛。
+
+        v1.1.27（批7）：旧 unload 只 reset_automation_globals()（丢引用不注销）
+        ——旧监听连同旧管理器实例继续活着，reload 后新旧两套同吃状态事件，
+        自动化动作双执行；旧实例还攥着已作废的 store 快照。
+        """
+        unsub, self._unsub = self._unsub, None
+        if unsub is not None:
+            try:
+                unsub()
+            except Exception:  # noqa: BLE001 —— 注销失败不能连带 reload 卡死
+                _LOGGER.exception("AutomationManager 状态监听注销失败")
+        unsub_time, self._unsub_time = self._unsub_time, None
+        if unsub_time is not None:
+            try:
+                unsub_time()
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("AutomationManager 定时监听注销失败")
+
     async def async_stop(self):
-        if self._unsub:
-            self._unsub()
-            self._unsub = None
-        if self._unsub_time:
-            self._unsub_time()
-            self._unsub_time = None
+        self.stop_listeners()
         _LOGGER.info("AutomationManager stopped")
 
     @callback
@@ -713,14 +737,35 @@ def get_automation_manager(hass: HomeAssistant) -> AutomationManager:
     global _manager_instance
     if _manager_instance is None:
         _manager_instance = AutomationManager(hass)
+        # v1.1.27（批7）：reset 现在**真注销**旧监听（旧实现只丢引用、靠泄漏的
+        # 旧监听"碰巧还活着"），懒建的新实例必须重新武装，否则条目 reload 后
+        # 自动化静默失效。async_start 自身幂等，与显式调用并发也只会登记一次。
+        starter = getattr(hass, "async_create_task", None)
+        if starter is not None:
+            try:
+                starter(_manager_instance.async_start())
+            except Exception:  # noqa: BLE001 —— 武装失败不阻断调用方
+                _LOGGER.warning("自动化管理器重新武装监听失败", exc_info=True)
+    return _manager_instance
+
+
+def peek_automation_manager(hass=None) -> "AutomationManager | None":
+    """只读访问口（v1.1.27-r2）：不建实例、不武装监听。
+
+    匿名只读 API 面（AutomationLogView 是 requires_auth=False）不得因一次 GET 就
+    把状态监听+整点 tick 拉起——武装只该发生在真正使用自动化的通道里。"""
     return _manager_instance
 
 
 def reset_automation_globals():
     """Reset global singleton references for clean reload."""
     global _store_instance, _manager_instance
+    manager = _manager_instance
     _store_instance = None
     _manager_instance = None
+    if manager is not None:
+        # 条目卸载/重载：监听必须先真注销（幂等），再丢引用。
+        manager.stop_listeners()
 
 
 class HassCreateAutomationIntent(ha_intent.IntentHandler):
@@ -972,11 +1017,35 @@ class HassUpdateAutomationIntent(ha_intent.IntentHandler):
                             "error": "trigger.at 需为 HH:MM（24小时制）"}
                 normalized = {"at": f"{int(m.group(1)):02d}:{m.group(2)}"}
                 if trigger_raw.get("days"):
-                    normalized["days"] = sorted(
-                        {int(d) for d in trigger_raw["days"]})
+                    # v1.1.27（批7）：create 侧校 1-7，update 侧旧实现直接
+                    # sorted 收下 → days:[8] 入库后永不触发（时间触发按 ISO
+                    # 1-7 比对）却回「已更新」——两路径校法必须同规。
+                    try:
+                        days_norm = sorted({int(d) for d in trigger_raw["days"]})
+                    except Exception:
+                        return {"success": False,
+                                "error": "trigger.days 需为 1-7 的整数列表"}
+                    if not all(1 <= d <= 7 for d in days_norm):
+                        return {"success": False,
+                                "error": "trigger.days 需为 1-7 的整数列表"}
+                    normalized["days"] = days_norm
                 trigger = normalized
             else:
-                trigger = trigger_raw
+                # v1.1.27（批7）：create 走 _resolve_entity_id（描述原文/中文名
+                # 自动修正），update 旧实现把 trigger_raw 原样入库——「办公室的
+                # 温度」当 entity_id 存下、永不触发却回「已更新」。同规解析并
+                # 校验，解析不出如实拒（不写坏存量）。
+                trigger = dict(trigger_raw)
+                resolved, warn = await _resolve_entity_id(intent_obj.hass, trigger)
+                if resolved is None:
+                    return {
+                        "success": False,
+                        "error": warn or f"传感器 {trigger.get('entity_id', '')} 不存在",
+                    }
+                if resolved != str(trigger.get("entity_id", "")).strip().lower():
+                    _LOGGER.info("Update auto-resolved: %s -> %s",
+                                 trigger.get("entity_id"), resolved)
+                trigger["entity_id"] = resolved
 
         actions = None
         if actions_raw:

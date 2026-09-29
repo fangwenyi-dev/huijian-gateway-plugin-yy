@@ -56,15 +56,11 @@ class Publisher:
                     pass
             self._zco = None
 
-    def update_props(self, props: dict) -> None:
-        self.props.update(props)
-        if self._zco and self._info:
-            try:
-                self._info.properties = {k: str(v) for k, v in self.props.items()}
-                self._zco.update_service(self._info)
-            except Exception:
-                pass
-
+    # v1.1.27 项7：删除 update_props()。全仓零调用（grep 仅此定义处），且实现
+    # 必失效——zeroconf 的 ServiceInfo.properties 是只读 property（赋值不会改写
+    # 已注册记录），异常又被裸 except 吞掉，"更新广播属性"从来没生效过。留在
+    # 这里只会让下一次改动的人以为有热更新通道（要加真实现须走
+    # update_service + 可写属性，并带实测钉）。
     def close(self) -> None:
         try:
             if self._zco and self._info:

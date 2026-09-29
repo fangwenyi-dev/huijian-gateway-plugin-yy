@@ -47,6 +47,16 @@ WINDOW_ACTION_MAPPING = {
     "a": ["A", "a", "内倒", "内岛"],
 }
 
+
+# v1.1.27-r2（金标复测）：帘族判据单点——extract 顶层短路与 intent_turn 的
+# "泛称窗升级"闸共用同一份名单（旧实现两处各写一份，帘族在按钮对地形漏网）。
+_CURTAIN_FAMILY_KEYS = ("帘", "纱窗", "百叶")
+
+
+def is_curtain_family(name: str) -> bool:
+    """帘族（窗帘/纱窗/百叶…）＝ cover 设备，绝不是按压式窗控。永不抛。"""
+    return any(k in str(name or "").lower() for k in _CURTAIN_FAMILY_KEYS)
+
 REMOVE_KEYWORDS = ["删除", "remove", "shan_chu", "shanchu", "delete"]
 
 # Pre-computed set of all window names (keys + values) for fast reuse
@@ -163,7 +173,7 @@ def extract_window_name(name: str) -> str | None:
     # 自本批收 电动窗 键后同型必炸）；顶层先裁，命中即 None。调用方
     # （intent_window_control）对「具体名未识别」走如实拒收分支，不会误升级
     # 全窗（is_generic_window_name('电动窗帘')=False）。
-    if any(k in name_lower for k in ("帘", "纱窗", "百叶")):
+    if is_curtain_family(name_lower):
         _LOGGER.info("Curtain-family name '%s' is not a window, refusing", name)
         return None
     # 通用名称（"所有窗户"、"全部窗"等）不匹配具体窗户类型，返回None触发全窗查找

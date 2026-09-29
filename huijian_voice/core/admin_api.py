@@ -204,15 +204,42 @@ async def _models(request):
     return web.json_response(ctx.store.snapshot())
 
 
+def _ensure_accepted(store, key: str) -> bool:
+    """「强制重取」是否真被受理（v1.1.27）。
+
+    `model_store.ensure_async` 是真 single-flight：同键已有活线程就**静默 return**
+    （什么都没做），调用方无从分辨——旧 handler 因此恒回 `ok:true`，把未受理的
+    「重新下载」报成已受理（M11 逃生门被抵消：错版包永远等不到重取）。
+    判据＝**线程换代**：调用前后仍是同一条活线程 ⇒ 本次未被受理。store 无 `_threads`
+    （替身/旧形态）或判据自身故障 ⇒ 按已受理（不新增哑口，同全仓 fail-open 纪律）。
+    永不抛。"""
+    try:
+        threads = getattr(store, "_threads", None)
+        before = threads.get(key) if isinstance(threads, dict) else None
+        store.ensure_async(key, force=True)
+        after = threads.get(key) if isinstance(threads, dict) else None
+        return not (isinstance(threads, dict) and before is not None and before is after)
+    except Exception:  # noqa: BLE001 判不了=按已受理
+        logger.exception("[模型] 强制重取受理判据异常（按已受理）")
+        return True
+
+
 async def _model_download(request):
     ctx = request.app[CTX_KEY]
     body = await _json_body(request)
     key = str(body.get("key", ""))
     if key not in ctx.store.keys():
         return web.json_response({"message": f"未知模型 {key}"}, status=400)
-    ctx.store.ensure_async(key, force=True)  # M11：用户点按钮=明确重取意图，
-    # 旧实现不传 force，对错版「已就绪」包彻底 no-op（逃生门断）
-    return web.json_response({"ok": True})
+    # M11：用户点按钮=明确重取意图（旧实现不传 force，对错版「已就绪」包彻底
+    # no-op＝逃生门断）。v1.1.27：受理与否**如实回执**——单飞未受理时回非 2xx +
+    # message（面板 post() 会把它弹给用户），不再一律 ok:true。
+    if not _ensure_accepted(ctx.store, key):
+        return web.json_response(
+            {"ok": False, "accepted": False,
+             "message": "该模型已有一次获取任务在进行中（同键单飞），本次「重新下载」"
+                        "未被受理——等当前任务结束（进度看本页状态列）再点"},
+            status=409)
+    return web.json_response({"ok": True, "accepted": True})
 
 
 async def _endpoints(request):
@@ -264,7 +291,12 @@ async def _nlu_test(request):
 async def _tts_test(request):
     ctx = request.app[CTX_KEY]
     body = await _json_body(request)
-    text = str(body.get("text", "好的，客厅的灯打开了")).strip()[:200]
+    # 缺键 → 默认话术；显式 null → 空串（旧写法 `str(body.get("text", 默认))` 把
+    # `{"text": null}` 派成字面 "None" 去合成并播出来，v1.1.27 起如实拒绝）。
+    raw = body.get("text", "好的，客厅的灯打开了")
+    text = str(raw if raw is not None else "").strip()[:200]
+    if not text:
+        return web.json_response({"message": "text 必填（null/空串不合成）"}, status=400)
     # v1.0.65（TTS 深审 F3）：试听必须有超时。旧版无闸且云档不预载模型——
     # 首次点试听=请求路径内 348MB 冷下载（ensure_loaded 持锁跨下载），浏览器
     # ~60s 先 504 而 handler 仍挂；反复点击+卫星播报各占 1 个 executor 线程堵

@@ -198,17 +198,28 @@ class McpTransport(WsTransport):
             except Exception as err:
                 self.logger.error("Error closing WebSocket: %s", err)
 
-    async def _process_text_message(self, msg: aiohttp.WSMessage):
-        """Process a text message from WebSocket."""
+    async def _process_text_message(self, msg: aiohttp.WSMessage) -> bool:
+        """Process a text message from WebSocket. False = 消费端已消失（须收口重连）。
+
+        v1.1.27（MCP 通道"首帧即死"根修）：旧形态本方法**全路径无 return**
+        （恒 None），而基类 reader 判 `if not await self._process_text_message(msg):
+        break`（ws_transport 文本帧分支）——收到第一条文本帧即被判"消费端已消失"，
+        break → 任务组拆 → 重连 → 再拆：MCP 通道永久不可用 + 重连风暴。
+        返回契约与基类同判：解析失败=True（链接保持，仅留痕），交付结果由
+        `_deliver` 收口（交付超时/消费端消失才 False，绝不裸 send 无限挂）。
+        """
         try:
             json_data = msg.json()
             message = types.JSONRPCMessage.model_validate(json_data)
-            self.logger.debug("Process incoming msg: %s", message)
-            if SessionMessage:
-                message = SessionMessage(message)
-            await self._recv_writer.send(message)
         except Exception as err:
-            self.logger.error(f"Invalid incoming msg: {msg}, error: {err}")
+            # 隐私/日志纪律同基类：原始帧只留 120 字符定位形制，全文降 DEBUG
+            self.logger.error("Invalid incoming msg: %r (%s)", str(msg.data)[:120], err)
+            self.logger.debug("Invalid incoming msg 全文: %s", msg)
+            return True   # 解析失败与交付无关，链接保持（旧形态恒 None=当场拆连）
+        self.logger.debug("Process incoming msg: %s", message)
+        if SessionMessage:
+            message = SessionMessage(message)
+        return await self._deliver(self._recv_writer, message)
 
     async def async_remove_entry(self):
         entry = self.entry

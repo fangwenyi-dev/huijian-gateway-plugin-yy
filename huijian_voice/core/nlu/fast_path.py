@@ -182,7 +182,12 @@ _ACTION_PATTERNS: list[tuple[re.Pattern, str, Any]] = [
     (re.compile(r"^(brighter|brighten)"), "AdjustDeviceAttribute", {"attribute": "brightness", "delta": "+20"}),
     (re.compile(r"^(dimmer|dim)"), "AdjustDeviceAttribute", {"attribute": "brightness", "delta": "-20"}),
     # ── 色温调节 ──
-    (re.compile(r"^(色温调到|色温|调到)\s*(\d+)\s*[kK]"), "AdjustDeviceAttribute", {"attribute": "color_temperature", "delta": "$2"}),
+    # v1.1.27：色温族**裸数值（不带 K）**收口——三表（本表/_DELTA_SCANNERS/
+    # _ATTR_ONLY）此前一律要求 K，实测「色温调到5000」整句 MISS，而亮度族
+    # 「亮度调到60」早可裸数（同话术两套口径=漂移）。裸数只在**属性词「色温」
+    # 在场**时按 K 收（3~4 位；「温度」不受影响——「温度调到5000」仍是二义）。
+    (re.compile(r"^(色温调到|色温)\s*(\d{3,4})\s*[kK]?"), "AdjustDeviceAttribute", {"attribute": "color_temperature", "delta": "$2"}),
+    (re.compile(r"^(调到)\s*(\d+)\s*[kK]"), "AdjustDeviceAttribute", {"attribute": "color_temperature", "delta": "$2"}),
     # v1.1.1 #2/#3：色温相对档锚点（零宽，**不吃字**——属性词得留在 rest 里给
     # _ATTR_ONLY 认族，见 _build_plan 属性词快捷）。过去「把色温调高一点」字面表
     # 全够不到 ⇒ 掉 T1 判成 AdjustTemperature ⇒ 去动**空调**（跨域误执行，与
@@ -295,13 +300,15 @@ _DELTA_SCANNERS: dict[str, list[tuple[re.Pattern, Any]]] = {
         # 裸「到/至」形 2026-09-21 补：「调高亮度到80%」曾被可选组漏掉"到"，
         # 整句掉进 (调高)→+20 相对档——**绝对值被静默丢**，用户要 80% 得到 +20。
         # 「调高/调低…到」双动词形：亮度与数值间允许 ≤2 字间隙、"到"前缀可选。
-        (re.compile(r"(?:调到|设到|调高到|调低到|提高|降低)?\s*亮度[^\d]{0,2}(\d+)"), "$1"),
-        (re.compile(r"亮度\s*(?:到|至)?\s*(\d+)"), "$1"),
+        # v1.1.27 补「调亮到/调暗到」（① 字面表早有此二词，扫描表漏配——实测
+        # 「把客厅射灯亮度调亮到80%」被下方相对档 (调亮)→+20 先收，80% 蒸发）。
+        (re.compile(r"(?:调到|设到|调高到|调低到|调亮到|调暗到|提高|降低)?\s*亮度[^\d]{0,2}(\d+)"), "$1"),
+        (re.compile(r"亮度\s*(?:调到|设到|调亮到|调暗到|到|至)?\s*(\d+)"), "$1"),
         (re.compile(r"百分之\s*([零一二三四五六七八九十百]+)"), "cn:$1"),
         # 裸中文数词形（同 _ACTION_PATTERNS 里那条，2026-09-27 办公实锤「亮度调到一百」
         # 被 klar 读成 1%）。排在「百分之」之后，且 (?!半) 不吃「一半」。
         (re.compile(r"(?:调?到|设到|设为|调成|至)\s*([零一二三四五六七八九十百]+)(?!半)"), "cn:$1"),
-        (re.compile(r"(?:开到|打开到|调到|设到|设为|关到|调高到|调低到)\s*(\d+)\s*[%％]?"), "$1"),
+        (re.compile(r"(?:开到|打开到|调到|设到|设为|关到|调高到|调低到|调亮到|调暗到)\s*(\d+)\s*[%％]?"), "$1"),
         (re.compile(r"调到\s*(\d+)\s*%?"), "$1"),
         (re.compile(r"(?:一半|半数)"), "50"),
         (re.compile(r"(亮一点|亮一些|调亮|亮些|大一点|大一些|高一点|高一些|调高)"), "+20"),
@@ -343,6 +350,9 @@ _DELTA_SCANNERS: dict[str, list[tuple[re.Pattern, Any]]] = {
     ],
     "color_temperature": [
         (re.compile(r"(\d+)\s*[kK]"), "$1"),
+        # v1.1.27：色温裸数值（3~4 位、不带 K）——须与属性词「色温」同行才收
+        # （T1/回扫通道走整句扫描，没有属性词就无从判断裸数是 K 还是亮度）。
+        (re.compile(r"色温\s*(?:调到|调为|调成|调至|设到|设为|设成|调整为|调整到|到|至|为|成)?\s*(\d{3,4})(?![kK0-9])"), "$1"),
         # v1.1.1 #3：相对档排在绝对色温档之前——「色温调暖一点」要的是"再暖
         # 一档"（±500K=集成 light.temperature 的 supported_adjust_step），不是
         # 一步跳到 2700K 最暖档；「暖光/冷光」这类无"调"字的档位词仍走绝对值。
@@ -383,7 +393,10 @@ _ATTR_ONLY = re.compile(
     r"|调|设|整|到|至|为|成)*"
     r"(?P<dir>高|低|亮|暗|大|小|暖|凉|冷|热)?"
     r"(到|至|为|成)?"
-    r"\s*(?P<val>\d{1,3})?\s*(?:[%％度℃])?\s*"
+    # v1.1.27：val 由 {1,3} 放宽到 {1,4} —— 色温族裸数值（不带 K）是 4 位
+    # （「色温调成5000」）；**4 位只对色温有语义**，其余属性词撞 4 位裸数在
+    # _build_plan 里如实 MISS（见该处量程闸），不放宽到会被误吃的量纲。
+    r"\s*(?P<val>\d{1,4})?\s*(?:[%％度℃])?\s*"
     r"(?P<sp>百分之[零一二三四五六七八九十百]+|一半|最大|最小|最高|最低|最强|最弱|满档)?\s*"
     r"(?:的)?(?:一点|一些|点|些)?\s*$")
 _ATTR_DOMAIN = {"亮度": "light", "色温": "light", "温度": "climate",
@@ -658,7 +671,25 @@ _PRONOUNS = frozenset({"它", "他们", "它们", "她们", "这个", "那个", 
 # 句首回指副词（"再亮一点"/"还是关掉"）：剥后置标记，目标继承交给 pipeline
 _ANAPHORA_HEAD = re.compile(r"^(?:还是|还要|再|又|继续)(?=[\u4e00-\u9fff])")
 # SOV 语序锁令："X开锁/X解锁/X上锁/X锁上" → 动作前置（X 为 2-8 字目标词）
+# 否定/疑问字（没不别谁哪）不参与——「还没上锁」是陈述不是命令（见 match 内用法）。
 _LOCK_INV = re.compile(r"^(.{2,8}?)(开锁|解锁|上锁|锁上)(?:了|啦|咯)?$")
+
+# ── v1.1.27 否定祈使判据（match 内"拒执行闸"用；语义见该处注）────────
+# 直接形：否定词（可带口语虚词）紧贴动作动词。裸 没/不/未 一并收——「不开灯」
+# 「没关空调」与「别开灯」同判；V没V 形态由 lookbehind 排除（动词后紧跟否定词）。
+_NEGATION_CMD = re.compile(
+    r"(?<![开关调设拉停顿放锁解])(?:别|不要|不用|不必|不许|不准|甭|勿|莫|没|不|未)"
+    r"(?:要|再|又|去|能|会|可以|给我|帮我|把|将)?"
+    r"(?:打开|开启|关掉|关闭|关上|开了|关了|开一下|关一下|调到|调成|调高|调低|"
+    r"调亮|调暗|调至|设为|设成|拉上|拉下|上锁|解锁|锁上|播放|停止|暂停|启动|"
+    r"开|关|调|设|拉|锁|放|停)"
+    r"(?![^，。！？,、]{0,2}的)")
+# 把字形：「别/不要/勿/莫 + 把/将 + 目标段(≤6字且无动作动词) + 动作动词」——
+# 只收强否定词（裸 没/不 不收）：「把没关的灯打开」不是否定祈使，绝不能误杀。
+_NEG_PREP_FLOW = re.compile(
+    r"(?:别|不要|不用|不必|不许|不准|甭|勿|莫)(?:把|将)[^，。！？,、]{0,6}?"
+    r"(?:打开|开启|关掉|关闭|关上|调到|调成|调亮|调暗|设为|拉上|拉下|上锁|解锁|"
+    r"开|关|调|设|拉|锁)")
 
 
 def is_pronoun(text: str) -> bool:
@@ -1121,6 +1152,28 @@ class FastPath:
         if phrase and phrase == text:
             return await self._scene_plan(phrase, text, trace)
 
+        # v1.1.27 否定祈使拒执行闸（安全级）：否定句此前无全局守卫——「别开灯」
+        # 被 ①② 与 T1 吃成 TurnDeviceOn(灯)，真机语义 = **把灯开了**（反向执行，
+        # 与「内倒→雷达」同级：用户说 A、设备做 B）。canonical 不改写、
+        # is_query_like 返 False、15 类标签无否定类 ⇒ 三层都不设防。
+        # 判据：否定词（别/不要/不用/不许/勿/莫/甭 + 裸 没/不/未）落在开关/调节/
+        # 锁令动作动词前 → 本档一律不接管（落上层兜底"不会/请换个说法"），
+        # 既不给 Turn* 也不给 ControlWindow/Adjust（含反向形态）。
+        # 两道护栏（宁欠勿过，防误杀真命令）：
+        #   ① V没V/V不V（「关没关紧的窗关上」「开没开过的灯都打开」）是**中段
+        #      修饰**不是祈使——否定词紧跟动词后，前置动词字用 lookbehind 排除；
+        #   ② 「没关的灯打开」这类定语小句（动词后紧接「的」）不是祈使，词尾排除。
+        #      v1.1.27-r2（金标复测）：**补语形**同属定语小句——「没关紧的窗关上」
+        #      「没关好的灯关掉」等 6 例曾被只挡紧邻「的」的旧判据误杀（真命令落
+        #      MISS）。词尾排除放宽为"动词后 0~2 字内出现「的」即定语"（≤2 字覆盖
+        #      紧/好/完/严/上/掉 等单字补语；真否定祈使「别开灯」「不要关灯」无
+        #      「的」，不受影响）。
+        # 内倒族动词（倒/内倒）**不入表**：本仓 STT 近音把「内倒」听成「别倒」
+        # 是既有救援形态（targets._generic_rescue 按 bie/nei 一音节之差救回），
+        # 收进来会把「打开书房别倒窗」这条真命令误杀。
+        if _NEGATION_CMD.search(text) or _NEG_PREP_FLOW.search(text):
+            return self._miss(trace, "否定句→不接管(拒执行)")
+
         # 连排句绝不在单发通路里执行（2026-09-10 真机实锤）：无连接词的动词连排
         # （"关闭办公室射灯关闭办公室平开窗"）必须由 pipeline 链发切分逐段执行；
         # 走单发会被 T0 当成一句——轻则第一子句被吃成区域残渣（"办公室射灯关闭
@@ -1398,7 +1451,26 @@ class FastPath:
             area, attr_word = mm.group(1) or "", mm.group(2)
             _attribute = extra.get("attribute") or _T0_ATTR_WORD.get(attr_word, "")
             _dl = str(extra.get("delta") or "").strip()
+            # v1.1.27 @绝对值哨兵泄漏修复：本支此前把 extra 的哨兵**原样**带进 args
+            # ——「打开一半的亮度」产 attribute='@absolute'（集成注册表无此名=
+            # unsupported，值 50 静默丢；v1.1.1 的 test_sentinel_attribute_never_
+            # escapes 只覆盖了动词+绝对值原形，本支漏网）。此处就地按**属性词族**
+            # 落名（同 _build_plan 末端 resolve_absolute_lane 口径），且要求落出的
+            # 属性名与用户明说的属性词一致——「打开一半的色温」这类族内对不上的
+            # 形态如实 MISS，绝不改写成另一个属性（宁 MISS 不猜，v1.0.69 红线）。
+            if _attribute == _ABSOLUTE:
+                _dom0 = _ATTR_DOMAIN.get(attr_word, "light")
+                _res = resolve_absolute_lane([_dom0], _dl)
+                if _res is None or _res[0] != _T0_ATTR_WORD.get(attr_word):
+                    return self._miss(trace, f"属性句绝对值落不了族:{rest_text}")
+                _attribute, _dl = _res
+                trace.append(f"绝对值族落:{_attribute}={_dl}@{_dom0}")
             _val, _dir, _sp = mm.group("val"), mm.group("dir"), mm.group("sp")
+            if _val and len(_val) >= 4 and attr_word != "色温":
+                # v1.1.27 量程闸：4 位裸数只有色温族（K）有语义（亮度 0~255、
+                # 开度/湿度/风速 0~100、温度两位）；别的属性词吃 4 位裸数是 typo
+                # 幻觉，如实 MISS 不猜（v1.0.69 红线）。
+                return self._miss(trace, f"四位数超{attr_word}量程:{rest_text}")
             if _val:
                 # 方向字在前 = **相对档**（数据集实锤：「把空调温度调高2度」=+2，
                 # 旧实现取绝对值 2 → 空调被设到 2℃，H1 同族谎报）；无方向字才是
@@ -1448,7 +1520,7 @@ class FastPath:
                         trace=trace + ["温度相对档→Adjust+climate(H1)"])
 
         _was_on = intent == "TurnDeviceOn"
-        area, name, score = T.parse_target(rest_text, action_match=_any_action_match)
+        area, name, score = T.parse_target(rest_text)
         # 连排残渣守卫（2026-09-10 真机）：链发没接住的连排句会被 T0 当成**一句**，
         # parse_target 把第一个动作子句整段吃成"区域名"（"办公室射灯关闭办公室"）。
         # 区域名里出现动作动词＝这句其实是两句，绝不能拿残渣区域去执行——真机里
@@ -1740,10 +1812,6 @@ def _opener_word(text: str) -> Optional[str]:
         if w in t:
             return w
     return None
-
-
-def _any_action_match(rest: str) -> bool:
-    return any(p.match(rest) for p, _, _ in _ACTION_PATTERNS)
 
 
 def _to_int(delta: Any) -> int:

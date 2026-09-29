@@ -89,24 +89,75 @@ class KlarClient:
         self._probing = False          # P1-9 半开单飞：冷却到期后只放一条快速探针
         self.last_error = ""
         self.parsed_ok = 0     # 观测计数（状态页/排障用）
+        # v1.1.27：配置项解析失败计数（与请求失败 _fails 分列——配置问题不该
+        # 熔断请求，但**必须**在 state() 里看得见，见 _opt 注）。
+        self.config_fails = 0
+        self._bad_conf_seen = ""
 
     # ── 配置（点键，热改随 settings 保存即时生效）────────────────
+    @staticmethod
+    def _num_opt(raw, default: float) -> tuple[float, str]:
+        """数值配置项 → (值, 非法原值 repr 或 '')。缺失/非法一律按缺省。永不抛。"""
+        if raw is None:
+            return default, ""
+        if isinstance(raw, bool):
+            return default, repr(raw)          # True/False 不是置信度
+        try:
+            return float(raw), ""
+        except (TypeError, ValueError):
+            return default, repr(raw)
+
     def _opt(self):
+        """配置快照。**永不抛**（v1.1.27）。
+
+        病灶：min_confidence 非数值时 `float(...)` 直抛 ValueError，而两个调用点
+        （parse/to_plan）都在 try **之外** ⇒ 每句被 match 的兜底 try 折叠成 None，
+        `_note_fail` 一次都不计数：state() 恒报 fails=0/circuit_open=false，而
+        引擎其实是**永久停用**——降级完全不可观测（与 v1.0.96「降级要带回具名
+        分因」同口径）。现在非法值按缺省处理（引擎照常可用），非法原值作为第
+        7 项带回，由 parse() 计数留痕（config_fails + last_error）。
+        同一判据顺带盖住 timeout_s（同函数同缺陷类：非法值同样会炸穿 try 外）。
+        """
         s = self.settings
+        min_conf, bad_conf = self._num_opt(s.get("klar.min_confidence"),
+                                           DEFAULT_MIN_CONFIDENCE)
+        timeout, bad_to = self._num_opt(s.get("klar.timeout_s"), DEFAULT_TIMEOUT_S)
+        if timeout <= 0:
+            # v1.1.27-r2（金标复测）：0/负数不是"合法超时"——aiohttp 的 total<=0
+            # 语义是**永不超时**，会把一条坏配置静默变成挂死请求。非正一律按
+            # 缺省处理并留痕（与非法值同列 config_fails）。
+            bad_to = bad_to or repr(timeout)
+            timeout = DEFAULT_TIMEOUT_S
+        bad = ""
+        if bad_conf:
+            bad = (f"配置非法:klar.min_confidence={bad_conf}"
+                   f"（按缺省 {DEFAULT_MIN_CONFIDENCE} 处理）")
+        if bad_to:
+            bad = (bad + "；" if bad else "") + (
+                f"配置非法:klar.timeout_s={bad_to}（按缺省 {DEFAULT_TIMEOUT_S} 处理）")
         return (
             bool(s.get("klar.enabled", True)),
             str(s.get("klar.url") or DEFAULT_URL).rstrip("/"),
             str(s.get("klar.language") or DEFAULT_LANGUAGE),
-            float(s.get("klar.timeout_s") or DEFAULT_TIMEOUT_S),
-            float(s.get("klar.min_confidence")
-                  if s.get("klar.min_confidence") is not None
-                  else DEFAULT_MIN_CONFIDENCE),
+            timeout,
+            min_conf,
             str(s.get("klar.token") or ""),
+            bad,
         )
+
+    def _note_config(self, bad: str) -> None:
+        """配置非法留痕（计数 + 具名分因；同一非法值只 WARN 一次，防刷屏）。"""
+        self.config_fails += 1
+        self.last_error = bad
+        if bad != self._bad_conf_seen:
+            self._bad_conf_seen = bad
+            logger.warning("[Klar] %s（引擎按缺省配置继续服务）", bad)
 
     # ── 解析 ────────────────────────────────────────────────────
     async def parse(self, text: str) -> Optional[dict]:
-        enabled, url, lang, timeout, _min_conf, token = self._opt()
+        enabled, url, lang, timeout, _min_conf, token, bad = self._opt()
+        if bad:
+            self._note_config(bad)
         if not enabled or not (text or "").strip():
             return None
         probe = False
@@ -162,6 +213,7 @@ class KlarClient:
             "probing": self._probing,
             "parsed_ok": self.parsed_ok,
             "last_error": self.last_error,
+            "config_fails": self.config_fails,   # v1.1.27：配置非法留痕（不熔断）
         }
 
     def _note_fail(self, err: str) -> None:
@@ -190,7 +242,7 @@ class KlarClient:
         """契约裁决（纯函数，可单测）：execute + 白名单全命中 + 置信门 → Plan。"""
         if not obj:
             return None
-        _en, _url, _lang, _to, min_conf, _tk = self._opt()
+        _en, _url, _lang, _to, min_conf, _tk, _bad = self._opt()
         decision = obj.get("decision")
         if not isinstance(decision, dict) or decision.get("type") != "execute":
             return None                      # clarify/confirm/reject/chat：宁漏勿错

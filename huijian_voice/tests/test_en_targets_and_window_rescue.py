@@ -248,8 +248,12 @@ def test_dongdianchuang_six_table_sync_source_pins():
     ctl = (CC / "intent_window_control.py").read_text(encoding="utf-8")
     assert "电动窗" in ctl, "intent 描述 valid names 未同步（LLM 槽位引导面）"
     # 帘族短路闸（本批同修存量缺陷：'智能窗帘' 曾被 '智能窗' 键截胡）
-    assert 'if any(k in name_lower for k in ("帘", "纱窗", "百叶")):' in const, \
+    # v1.1.27-r2：闸与名单收敛成单点 is_curtain_family（intent_turn 的"泛称窗
+    # 升级"闸共用同一份名单）——钉改钉结构不钉旧裸字面量。
+    assert 'if is_curtain_family(name_lower):' in const, \
         "extract_window_name 帘族顶层闸丢失"
+    assert 'def is_curtain_family(' in const and '("帘", "纱窗", "百叶")' in const, \
+        "帘族名单单点丢失（extract 与本闸必须同源）"
 
 
 def test_window_type_curtain_shortcircuit():

@@ -778,7 +778,13 @@ class Executor:
         ok_n, bad_n, errs = self._receipt(results)
         if ok_n == 0 and bad_n > 0:
             why = errs[0] if errs else "设备没接受这条指令"
-            self.last_run = {"steps": len(steps), "applied": 0, "indeterminate": False}
+            # v1.1.27：applied 语义＝本次"已生效步数"（旧写法恒写 0）。多腿链前腿
+            # 已真执行（它的回执没有 per-entity 行，`_receipt` 在 :944-945 跳过）
+            # 而末腿逐台全败时，写 0 会让 pipeline._exec_risk 的 `applied>0` 判据
+            # 失明 ⇒ 放行降级重放(:760)/LLM 复议(:807)，已执行的腿被再做一遍。
+            self.last_run = {"steps": len(steps),
+                             "applied": self._applied_steps(results),
+                             "indeterminate": False}
             # v1.1.17：zh_error 自带"抱歉，"字头，旧写法再拼一次 ⇒ 播报成「抱歉，抱歉，…」。
             reply = zh_error(why, klar=plan.source == "klar")
             # v1.1.19 复审：链里前面几步可能已真执行（本支在循环之后）——按 _step_say
@@ -842,6 +848,18 @@ class Executor:
         tag = f"(+%d步)" % (len(steps) - 1) if len(steps) > 1 else ""
         if partial and not reply.endswith(partial):
             reply = reply.rstrip("。") + partial      # 部分失败点名，不静默全绿
+        # v1.1.27-r2（金标复测）：集成侧把窗侧失败折进 `partial_error` 返回；core
+        # 旧无消费者 ⇒ 用户只听「好的，…关了」（金标复测 V1-项3 实锤）。按"部分
+        # 失败点名"同口径并入话术：去重、不改成功口径（顶层仍如实 True）。
+        _extra_partials: list = []
+        for _r in (results or []):
+            if isinstance(_r, dict):
+                _pe = str(_r.get("partial_error") or "").strip()
+                if _pe and _pe not in _extra_partials:
+                    _extra_partials.append(_pe)
+        for _pe in _extra_partials:
+            if _pe and _pe not in reply:
+                reply = reply.rstrip("。") + "（" + _pe.strip("（）") + "）"
         self.last_run = {"steps": len(steps), "applied": len(steps),
                          "indeterminate": False}
         logger.info("[执行] %s %s%s → 成功 | %s", plan.intent, plan.args, tag, reply)
@@ -962,6 +980,28 @@ class Executor:
         bad_n = len(dict.fromkeys(bad_keys))
         return ok_n, bad_n, errs
 
+    @classmethod
+    def _applied_steps(cls, results: list) -> int:
+        """本次**已生效步数**（v1.1.27 收口，`last_run["applied"]` 的唯一真源）。
+
+        逐腿过 `_receipt`：有逐实体行且**全失败**的腿不算（它确实没生效）；
+        其余腿都算——能走到 `results.append` 说明顶层 success 为真，而
+        `_receipt`（:944-945）对无逐实体行的腿（HA 内置意图通道/klar 直调服务、
+        老返回形态）本就跳过不该凭空判失败。下游 `pipeline._exec_risk` 按
+        `applied>0` 判"这一轮可能已经生效"，据此禁降级重放/LLM 复议重做——
+        宁可多拦一次重做，绝不把已执行的动作再做一遍。永不抛（判不了＝计入，
+        与"结果不确定"同向保守）。"""
+        n = 0
+        for r in results or []:
+            try:
+                ok, bad, _ = cls._receipt([r])
+            except Exception:  # noqa: BLE001 判不了=按已生效（保守，见 docstring）
+                n += 1
+                continue
+            if ok > 0 or bad == 0:
+                n += 1
+        return n
+
     # ── klar grounded 步骤 → 直调服务映射 ────────────────────────
     # 引擎 full 模式已把"办公室射灯"解析成 entity_id；这类步骤绕开 intent
     # handler 直调服务（klar 自家集成同款路线），每个 intent 只带该服务
@@ -1077,9 +1117,18 @@ class Executor:
         "TurnDeviceOn", "TurnDeviceOff", "ToggleDevice",
     })
     # 非"可开关设备"域（HA core 语义：这些域的实体没有 turn_on 动作）
+    # v1.1.27 收口：本表**必须**与 capability.UNTOGGLEABLE_DOMAINS（单一来源，
+    # 读只域 ∪ 无开关域，并集更严）逐位一致——两处手抄的结果是 executor 少抄了
+    # weather/person/calendar…、capability 少抄了 number/select/button…，
+    # `_turn_gate` 的域预检实际只覆盖半张表（另半张域的实体照样被喂 turn_on）。
+    # 一致性由 tests/test_v1127_core_ops.py 钉死（字面镜像的原因见该文件：既有
+    # tests/test_v1090_executor_gate_coverage 用 AST literal_eval 直读本属性）。
     _UNTOGGLEABLE_DOMAINS = frozenset({
-        "sensor", "binary_sensor", "number", "select", "text", "button",
-        "image", "datetime", "date", "time", "update", "event",
+        "sensor", "binary_sensor", "weather", "update", "person", "image",
+        "calendar", "zha", "system_log", "provisioning", "stt", "tts", "notify",
+        "conversation", "scene_config", "sun", "zone", "geo_location", "backup",
+        "hassio", "config", "diagnostics", "analytics",
+        "number", "select", "text", "button", "datetime", "date", "time", "event",
     })
     # 窗族设备词：先剔除 窗帘/纱窗（合法 cover，开关路正常）再查
     _WINDOW_HINT_WORDS = ("窗", "开合器", "内倒", "推拉", "平开")

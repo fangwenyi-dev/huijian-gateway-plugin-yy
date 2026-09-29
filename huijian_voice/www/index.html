@@ -16,8 +16,8 @@
      v1.0.42 的 #1d1750「过紫」与更早 #030712「过黑」均已作废，勿回潮 -->
 <meta name="theme-color" content="#071426">
 <title>慧尖HA语音插件</title>
-<link rel="stylesheet" href="css/huijian.css?v=1.1.26">
-<link rel="stylesheet" href="css/voice.css?v=1.1.26">
+<link rel="stylesheet" href="css/huijian.css?v=1.1.27">
+<link rel="stylesheet" href="css/voice.css?v=1.1.27">
 </head>
 <body>
 <!-- 「星辰大海」背景层（与网关加载项同一设计标准/同一固定种子＝同一片天）：
@@ -315,7 +315,7 @@
 
 <script>
 "use strict";
-const CURRENT_VERSION = "1.1.26";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
+const CURRENT_VERSION = "1.1.27";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
 // 音色表 = kokoro-multi-lang-v1_1 官方 103 sid 全表（k2-fsa docs sid 表实证；
 // 标注=对用户上传试听样本的 CAM++ 声纹溯源榜：v1_1 不含晓晓/云扬，
 // sid18=zf_026 女声最似晓晓(0.454 全场最近)，sid81=zm_055 最似云扬）
@@ -404,8 +404,8 @@ document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{
    死掉后文件冻结，页面会永远显示"正常"。纯客户端时效判据：连续 ≥3 次轮询
    （4s×3≈12s）拿到同一个 ts 即认定状态停更；不用本地时钟与 ts 作差（无时钟
    假设），只比较 ts 是否推进。 */
-let _stTs = null, _stSame = 0;
-async function refreshStatus(){
+let _stTs = null, _stSame = 0, _stBusy = false;
+async function refreshStatus(){ if (_stBusy) return; _stBusy = true;   // v1.1.27：在飞闩——慢响应下旧形态多轮并发互踩冻结计数/DOM（释放见函数末 finally）
   try {
     const st = await api("/status.json", {});
     const _ts = (st && st.ts != null) ? st.ts : null;
@@ -430,7 +430,7 @@ async function refreshStatus(){
       statRow("活动会话", `<span class="pill ${(st.sessions>0&&!frozen)?'ok':'warn'}">${st.sessions}${frozen?" · 停更":""}</span>`),
     ].join("");
   } catch(e) { _stTs = null; _stSame = 0;   // 拉不到文件=另一条真实失败路径，重新起算
-              $("#haver").textContent = "核心未就绪"; }
+              $("#haver").textContent = "核心未就绪"; $("#statusGrid").innerHTML = statRow("服务状态", '<span class="pill warn">状态不可读（status.json 拉取失败）</span>'); }   // v1.1.27：拉不到即置灰，旧形态留着上一轮绿字「正常」继续骗人
   try {
     const ms = await api("/models_status.json", {});
     // v1.0.35 修复三连：①事实文件外壳是 {updated, models}（model_store 双写者
@@ -452,7 +452,7 @@ async function refreshStatus(){
     if (mm !== ms && ms && ms.updated) {
       $("#modelPills").innerHTML += `<div class="hint" style="grid-column:1/-1">状态更新于 ${new Date(ms.updated*1000).toLocaleTimeString()}</div>`;
     }
-  } catch(e){ $("#modelPills").textContent = "models_status.json 未生成"; }
+  } catch(e){ $("#modelPills").textContent = "models_status.json 未生成"; } finally { _stBusy = false; }
 }
 setInterval(refreshStatus, 4000); refreshStatus();
 
@@ -490,7 +490,7 @@ let ttsFmt = "", ttsRate = 0;
 function wirePresets(){
   ["stt","tts","llm"].forEach(function(kind){
     const sel = $("#"+kind+"_preset"), hint = $("#"+kind+"_preset_hint");
-    if (!sel) return;
+    if (!sel) return; sel.add(new Option("（未选）", ""));   // v1.1.27：占位项（旧形态首项被隐式选中，用户以为已选平台）
     PRESETS[kind].forEach(function(p){ sel.add(new Option(p.name, p.id)); });
     sel.onchange = function(){
       const p = PRESETS[kind].find(function(x){ return x.id===sel.value; });
@@ -508,7 +508,7 @@ async function loadSettings(){
   try { S = await api("/api/settings"); } catch(e){ toast("读取设置失败："+e.message); return; }
   _kokoroSid = String(S.tts.sid ?? KOKORO_DEFAULT_SID);   // Kokoro 档的选择；音色表由 syncBoxes() 按引擎重建
   $("#tts_speed").value = S.tts.speed ?? 1.25;
-  $("#stt_provider").value = S.stt.provider==="cloud" ? "cloud" : "local_paraformer";
+  $("#stt_provider").value = String(S.stt.provider||"").startsWith("cloud") ? "cloud" : "local_paraformer";
   // v1.0.99+ 本地模型切换（stt.local_model：sensevoice|paraformer|firered_ctc）：
   // 未知值按默认档显示（引擎读侧同判据——_primary_kind 非表值一律回落 sensevoice）。
   // 旧写法是 paraformer/其余 的二元三元式：第三档会被显示成默认档（用户以为切了
@@ -521,9 +521,9 @@ async function loadSettings(){
   // 显示"本地"而实际跑云，且下一次任意保存把它静默改写成 local_kokoro（云配
   // 置丢失、行为翻转、无警告）。放宽为前缀判等，未知值如实提示不静默。
   $("#tts_provider").value = String(S.tts.provider||"").startsWith("cloud") ? "cloud"
-    : ["local_matcha","local_melo"].includes(S.tts.provider) ? S.tts.provider : "local_kokoro";
+    : ["local_matcha","local_melo"].includes(S.tts.provider) ? S.tts.provider : "local_melo";
   if (S.tts.provider && !["local_kokoro","local_matcha","local_melo","cloud","cloud_openai_compat"].includes(S.tts.provider))
-    toast("tts.provider 值 "+S.tts.provider+" 未知，已按云档显示；保存将写入下拉框选项");
+    toast("tts.provider 值 "+S.tts.provider+" 未知，已按默认档 local_melo 显示（与后端回落一致）；保存将写入下拉框选项");
   $("#stt_cloud_base").value = S.stt.cloud?.base_url||""; $("#stt_cloud_model").value = S.stt.cloud?.model||"";
   $("#tts_cloud_base").value = S.tts.cloud?.base_url||""; $("#tts_cloud_voice").value = S.tts.cloud?.voice||"";
   $("#tts_cloud_model").value = S.tts.cloud?.model||""; ttsFmt = S.tts.cloud?.response_format||""; ttsRate = S.tts.cloud?.sample_rate||0;
@@ -564,7 +564,7 @@ function syncBoxes(){
 const voiceEngine = () => {          // 下拉值 → 生效引擎档（未知 local_* 回落 Kokoro，同后端 _provider()）
   const p = String($("#tts_provider").value);
   if (p.startsWith("cloud")) return "cloud";
-  return Object.prototype.hasOwnProperty.call(VOICE_TABLES, p) ? p : "local_kokoro";
+  return Object.prototype.hasOwnProperty.call(VOICE_TABLES, p) ? p : "local_melo";
 };
 function renderVoiceTable(){
   const sel = $("#tts_sid"), eng = voiceEngine(), was = sel.dataset.eng;
@@ -732,10 +732,10 @@ $("#ma_add").onclick = () => {
 };
 $("#saveBtn").onclick = async ()=>{
   const _ma = _maCollect();          // 区域映射行编辑器 → {区域: entity}；半配行已 toast 拦下
-  if (_ma === undefined) return;
+  if (_ma === undefined) return; const _spd = parseFloat($("#tts_speed").value); if (!Number.isFinite(_spd) || _spd < 0.6 || _spd > 2) { const _cur = (S && S.tts && S.tts.speed != null) ? S.tts.speed : 1.25; $("#tts_speed").value = _cur; toast("语速需填 0.6–2.0（已回填当前生效值 " + _cur + "），确认后请再点保存"); return; }   // v1.1.27：留空不得静默改写 1.0（旧写法 parseFloat("")||1）
   const body = {
     stt:{ provider:$("#stt_provider").value, local_model:$("#stt_local_model").value, cloud:{ base_url:$("#stt_cloud_base").value, model:$("#stt_cloud_model").value, ...( $("#stt_cloud_key").value?{api_key:$("#stt_cloud_key").value}:{}) } },
-    tts:{ provider:$("#tts_provider").value, ...ttsSidPatch(), speed:parseFloat($("#tts_speed").value)||1,
+    tts:{ provider:$("#tts_provider").value, ...ttsSidPatch(), speed:_spd,
           cloud:{ base_url:$("#tts_cloud_base").value, model:$("#tts_cloud_model").value, voice:$("#tts_cloud_voice").value, ...(ttsFmt?{response_format:ttsFmt}:{}), ...(ttsRate?{sample_rate:ttsRate}:{}), ...( $("#tts_cloud_key").value?{api_key:$("#tts_cloud_key").value}:{}) } },
     nlu:{ enabled:$("#nlu_enabled").checked, textcnn_enabled:$("#nlu_textcnn").checked, query_local:$("#nlu_query").checked, creation_enabled:$("#nlu_creation").checked, corrections_extra: safeJson($("#nlu_corr").value, {}) },
     llm:{ enabled:$("#llm_enabled").checked, base_url:$("#llm_base").value, model:$("#llm_model").value, stream:$("#llm_stream").checked, allow_scene_write:$("#llm_scene_write").checked, allow_automation_write:$("#llm_auto_write").checked, ...( $("#llm_key").value?{api_key:$("#llm_key").value}:{}) },
@@ -810,7 +810,7 @@ async function loadOta(){
   let dv={devices:[]}, fw={items:[]};
   try { dv = await api("/api/devices"); } catch(e){ dv={devices:[],error:e.message}; }
   try { fw = await api("/api/firmware"); } catch(e){ fw={items:[],error:e.message}; }
-  _otaLatest = dv.latest || fw.latest || "";
+  _otaLatest = String(dv.latest||"") || (dv.error ? String(fw.latest||"") : "");   // v1.1.27：严格源（/api/devices.latest=仅可 OTA 版本）优先；宽松源（/api/firmware.latest=只按在盘且非哈希不符）只在严格源不可得（台账请求失败）时兜底——0 字节包/装不进槽的产线合并镜像不得再进升级话术
   $("#otaDevNote").textContent = dv.error || fw.error || "";
   $("#fwLatest").textContent = _otaLatest ? ("最新在盘版本 v"+_otaLatest) : "（尚无已上架固件）";
   const tb = $("#otaDevTable tbody"); tb.innerHTML="";
@@ -822,7 +822,7 @@ async function loadOta(){
     const tr=document.createElement("tr");
     const remote=(d.ota_services||[]).length>0;
     const badge = d.updatable ? pill("可升级→"+_otaLatest,"warn")
-                : (d.fw_version ? pill(remote?"已最新·可远程":"已最新","ok") : pill("未上报","mut"));
+                : (d.fw_version ? (_otaLatest ? pill(remote?"已最新·可远程":"已最新","ok") : pill("无可升级包","mut")) : pill("未上报","mut"));   // v1.1.27：无在架包时不得说「已最新」
     const fv=d.fw_version?`${esc0(d.fw_version)}${d.fw_source==="入驻时"?' <span class="mut">（入驻时）</span>':""}`:"未上报";
     tr.innerHTML = `<td>${esc0(d.name||d.mac||d.speak_id)}<br><span class="mut code">${esc0(d.mac||"")}</span></td>
       <td>${esc0(d.area||"-")}</td>
@@ -941,7 +941,7 @@ async function loadFunnel(){
     $("#funnelBox").innerHTML = h+"</tbody></table>";
     const mi = r.mining||{};
     $("#funnelMeta").textContent = `累计 ${f.total||0} 句；回流语料 ${mi.file||""} ${mi.enabled?(mi.lines+" 条，仅本机"):"已停用"}`;
-  }catch(e){ $("#funnelBox").innerHTML='<span style="color:var(--bad)">读取失败：'+e.message+"</span>"; }
+  }catch(e){ $("#funnelBox").innerHTML='<span style="color:var(--bad)">读取失败：'+esc0(e.message)+"</span>"; }   // v1.1.27：错误串进 innerHTML 必须先转义
 }
 $("#funnelBtn").onclick = loadFunnel;
 $("#dbgBtn").onclick = async ()=>{
@@ -971,7 +971,7 @@ $("#ttsBtn").onclick = async ()=>{
     const blob = await r.blob();
     const url = URL.createObjectURL(blob);
     $("#ttsPlayer").innerHTML = `<audio controls autoplay src="${url}"></audio><div class="hint">24kHz 原始采样，经下载解码为 wav 播放；设备端实际收到 16k opus。</div>`;
-  } catch(e){ $("#ttsPlayer").innerHTML = '<span style="color:var(--bad)">'+e.message+"</span>"; }
+  } catch(e){ $("#ttsPlayer").innerHTML = '<span style="color:var(--bad)">'+esc0(e.message)+"</span>"; }   // v1.1.27：同上（错误串含 <>&" 时不得裸拼）
 };
 async function loadScenes(){
   try { const r = await api("/api/scenes");
@@ -1095,6 +1095,6 @@ $("#regenBtn").onclick = async ()=>{
   try { await post("/api/token/regenerate",{}); toast("已重置"); loadEndpoints(); } catch(e){ toast(e.message); }
 };
 </script>
-<script src="js/starsky.js?v=1.1.26"></script>
+<script src="js/starsky.js?v=1.1.27"></script>
 </body>
 </html>

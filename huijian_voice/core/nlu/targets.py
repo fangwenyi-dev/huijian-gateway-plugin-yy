@@ -307,14 +307,19 @@ def _name_tokens(friendly: str) -> list[str]:
     return out
 
 
-def sync_vocab(states: dict, aliases: dict | None = None,
-               device_class: dict | None = None) -> None:
+def sync_vocab(states: dict, aliases: dict | None = None) -> None:
     """从 ha 状态缓存 + 实体注册表派生动态词表（O(实体数)，pipeline 节流调用）。
 
     v1.1.4：别名进词表。`aliases[eid]` 是用户在 HA「实体→别名」里亲手写的叫法
     （外加 name/original_name），过去完全没读——用户已经告诉我们的叫法，比任何
     手抄词表都准。别名与状态名同表同规则（域取 entity_id 前缀），停用/隐藏实体
     在 ha_client 侧已剔除。
+
+    v1.1.27 删死参：原签名有 `device_class: dict | None = None`，函数体从未使用
+    （ha_client 侧 `_entity_device_class` 建表后**无人接线**，pipeline._sync_vocab
+    也只传两个实参）——留着会让读者以为 device_class 参与域判定。真要用它
+    （如 device_class=fan 的净化器归 fan 域）必须连同 pipeline 调用点一起接，
+    本批不做（无测试面需求，接了也无消费方）。
     """
     names: set[str] = set()
     # v1.1.3 P0-1：域白名单 → **排除表**。原白名单只放 9 个域，其余（valve/
@@ -668,11 +673,14 @@ def domain_hint(name: str) -> list[str]:
         # 「吊扇灯」这类灯扇一体实体仍先判 light（现状不变）。
         return ["fan"]
     # 2026-09 通用智能家居品类扩充（擦窗机器人含窗字但属 vacuum 族——
-    # 域提示在窗/帘判定之后、与按压窗控无涉；换气/排气/循环扇生态恒 fan）。
+    # 域提示在窗/帘判定之后、与按压窗控无涉）。
+    # v1.1.27 删死支：原「换气扇/排风扇/循环扇 → fan」一支被上方
+    # `"风扇" in n or n.endswith("扇")` 先截（三词全以 扇 收尾）恒不可达；
+    # 两者结论同为 ["fan"]，删除零行为差（test_dataset_vocab_batch2 的
+    # domain_hint("换气扇")==["fan"] 照旧）。new 品类若要单列域，必须放在
+    # 扇族规则**之前**（先判后截），否则又是一条装样子的分支。
     if any(w in n for w in ("扫地", "吸尘", "机器人", "洗地机", "拖地机", "除螨仪")):
         return ["vacuum"]
-    if any(w in n for w in ("换气扇", "排风扇", "循环扇")):
-        return ["fan"]
     if any(w in n for w in ("门锁", "智能锁")):
         return ["lock"]
     if any(w in n for w in ("插座",)):
@@ -802,10 +810,20 @@ def _area_split_wins(stripped: str, idx: int, dev_len: int) -> bool:
     return False
 
 
-def parse_target(raw: str, action_match=None) -> tuple[str | None, str | None, int]:
-    """候选六法 + 质量评分（v1.5 并行提取段移植）。
-    action_match: 可选谓词 callable(rest)->bool，命中给 ④ 前缀候选加分（原 4 分档）。
-    返回 (area, name, score)；解析失败时 area=None、name=清洗后的 raw。"""
+def parse_target(raw: str) -> tuple[str | None, str | None, int]:
+    """候选五法 + 质量评分（v1.5 并行提取段移植）。
+    返回 (area, name, score)；解析失败时 area=None、name=清洗后的 raw。
+
+    v1.1.27 删死支：原「④ 已知设备前缀剥离」候选（`(d, rest, 4)` + 可选
+    `action_match` 谓词把该支抬到 4 分）**恒败**——设备前缀词全在
+    KNOWN_DEVICES_PREFIX 而 _ALL_MIN2 ⊇ 该表（守卫钉恒真），⑥ 设备子串命中
+    同一词恒给 5 分且该词必在 ALL_SET（再 +1=6）；④ 上限 4+2=6 只在
+    rest 也是设备词且 d 是区域名的退化形态下持平，实测既无收益也无败例
+    （全仓语料 3578 句新旧对拍零差异）。留着只会让调用方以为
+    `action_match` 在选候选，故整支与谓词参数一并删除（fast_path 侧
+    _any_action_match 同步删）。前缀剥离的设计意图（"空调风量大一点"→
+    设备=空调）由 ⑥ 承接，行为不变。
+    """
     raw = strip_modal(raw or "")
     # 2026-09-30 英文 in-后置方位形：'light in the office'/'lights in the living
     # room' → 设备词挪尾、区域词挪头，喂给 ② 的「区域+设备尾词」结构。
@@ -840,15 +858,7 @@ def parse_target(raw: str, action_match=None) -> tuple[str | None, str | None, i
         if stripped.endswith(d) and len(stripped) > len(d):
             candidates.append((stripped[: -len(d)].strip(), d, 2))
             break
-    # ④ 已知设备前缀剥离（"空调风量大一点"→设备=空调；剩余匹配动作→4 分）
-    for d in sorted(KNOWN_DEVICES_PREFIX, key=len, reverse=True):
-        if stripped.startswith(d) and len(stripped) > len(d):
-            rest = stripped[len(d):].strip()
-            if action_match and action_match(rest):
-                candidates.append((d, rest, 4))
-            else:
-                candidates.append((d, rest, 3))
-            break
+    # ④（v1.1.27 删除：原"已知设备前缀剥离"候选恒败，见函数 docstring）
     # ⑤ 区域前缀扫描（2026-09-30：判据升级为「静态后缀 ∪ HA 真实区域表」，
     #   主卧/次卧/阳台/玄关 等不带区域后缀的字面自此可析出）
     for i in range(2, min(5, len(stripped))):

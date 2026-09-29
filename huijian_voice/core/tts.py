@@ -761,6 +761,18 @@ class TtsEngine:
         """在载引擎档；未标（旧桩/升级瞬态）按默认 melo（v1.1.10 默认档）。"""
         return getattr(self, "_loaded_prov", None) or "local_melo"
 
+    def active_provider(self) -> str:
+        """本轮**实际发声**的引擎档（v1.1.27 项3）。
+
+        有在载引擎=在载档：换绑是"在飞让位"式换装（_ensure_loaded_inner），让位
+        窗口内旧引擎仍在合成——键/指纹若取配置档，旧嗓音频就会以**新档身份**落
+        句级缓存与 HA 无 TTL 消息盘缓存（跨引擎投毒，解绑后永久错嗓）。
+        冷态/未标记（旧桩）=配置档：首载与唯一载入源都按配置档（_ensure_loaded_inner）。
+        """
+        if self._tts is None:
+            return self._provider()
+        return getattr(self, "_loaded_prov", None) or self._provider()
+
     def ready_for_current_provider(self) -> bool:
         return self._tts is not None and self.loaded_provider() == self._provider()
 
@@ -904,7 +916,12 @@ class TtsEngine:
         2026-09-22 审查批 P3-a：本地档再补**模型包身份**（lock sha256 前 8 位）——
         本指纹只认 sid 数值，Kokoro 换包（v1_0→v1_1 那次真实发生过：同 sid 不同嗓）
         不换键=HA 消息哈希盘缓存永远命中旧包音频，与 speed 漏入同族同病灶。
-        取不到 lock（假件/缺条目）回落 "u"，行为确定。"""
+        取不到 lock（假件/缺条目）回落 "u"，行为确定。
+
+        v1.1.27 项3：本地档前缀取 active_provider()（在载引擎）——换绑让位窗口内
+        实际产出仍是旧引擎的嗓，指纹必须照实申报；取配置档=旧嗓音频被 HA 无 TTL
+        盘缓存挂到新档指纹下，解绑后同句永久旧嗓（仅 clear_cache 可解）。云端
+        分支保持配置驱动（云优先，本地只是回落，:fb 后缀已隔离兜底嗓）。"""
         prov = str(self.settings.get("tts.provider", "local_melo"))
         speed_s = f"s{self._speed():g}"
         if prov.startswith("cloud"):
@@ -935,7 +952,7 @@ class TtsEngine:
                 fp += ":fb"
             return fp
         tag = "u"
-        prov = self._provider()
+        prov = self.active_provider()   # v1.1.27 项3：在载引擎优先（见 docstring）
         try:
             entry = self.store.lock_entry(PROVIDER_MODEL_KEYS[prov]) if self.store else {}
             tag = str(entry.get("sha256") or "")[:8] or "u"
@@ -1211,8 +1228,11 @@ class TtsEngine:
 
     def unload(self) -> bool:
         with self._lock:
-            if self._busy or self._round_busy:
+            if self._busy or self._round_busy or self._loading:
                 # v1.0.84（B1）：_round_busy=有播报轮整体在飞（句间空隙也算）
+                # v1.1.27：_loading=冷载/换绑在飞（_ensure_loaded_inner 即将写回
+                # _tts）——不查会"卸载空转"：刚卸载就被写回，且面板谎报已卸载。
+                # 与 asr.unload 同一护栏（审计"同类全类修"）。
                 logger.info("[TTS] 合成/整轮在飞，本轮跳过卸载")
                 return False
             self._tts = None
@@ -1316,7 +1336,9 @@ class TtsEngine:
         loop = asyncio.get_running_loop()
         # v1.1.5：句级缓存键含引擎档——换绑让位窗口内旧引擎在载时，同 (句,sid,
         # 语速) 不得跨引擎复用音频；引擎维度入键，宁缺不混。
-        prov_key = self._provider()
+        # v1.1.27 项3：取**在载档**（active_provider）而非配置档——让位窗口内真正
+        # 发声的是旧引擎，键若说新档=旧嗓音频落新档键（HA 无 TTL 盘缓存同源毒化）。
+        prov_key = self.active_provider()
         # 音色归属定案（用户 2026-09-18）：本地档=web 设定音色（数字或自定义主名）；
         # 云档=云端对应音色（可选）；**云失败回落=固定默认本地音色 sid28**——回落是
         # 应急通道，取最保守单音色，不跟 web 配置（可能是自定义名/云专属号）漂移。
@@ -1331,6 +1353,11 @@ class TtsEngine:
             engine_out["engine"] = f"local:sid{sid}" + (
                 "(云钉扎)" if eng0 == "local:pinned"
                 else ("(云回落)" if eng0 == "local:fallback" else ""))
+        # v1.1.27 项3：这里仍判 ready()（有引擎）而非 ready_for_current_provider()——
+        # 本轮 wrapper 已把 _round_busy 置 1，轮内调 ensure_loaded 只会命中"换绑在飞
+        # 让位"分支（恒 True），换绑的唯一触发源是 main._loop_models（≤60s）。
+        # 让位窗口的安全性不靠"这轮重启加载"，而靠键/指纹取在载档（prov_key 与
+        # voice_fingerprint 同源）：旧嗓只能落旧档键，跨引擎投毒无入口。
         load_checked = self.ready()
         for sent in split_sentences(text):
             if not any(c.isalnum() for c in sent):

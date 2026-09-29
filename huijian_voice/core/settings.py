@@ -266,6 +266,15 @@ class Settings:
                 c["api_key"] = "****"
         if d["llm"].get("api_key"):
             d["llm"]["api_key"] = "****"
+        # v1.1.27 项5：klar.token 是**真凭据**（nlu/klar_client.py:104/124 以
+        # x-klar-token 上行远端 klar 引擎）——旧 masked() 漏了它，GET /api/settings
+        # 原文回显到浏览器/前端日志。本仓纪律：只留长度+首字节（不落任何可逆片段）。
+        klar = d.get("klar")
+        if isinstance(klar, dict):
+            kt = klar.get("token")
+            if kt:
+                klar["token"] = (f"{kt[0]}…({len(kt)}位)" if isinstance(kt, str)
+                                 else "****")
         # v1.0.41 审查 S9：脏叶子（repair 只查节点顶层类型，dict/int 可藏在 ws_token 位）
         # 会在切片处 TypeError → GET /api/settings 恒 500。非 str 一律按 **** 封顶
         # （异常形态的凭据本来就更不能出门）。
@@ -347,6 +356,15 @@ class Settings:
                 if v is None or v == "" or (
                         isinstance(v, str) and (v.startswith("****") or "…" in v)):
                     sec.pop(key, None)
+        # v1.1.27 项5：klar.token 的脱敏形态（"k…(16位)"）同样必须被写闸认出——
+        # masked() 新增的脱敏格式若不被 _scrub_masked 认识，回显即覆盖真凭据
+        # （与上面 v1.0.40 A3 同一族事故）。
+        klar = patch.get("klar")
+        if isinstance(klar, dict):
+            v = klar.get("token")
+            if v is None or v == "" or (
+                    isinstance(v, str) and (v.startswith("****") or "…" in v)):
+                klar.pop("token", None)
 
     def save(self) -> None:
         with self._lock:

@@ -13,7 +13,9 @@ from homeassistant.helpers import intent as ha_intent
 from homeassistant.helpers.http import KEY_HASS, HomeAssistantView
 
 from .const import DOMAIN
-from .intent_automation import get_automation_manager, get_automation_store
+from .intent_automation import (get_automation_manager,
+                                get_automation_store,
+                                peek_automation_manager)
 from .intent_voice_scene import get_voice_scene_store
 
 _LOGGER = logging.getLogger(__name__)
@@ -287,8 +289,11 @@ class AutomationLogView(HomeAssistantView):
 
     async def get(self, request: web.Request):
         hass = request.app[KEY_HASS]
-        mgr = get_automation_manager(hass)
-        return self.json(mgr.trigger_logs)
+        # v1.1.27-r2（金标复测）：本视图 requires_auth=False——只读面不得建实例/
+        # 武装监听（旧写法一次匿名 GET 就会把状态监听+整点 tick 拉起）。未武装
+        # 时无日志可看，如实空表。
+        mgr = peek_automation_manager(hass)
+        return self.json(mgr.trigger_logs if mgr is not None else [])
 
 
 class TestSceneView(HomeAssistantView):

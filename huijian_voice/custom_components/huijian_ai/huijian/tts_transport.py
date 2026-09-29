@@ -401,8 +401,12 @@ class TtsTransport(WsTransport):
                 # 基类交付点就被丢弃），再按既有承诺决定要不要换连清算。
                 self._release_round_claim()
                 if not clean:
+                    # v1.1.27（代次闸）：带上本轮认领的代次——旧轮收口晚到时
+                    # （取消/超时后才走到这里，新连接可能已建）不得拆掉新连接
+                    # （新连接 _proto 会被 _create_streams 归零，新轮白等同步窗）。
                     await self.restart_connection(
-                        "TTS 对话未以 stop 收口（取消/超时/断连），断连清算残留"
+                        "TTS 对话未以 stop 收口（取消/超时/断连），断连清算残留",
+                        generation=claimed_gen,
                     )
 
     async def async_remove_entry(self):

@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 
 import anyio
 from homeassistant.components import conversation
@@ -72,18 +73,47 @@ class HuijianConversationEntity(BaseEntity):
         return conversation.async_get_result_from_chat_log(user_input, chat_log)
 
     async def _await_message_with_timeout(self, transport, timeout=60):
+        """基类 await_message 的整轮收口（真 anyio；v1.1.27 根因①同款改法）。
+
+        v1.1.27（与 huijian/tts_transport.py:213-224 已定案的根因①同病同治）：
+        旧实现 `with anyio.fail_after(timeout): async for msg in
+        transport.await_message(): yield msg` —— anyio cancel scope 横跨
+        `yield`，scope 的任务仿射绑定在"驱动到首块"的任务上；HA 的对话 delta
+        消费面若换任务续跑/收口（TTS 侧已实证：`async_create_background_task`
+        续跑 → `__exit__` 与 `__enter__` 异任务 → RuntimeError "Attempted to
+        exit cancel scope in a different task"），整轮对话当场作废。
+        现改为单调 deadline + 逐条 receive 独立短 scope：enter/exit 恒在同一
+        次 `__anext__` 步内（中间无 yield），yield 点零存活 scope；内层生成器
+        在 finally 里确定性收链（不赌 GC 时机）。
+        另注：`anyio.fail_after` 是同步上下文管理器（与 llm/stt/tts_transport
+        同款用法）——写成 `async with` 在首次对话即抛 TypeError（2026-09-08
+        台架实发 "Unexpected error during intent recognition"），此处同样只用
+        同步形式。
+        """
+        deadline = time.monotonic() + timeout
+        agen = transport.await_message().__aiter__()
         try:
-            # anyio.fail_after 是同步上下文管理器（与 llm/stt/tts_transport 同款
-            # 用法）——写成 `async with` 在首次对话即抛 TypeError: object does not
-            # support the asynchronous context manager protocol，huijian_agent
-            # 全链路 intents 识别必炸（2026-09-08 台架实发：管道通了 STT 后
-            # "Unexpected error during intent recognition"）。
-            with anyio.fail_after(timeout):
-                async for msg in transport.await_message():
-                    yield msg
-        except TimeoutError:
-            _LOGGER.error("LLM response timeout after %ss", timeout)
-            yield {"error": "抱歉，AI 响应超时，请重试"}
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    _LOGGER.error("LLM response timeout after %ss", timeout)
+                    yield {"error": "抱歉，AI 响应超时，请重试"}
+                    return
+                with anyio.move_on_after(remaining) as scope:
+                    try:
+                        msg = await agen.__anext__()
+                    except StopAsyncIteration:
+                        return
+                if scope.cancelled_caught:
+                    _LOGGER.error("LLM response timeout after %ss", timeout)
+                    yield {"error": "抱歉，AI 响应超时，请重试"}
+                    return
+                yield msg
+        finally:
+            try:
+                await agen.aclose()
+            except Exception:  # noqa: BLE001 收链尽力而为，不掩盖主因
+                _LOGGER.debug("LLM await_message 收链异常", exc_info=True)
 
     async def _async_handle_chat_log(
         self,
@@ -122,4 +152,6 @@ class HuijianConversationEntity(BaseEntity):
         async for content in chat_log.async_add_delta_content_stream(
             self.entity_id, _capturing()
         ):
-            _LOGGER.info("LLM response: %s", content)
+            # v1.1.27（隐私文本纪律）：应答全文属家居隐私，INFO 会随 HA 日志落盘
+            # ——只留长度，全文降 DEBUG（对齐 ws_transport:411 同款纪律）。
+            _LOGGER.debug("LLM response: %s", content)

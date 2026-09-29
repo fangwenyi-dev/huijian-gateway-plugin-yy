@@ -489,7 +489,12 @@ class QueryZone:
         ents = await self.ha.find_entities(area=area or "", domains=domains)
         ents = [e for e in ents if e["entity_id"].split(".")[0] in domains]
         on_words = {"on", "open", "opening", "heating", "cooling", "auto", "fan_only",
-                    "dry", "heat_cool", "eco", "playing", "paused", "heat", "preheat"}
+                    "dry", "heat_cool", "eco", "playing", "paused", "heat", "preheat",
+                    # v1.1.27：vacuum 的"在工作"态与 :669 的中文话术表**同集合**
+                    # （清扫中/回充中 在 _state_answer 有中文；计数若不算 on，
+                    # 「有几台扫地机器人开着」会答"都关着呢"——答错比不答坏）。
+                    # 「已暂停(paused)」两侧一致：不念英文、也不算"关着"。
+                    "cleaning", "returning"}
         on_ents = [e for e in ents if str(e.get("state", "")) in on_words]
         prefix = f"{area}的" if area else ""
         noun = _CLASS_NOUN.get(word, "个设备")
@@ -602,6 +607,10 @@ class QueryZone:
         have_area_data = bool(getattr(self.ha, "_areas", None)
                               or getattr(self.ha, "_entity_area", None))
         candidates: list[tuple[str, float]] = []
+        # v1.1.27：**绑区命中优先于名称旁路**。旧实现只用一个列表 + append 之后
+        # 才 break——越区的那台（名字里带区域词、实体实际绑在别区）先到先得，
+        # 真正绑在本区的那台"永无机会"（实测：问办公室温度答出客厅绑区的那颗）。
+        bound: list[tuple[str, float]] = []
         for eid, ent in states.items():
             attrs = ent.get("attributes") or {}
             if attrs.get("device_class") != device_class:
@@ -617,9 +626,11 @@ class QueryZone:
                 val = float(ent.get("state"))
             except (TypeError, ValueError):
                 continue
-            candidates.append((name, val))
             if area and have_area_data and ent_area == area:
+                bound.append((name, val))
                 break
+            candidates.append((name, val))
+        candidates = bound + candidates
         if not candidates:
             return None
         if len(candidates) > 1 and not have_area_data:
@@ -667,7 +678,12 @@ class QueryZone:
             ents = wider
         on_words = ("on", "open", "heating", "cooling", "auto", "fan_only", "dry", "heat_cool", "eco")
         states_cn = {"on": "开着", "off": "关着", "open": "开着", "closed": "关着", "opening": "正在开", "closing": "正在关",
-                     "heat": "制热中", "cool": "制冷中", "dry": "除湿中", "fan_only": "送风中", "auto": "自动模式", "idle": "待机"}
+                     "heat": "制热中", "cool": "制冷中", "dry": "除湿中", "fan_only": "送风中", "auto": "自动模式", "idle": "待机",
+                     # v1.1.27：vacuum 三态中文（同处注释"不念英文"承诺的实现面）。
+                     # 旧表缺 cleaning/returning/paused ⇒ 播报把 raw state 直念
+                     # （「扫地机器人处于 cleaning」），与 _count_answer 的 on_words
+                     # 同步收口（那边已有 paused，本批补 cleaning/returning）。
+                     "cleaning": "清扫中", "returning": "回充中", "paused": "已暂停"}
         lines = []
         for e in ents[:3]:
             st = str(e.get("state", ""))

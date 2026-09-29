@@ -233,10 +233,22 @@ class ESPHomeManager:
 
     @property
     def _unreachable_issue_id(self) -> str:
-        """Return the unreachable-repair issue id for this entry."""
-        return SATELLITE_UNREACHABLE_ISSUE_FORMAT.format(
-            self.entry.unique_id or self.entry.entry_id
-        )
+        """Return the unreachable-repair issue id for this entry.
+
+        v1.1.27（批7）：旧实现 `unique_id or entry_id`——unique_id 由设备
+        握手后写入/可能变更，id 会漂（旧 id 的 repair 成孤儿，删不掉）。
+        issue 是持久化实据，id 必须只用条目标识（entry_id 永不变）。
+        """
+        return SATELLITE_UNREACHABLE_ISSUE_FORMAT.format(self.entry.entry_id)
+
+    @property
+    def _unreachable_legacy_issue_id(self) -> str | None:
+        """旧 id 形态（unique_id 版）——历史版本建过的 repair 需一并清。"""
+        uid = getattr(self.entry, "unique_id", None)
+        if not uid:
+            return None
+        legacy = SATELLITE_UNREACHABLE_ISSUE_FORMAT.format(uid)
+        return None if legacy == self._unreachable_issue_id else legacy
 
     async def on_stop(self, event: Event) -> None:
         """Cleanup the socket client on HA close."""
@@ -528,7 +540,14 @@ class ESPHomeManager:
             self._conn_fail_count = 0
         if self._unreachable_issue_open:
             self._unreachable_issue_open = False
-            async_delete_issue(self.hass, DOMAIN, self._unreachable_issue_id)
+        # v1.1.27（批7）：issue 是持久化实据，_unreachable_issue_open 只是实例态
+        # ——reload/重启后新实例标志为假，旧 repair「设备不可达」长挂说谎（连接
+        # 明明已恢复）。连接成功即**无条件幂等**删（issue 不存在时 delete 是
+        # no-op）：当前 id + 历史 unique_id 形态 id 一并清。
+        async_delete_issue(self.hass, DOMAIN, self._unreachable_issue_id)
+        legacy_issue_id = self._unreachable_legacy_issue_id
+        if legacy_issue_id:
+            async_delete_issue(self.hass, DOMAIN, legacy_issue_id)
         try:
             await self._on_connect()
             # v1.0.82：连接确认健康（含订阅/实体重建全链走通）——置连接位并
@@ -1040,12 +1059,15 @@ class ESPHomeManager:
                                   self.entry.title, err)
                 if not rebuilt:
                     try:
-                        self.hass.async_create_task(
-                            self.hass.config_entries.async_schedule_reload(
-                                self.entry.entry_id))
+                        # v1.1.27（批7）：async_schedule_reload 是 @callback 返
+                        # None——旧写法把它塞进 async_create_task(None) 必抛
+                        # TypeError 并被本 except 吞成 DEBUG（排期看似"失败"，
+                        # 现场零痕迹不可归因）。它自己就负责排期，直接调。
+                        self.hass.config_entries.async_schedule_reload(
+                            self.entry.entry_id)
                     except Exception:  # noqa: BLE001
-                        _LOGGER.debug("%s: 重载排期失败", self.entry.title,
-                                      exc_info=True)
+                        _LOGGER.warning("%s: 重载排期失败", self.entry.title,
+                                        exc_info=True)
             except asyncio.CancelledError:
                 raise
             except Exception as err:  # noqa: BLE001 —— 连接类异常=正在重连路上

@@ -577,12 +577,51 @@ def adjust_cover_position(ctx: AdjustmentContext, target: AdjustmentTarget):
     target.attributes["updated_value"] = f"{target_percent}%"
 
 
+def _current_number_value(state: State) -> int | float | None:
+    """number 实体当前值：state 字符串为主，属性 "value" 兜底；解不出返 None。"""
+    for raw in (state.state, (state.attributes or {}).get("value")):
+        if raw is None:
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        return int(value) if value.is_integer() else value
+    return None
+
+
 @register_adjustment("number", "value")
 def adjust_number_value(ctx: AdjustmentContext, target: AdjustmentTarget):
     target.attributes = {}
     min_val = ctx.state.attributes.get("min")
     max_val = ctx.state.attributes.get("max")
-    value = ctx.delta.value
+    delta = ctx.delta
+    # v1.1.27：本处理器旧版**只读 delta.value** ⇒ 相对档被当绝对值下发
+    # （「数值调高10」→ set_value(10)），极值档 special 更是 value=0
+    # （「调到最大」→ set_value(0)，数值实体最低档）。两种都是静默误执行。
+    if delta.special:
+        # 极值档按实体自己声明的 min/max 映射（与 Delta.calc_target 同口径：
+        # low→min、high→max）；medium/auto 在数值实体无对应语义，如实失败。
+        if delta.special in ("max", "high"):
+            value = max_val
+        elif delta.special in ("min", "low"):
+            value = min_val
+        else:
+            raise intent.IntentHandleError(
+                f"数值实体不支持 {delta.special} 档位，请说具体数值")
+        if value is None:
+            raise intent.IntentHandleError(
+                "该数值实体未声明 min/max，无法确定极值档目标值，请说具体数值")
+    elif delta.adjust == AdjustType.SET:
+        value = delta.value
+    else:
+        current = _current_number_value(ctx.state)
+        if current is None:
+            # 相对档没有基准值就没有"加/减多少"——如实失败，绝不猜 0。
+            raise UnsupportAdjustmentError
+        value = current + delta.value
+        if isinstance(value, float) and value.is_integer():
+            value = int(value)
     if min_val is not None and value < min_val:
         raise intent.IntentHandleError(f"数值 {value} 低于最小值 {min_val}")
     if max_val is not None and value > max_val:

@@ -394,7 +394,7 @@ async def _noop_async(*a):
 def _mk_transport(lock=None, msgs=None, send=None):
     restarts = []
 
-    async def restart(*a):
+    async def restart(*a, **kw):   # v1.1.27：收口清算带 generation（代次闸）
         restarts.append(a)
 
     async def sm(m):

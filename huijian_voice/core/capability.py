@@ -41,8 +41,31 @@ READ_ONLY_DOMAINS = frozenset({
     "hassio", "config", "diagnostics", "analytics",
 })
 
+# 不可开关域（语音开关族预检的唯一来源，executor._turn_gate 引用）。
+# v1.1.27 收口（逐行审计实锤）：executor 侧同名表与 READ_ONLY_DOMAINS **不一致**
+# （executor 多 number/select/text/button/datetime…，capability 多 weather/person/
+# calendar…）⇒ `_turn_gate` 的域预检形同只做了半张表：另半张域的实体照样被喂
+# turn_on/off（HA core 语义：这些域没有 turn_on 动作＝ServiceNotSupported 风暴 +
+# 集成回顶层 success 时还会谎报"开了"）。语义取**并集**（更严＝多拦，宁如实失败）。
+UNTOGGLEABLE_DOMAINS = frozenset(READ_ONLY_DOMAINS | {
+    "number", "select", "text", "button", "datetime", "date", "time", "event",
+})
+
 # 特殊档位禁忌表来自契约单点（core.nlu.schema），不在这里二次手抄。
 from .nlu.schema import NEVER_SPECIALS as _NEVER_SPECIALS
+
+
+def _domain_slots(raw) -> tuple:
+    """domains 槽归一（v1.1.27）。LLM/上游常把**单域**塞成字符串："light"——
+    旧写法 `tuple(raw)` 会炸成 ('l','i','g','h','t')，于是 `dom not in doms` 恒真、
+    候选恒空、能力预裁静默失效（比拦错更糟：整条能力面无声关闭）。
+    str → (str,)（空串＝未指定＝不过滤，语义保持）；列表/元组/集合 → 逐项取字符串；
+    其余脏值 → 空元组（＝不过滤）。永不抛。"""
+    if isinstance(raw, str):
+        return (raw.strip(),) if raw.strip() else ()
+    if isinstance(raw, (list, tuple, set, frozenset)):
+        return tuple(str(x).strip() for x in raw if str(x).strip())
+    return ()
 
 
 def resolve_candidates(states: dict, entity_area: dict, target: list) -> list:
@@ -60,7 +83,7 @@ def resolve_candidates(states: dict, entity_area: dict, target: list) -> list:
             area = str(slot.get("area") or "")
             for dev in (slot.get("devices") or [{}]):
                 nm = str((dev or {}).get("name") or "").strip()
-                doms = tuple((dev or {}).get("domains") or ())
+                doms = _domain_slots((dev or {}).get("domains"))
                 for eid, e in (states or {}).items():
                     dom = str(eid).split(".", 1)[0]
                     if doms and dom not in doms:

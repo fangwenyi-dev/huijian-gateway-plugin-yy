@@ -47,6 +47,10 @@ class OpusPcmDecoder:
             raise OpusError("opus 绑定缺失")
         self._d = opus.Decoder(const.SAMPLE_RATE, const.CHANNELS)
         self._frame_samples = frame_samples
+        # v1.1.27 项6：累计失败帧数。单帧异常旧式只留一行 debug 就返回 b""——
+        # 整帧语音丢失/整轮空在生产日志里完全不可见；调用方（SttSession）按增量
+        # 把它并入**本轮**分因，设备侧才分得清"没说话"与"音频没解出来"。
+        self.failed_frames = 0
 
     def decode(self, packet: bytes) -> bytes:
         """返回 s16le mono bytes（60ms=960 样本=1920B，末帧可短）。异常帧静音丢。
@@ -55,7 +59,10 @@ class OpusPcmDecoder:
         try:
             return self._d.decode(packet, self._frame_samples)
         except Exception as e:
-            logger.debug("[音频] opus 帧解码失败(%dB): %s", len(packet), e)
+            self.failed_frames += 1
+            # WARN 而非 debug：丢的是一整帧语音，静默丢帧=整轮空无解释（v1.1.27）
+            logger.warning("[音频] opus 帧解码失败(%dB，累计 %d 帧): %s",
+                           len(packet), self.failed_frames, e)
             return b""
 
 

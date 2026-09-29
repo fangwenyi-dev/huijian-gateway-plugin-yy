@@ -41,6 +41,21 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 CLIENT_INFO = f"Home Assistant {ha_version}"
 
+# v1.1.27（凭据面收口）：条目日志白名单——只留非敏感字段，凭据类一概不进日志。
+# 旧形态行直接把整个 `entry.data` 送进 INFO：device 条目含 password/noise_psk；
+# assist 条目含四端点，而端点约定允许内嵌 `?token=<真 token>`（加载项
+# translations 指引的强制模式）——凭据随 HA 日志落盘外流。
+_SAFE_LOG_FIELDS = ("config_type", "speak_name", "device_name", "host", "port")
+
+
+def _safe_entry_fields(entry) -> dict:
+    """条目的日志摘要：白名单字段值 + 全部键名（排障够用，凭据不外流）。"""
+    data = getattr(entry, "data", None) or {}
+    return {
+        "fields": {k: data.get(k) for k in _SAFE_LOG_FIELDS if k in data},
+        "keys": sorted(data),
+    }
+
 # 自动补建判定（v1.0.16 语义修正）：仅当域内确无 config_type=assist 条目时才
 # 经 SOURCE_IMPORT 补建一条（端点默认本机加载项 :8000）；有则不碰——用户自建/
 # 改配的条目一律尊重。旧实现曾在 entry.data 写入一次性持久标志位（"置位后
@@ -215,7 +230,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> bool:
     """Set up the esphome component."""
-    LOGGER.info("Setup entry: %s", [entry.title, entry.entry_id, entry.data])
+    LOGGER.info(
+        "Setup entry: %s",
+        [entry.title, entry.entry_id, _safe_entry_fields(entry)],
+    )
     config_type = entry.data.get("config_type")
     if config_type == "assist":
         PLATFORMS = set()

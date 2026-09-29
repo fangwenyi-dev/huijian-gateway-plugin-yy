@@ -31,8 +31,17 @@ WINDOW_KEYWORDS = [
 ]
 # 机器人：擦窗机器人/清洁机器人属家电（vacuum 族），名称带"窗"却绝不是
 # 按压窗控设备——进排除表，防 is_window_device 子串误判。
-WINDOW_EXCLUDE_KEYWORDS = ["窗帘", "机器人"]
+# v1.1.27：帘族闸与 intent_window_const.extract_window_name 顶部短路口径对齐
+# （"帘"/"纱窗"/"百叶"）——「百叶窗」「纱窗」是 cover 语义，旧表只挡"窗帘"
+# ⇒「关纱窗/关百叶窗」被当窗控按本区全部窗钮（关一扇变关一排）。
+WINDOW_EXCLUDE_KEYWORDS = ["帘", "纱窗", "百叶", "机器人"]
 WINDOW_DOMAINS = {"window", "windows"}
+
+# Turn* 族 → 窗控意图的**唯一**改写表（v1.1.27：非本表命中的意图一律原样透传）
+_TURN_TO_WINDOW_INTENT = {
+    "TurnDeviceOn": "ControlWindow",
+    "TurnDeviceOff": "ControlWindow",
+}
 
 
 def is_window_device(device: dict) -> bool:
@@ -97,18 +106,24 @@ def split_actions_by_device(actions: list[dict]) -> list[dict]:
             )
 
         if window_targets:
-            action_mapping = {
-                "TurnDeviceOn": "ControlWindow",
-                "TurnDeviceOff": "ControlWindow",
-            }
-            window_intent = action_mapping.get(intent_name, intent_name)
-            window_action = "open" if intent_name == "TurnDeviceOn" else "close"
-            split_actions.append(
-                {
-                    "name": window_intent,
-                    "parameters": {"target": window_targets, "action": window_action},
+            # v1.1.27：**只有 Turn\* 族**做「意图 → ControlWindow + open/close」
+            # 改写；其余意图（ControlWindow 自身、PauseDevice 等）name、action 与
+            # 全部参数原样透传。旧版三元把任何非 TurnDeviceOn 的意图都定死
+            # action="close"、params 重建为 {target, action} ⇒ 内倒(a)/暂停(pause)/
+            # position/speed/strength 全丢（场景与自动化动作入库即坏，回放时关错
+            # 方向、开度丢失）。
+            mapped_intent = _TURN_TO_WINDOW_INTENT.get(intent_name)
+            if mapped_intent:
+                out_params = {
+                    **params,
+                    "target": window_targets,
+                    "action": "open" if intent_name == "TurnDeviceOn" else "close",
                 }
-            )
+                out_name = mapped_intent
+            else:
+                out_params = {**params, "target": window_targets}
+                out_name = intent_name
+            split_actions.append({"name": out_name, "parameters": out_params})
 
     _LOGGER.info("Split actions: %s -> %s", len(actions), len(split_actions))
     return split_actions

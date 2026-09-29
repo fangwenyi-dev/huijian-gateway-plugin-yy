@@ -22,6 +22,32 @@ CONFIGURED_DEVICE_KEYS = (
     "loaded_integrations",
     "target_platform",
 )
+# v1.1.27（凭据面收口）：端点允许内嵌 `?token=<真 token>`（加载项 translations
+# 指引的强制模式），而 REDACT_KEYS 只按**精确键名**掩码——`as_dict()` 原样导出
+# 即凭据外泄。端点类键改值级脱敏，纪律：只留长度 + 首字节。
+ENDPOINT_KEYS = ("llm_endpoint", "stt_endpoint", "tts_endpoint", "mcp_endpoint")
+
+
+def _mask_endpoint_value(value: Any) -> Any:
+    """端点值脱敏：只留长度与首字节（host/path/query 一律不落）。"""
+    if not isinstance(value, str):
+        return value
+    if not value:
+        return value
+    return f"<redacted len={len(value)} head={value[0]}>"
+
+
+def _redact_endpoints(data: Any) -> Any:
+    """递归对端点类键做值级脱敏（嵌套 data/options 一并覆盖，不改写入参）。"""
+    if isinstance(data, dict):
+        return {
+            key: (_mask_endpoint_value(value)
+                  if key in ENDPOINT_KEYS else _redact_endpoints(value))
+            for key, value in data.items()
+        }
+    if isinstance(data, (list, tuple)):
+        return [_redact_endpoints(item) for item in data]
+    return data
 
 
 async def async_get_config_entry_diagnostics(
@@ -37,7 +63,8 @@ async def async_get_config_entry_diagnostics(
     entry_data = getattr(config_entry, "runtime_data", None)
     if entry_data is None:
         diag["note"] = "entry not loaded; runtime data unavailable"
-        return diag
+        # v1.1.27：早退路径同样过值级端点脱敏（config 已在前填好）
+        return async_redact_data(_redact_endpoints(diag), REDACT_KEYS)
     device_info = entry_data.device_info
     device_name: str | None = (
         device_info.name if device_info else config_entry.data.get(CONF_DEVICE_NAME)
@@ -76,4 +103,5 @@ async def async_get_config_entry_diagnostics(
                     key: data.get(key) for key in CONFIGURED_DEVICE_KEYS
                 }
 
-    return async_redact_data(diag, REDACT_KEYS)
+    # v1.1.27：键名掩码之前先做端点值级脱敏（内嵌 ?token= 不在键名管辖内）
+    return async_redact_data(_redact_endpoints(diag), REDACT_KEYS)

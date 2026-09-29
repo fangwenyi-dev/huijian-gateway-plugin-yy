@@ -77,9 +77,58 @@ BASE_CORRECTIONS: dict[str, str] = {
 }
 
 
+# ── 词界判据（v1.1.27）────────────────────────────────────────────
+# 病灶：本表是**整词**表（"舍灯"→"射灯"、"平台商"→"平开窗"），但 apply 走的是
+# 裸 str.replace——键落在更长词内部时照样替换。实测「关掉宿舍灯」→「关掉宿**射灯**」：
+# 用户点名的设备被改掉，真机去动另一台灯（动错设备比听不懂危险）。
+# 判据：替换点**前一字**必须是"词界字"——句首/非汉字，或下列常见词尾字之一。
+# 词尾字表按**实证**取（对全仓测试语料 + golden 逐句新旧对拍，只有上述病灶句
+# 与本文档字符串发生变化；"关闭平改窗/关闭开创器"这类动词直接贴目标词的形态
+# 决定了动作动词尾字必须在表内，"办公室平台商"决定了区域尾字必须在表内）。
+_BOUNDARY_BEFORE = frozenset(
+    # 虚词/助词/连接/否定/疑问/代词/副词
+    "的得地了着过把将被让给在同和与及或跟对向往从到至于就都也再又还更要是"
+    "有没不别勿莫好请帮来去起住完用看听走放"
+    "一二两三个这那哪它他她我你您谁怎多少大小高低亮暗快慢冷热暖"
+    "中内外上下前后左右里边头面层号次回遍顿声句"
+    # 动作动词尾字 + 助动/能愿动词（"关闭X"/"想要X"：动词与目标词天然同界）
+    "开闭启掉关打调设换拉推按锁解停放播超发收传加入出进想说要会能可需"
+    # 时间/单位量词尾字
+    "秒分时天周月年"
+    # 区域/空间尾字（区域名结束即词界）
+    "室厅房间区馆楼台家园站场店铺卧廊库厨卫储")
+
+
+def _at_word_start(text: str, idx: int) -> bool:
+    """键起点 idx 是否落在词界（前一字是句首/非汉字/词尾字）。永不抛。"""
+    if idx <= 0:
+        return True
+    ch = text[idx - 1]
+    if not ("\u4e00" <= ch <= "\u9fff"):
+        return True                    # 标点/数字/字母/空格天然词界
+    return ch in _BOUNDARY_BEFORE
+
+
+def _replace_whole(text: str, wrong: str, right: str) -> str:
+    """只替换落在词界的整词命中；词内子串（"宿[舍灯]"）原样保留。"""
+    out: list[str] = []
+    i = 0
+    while True:
+        j = text.find(wrong, i)
+        if j < 0:
+            out.append(text[i:])
+            return "".join(out)
+        if _at_word_start(text, j):
+            out.append(text[i:j])
+            out.append(right)
+        else:
+            out.append(text[i:j + len(wrong)])
+        i = j + len(wrong)
+
+
 def apply(text: str, extra: dict[str, str] | None = None) -> str:
     """按「长键优先」顺序替换（基础表与新键合并；同名键基础表优先——基础表经
-    数据集回归验证，用户扩展只做追加不做覆盖）。"""
+    数据集回归验证，用户扩展只做追加不做覆盖）。**只按词界替换**（v1.1.27）。"""
     if not text:
         return text
     merged = dict(extra or {})
@@ -87,5 +136,5 @@ def apply(text: str, extra: dict[str, str] | None = None) -> str:
     for wrong in sorted(merged, key=len, reverse=True):
         right = merged[wrong]
         if wrong and wrong in text:
-            text = text.replace(wrong, right)
+            text = _replace_whole(text, wrong, right)
     return text

@@ -178,7 +178,7 @@ def test_recognize_cancelled_attribution():
             "        return None\n"
             "    async def send_message(self, m):\n"
             "        return None\n"
-            "    async def restart_connection(self, reason=''):\n"
+            "    async def restart_connection(self, reason='', **kw):\n"
             "        self.restarted = reason\n"
             "    async def _hang_iter(self):\n"
             "        if False:\n"

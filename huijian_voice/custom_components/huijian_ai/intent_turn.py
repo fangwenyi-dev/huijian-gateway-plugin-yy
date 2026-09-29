@@ -177,22 +177,33 @@ class TurnDeviceIntentBase(intent.IntentHandler):
                 control_targets.append({"name": item.name, "area": item.area_name})
 
         if not control_targets and unsupported:
+            # v1.1.27：窗侧失败并入主返回——旧版只在"窗成灯败"分支消费
+            # window_errors，「关掉窗和灯」窗败灯成时返回体里毫无痕迹。
+            window_tail = (
+                "；窗控失败：" + "；".join(window_errors) if window_errors else ""
+            )
             # 暂停语义话术原样保留（有钉）；其余服务（开关/锁…）域不支持时给通用话术——
             # v1.1.24：域不支持本服务的候选现在走"跳过"路径（见 handle_match_target），
             # 全部候选都被跳过时才算失败，且话术不能再挂"暂停"字样。
             if service == "huijian_pause":
                 return {
                     "success": False,
-                    "error": "暂不支持暂停该设备：" + "、".join(unsupported[:3]),
+                    "error": "暂不支持暂停该设备：" + "、".join(unsupported[:3])
+                             + window_tail,
                 }
             return {
                 "success": False,
-                "error": "这些设备不支持该操作：" + "、".join(unsupported[:3]),
+                "error": "这些设备不支持该操作：" + "、".join(unsupported[:3])
+                         + window_tail,
             }
-        return {
+        result: dict[str, Any] = {
             "success": True,
             "control_targets": control_targets,
         }
+        if window_errors:
+            # 窗侧失败（全败或部分败）一律并入主返回：窗败灯成不得只播"关了"。
+            result["partial_error"] = f"Window: {', '.join(window_errors)}"
+        return result
 
     # v1.0.42 家电族：暂停语义的域→服务表（"停下当前动作"而非关机回舱）。
     _PAUSE_CALLS = {
@@ -524,19 +535,27 @@ class TurnDeviceIntentBase(intent.IntentHandler):
         Returns:
             True if the target is a window device, False otherwise.
         """
+        # v1.1.27：帘族（帘/纱窗/百叶）与含"窗"家电（机器人）**先于域提示**判定
+        # ——它们不是按压窗控设备（intent_window_const.extract_window_name 顶部
+        # 同款短路，单一事实源）。旧版把排除表放在域提示之后且只挡"窗帘"：
+        # 「关纱窗/关百叶窗」被当窗控、extract 返 None 又被升级成"本区所有窗"
+        # （关一扇变关一排）；含窗家电在域提示为 window 时同型误入。
+        if name:
+            from .intent_device_shared import WINDOW_EXCLUDE_KEYWORDS
+
+            name_lower = name.lower().strip()
+            for ex in WINDOW_EXCLUDE_KEYWORDS:
+                if ex.lower() in name_lower:
+                    return False
         if any(
             d.lower() in ("window", "windows")
             for d in (domains if isinstance(domains, list) else [])
         ):
             return True
         if name:
-            from .intent_device_shared import WINDOW_EXCLUDE_KEYWORDS
             from .intent_window_const import WINDOW_NAME_MAPPING
 
             name_lower = name.lower().strip()
-            for ex in WINDOW_EXCLUDE_KEYWORDS:
-                if ex.lower() in name_lower:
-                    return False
             for key, value in WINDOW_NAME_MAPPING.items():
                 if key.lower() in name_lower or value.lower() in name_lower:
                     return True
@@ -566,20 +585,33 @@ class TurnDeviceIntentBase(intent.IntentHandler):
         """
         from .intent_window_const import (extract_window_name,
                                           find_all_window_buttons_by_action,
-                                          find_window_buttons)
+                                          find_window_buttons,
+                                          is_bare_window_name,
+                                          is_generic_window_name,
+                                          is_curtain_family)
         from .intent_window_control import _all_window_result, _press_multi_buttons
 
         action = "open" if service == "turn_on" else "close"
 
         window_name = extract_window_name(device_name or "")
 
-        is_all_ref = (
-            window_name
-            and device_name
-            and device_name.strip().lower() == window_name.lower()
-            and window_name.lower() in ("窗户", "窗")
-        )
-        if not window_name or is_all_ref:
+        # v1.1.27：裸窗字（窗户/窗/窗子）改用 is_bare_window_name 判定——旧的
+        # 等值判定（device_name == extract 结果）在「窗子」上永不成立（extract
+        # 已归一成「窗户」），整句被当"具名窗"走精确单按钮路径：「窗子」被
+        # original_name 精确过滤全剔=failed，「窗」只按一扇而非本区全部。
+        # 与 ControlWindow 主路径（intent_window_control:455）同源同判。
+        is_all_ref = bool(window_name) and is_bare_window_name(device_name)
+        # v1.1.27-r2（金标复测）两道收紧：
+        #   ① 帘族（纱窗/百叶/帘）绝不按窗控——extract 顶层已裁，但
+        #      is_generic_window_name 含"窗"字会把帘族判成泛称，按钮对地形实测
+        #      被按成「关一扇＝同屋窗钮全按」；
+        #   ② 无区域不得升级成"全屋盲按"——只认显式全屋词（所有/全部/全都/每个），
+        #      与 ControlWindow 的泛称闸（intent_window_control:445）同口径。
+        generic_ref = (not window_name and is_generic_window_name(device_name)
+                       and not is_curtain_family(device_name))
+        _dn = device_name or ""
+        whole_house = any(w in _dn for w in ("所有", "全部", "全都", "每个"))
+        if (is_all_ref or generic_ref) and (area_name or whole_house):
             buttons = find_all_window_buttons_by_action(
                 intent_obj.hass, area_name or "", action
             )
@@ -602,6 +634,16 @@ class TurnDeviceIntentBase(intent.IntentHandler):
                 out.setdefault("control_targets",
                                [{"name": "窗户", "area": area_name or ""}])
                 return out
+            return None
+
+        if not window_name:
+            # extract 返 None 且**不是**泛称 = 具体名没识别上（ASR 丢字/旧版漏识）
+            # 或帘族（门帘/纱窗/百叶…）：绝不升级成本区全窗（一扇变一排，同
+            # intent_window_control:445 的如实拒收），交回上层如实失败或走非窗路径。
+            _LOGGER.info(
+                "Window name %r unrecognized - refusing all-window escalation",
+                device_name,
+            )
             return None
 
         button_map = find_window_buttons(
@@ -645,7 +687,8 @@ class TurnDeviceIntentBase(intent.IntentHandler):
     @staticmethod
     def _get_button_base_name(name: str) -> str:
         name_lower = name.lower()
-        action_keywords = ["开", "关", "内倒", "open", "close", "停止", "stop", "pause"]
+        action_keywords = ["内倒", "内岛", "开启", "打开", "关闭", "停止", "暂停",
+                           "open", "close", "stop", "pause", "开", "关"]
         for kw in action_keywords:
             if name_lower.endswith(f" {kw}"):
                 return name[: -(len(kw) + 1)]
@@ -718,7 +761,8 @@ class TurnDeviceIntentBase(intent.IntentHandler):
                         (
                             e
                             for e in group
-                            if self._button_matches_action(e.name, ["开", "open"])
+                            if self._button_matches_action(
+                                e.name, ["开", "开启", "打开", "open"])
                         ),
                         None,
                     )
@@ -727,7 +771,8 @@ class TurnDeviceIntentBase(intent.IntentHandler):
                         (
                             e
                             for e in group
-                            if self._button_matches_action(e.name, ["关", "close"])
+                            if self._button_matches_action(
+                                e.name, ["关", "关闭", "close"])
                         ),
                         None,
                     )

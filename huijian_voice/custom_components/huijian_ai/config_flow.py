@@ -115,6 +115,32 @@ def _clean_mcp_endpoint(value: Any) -> str | None:
     if v.lower().startswith(("ws://", "wss://", "http://", "https://")):
         return v
     _LOGGER.warning("入驻数据 mcp_endpoint 非 URL 形态，按空处理: %r", value)
+
+
+def _redact_url_for_log(url) -> str:
+    """端点进日志前的脱敏（与 huijian/ws_transport._redact_endpoint 同口径）：
+    只留 '?' 前 host+path，query 以标记留痕——translations 指引会把
+    ?token=<加载项令牌> 粘进 endpoint，原文落 INFO 即凭据外流。"""
+    s = str(url or "")
+    return s.split("?", 1)[0] + (" ?<masked>" if "?" in s else "")
+
+
+_SETUP_LOG_ENDPOINT_KEYS = ("llm_endpoint", "stt_endpoint", "tts_endpoint", "mcp_endpoint")
+_SETUP_LOG_SECRET_KEYS = ("noise_psk", "password")
+
+
+def _redact_setup_for_log(data) -> dict:
+    """v1.1.27-r2（金标复测）：setup_data 进 INFO 日志前的脱敏快照——
+    四端点按 URL 口径（host 可辨、query 掩掉），密钥只留类型+长度。"""
+    out: dict = {}
+    for k, v in dict(data or {}).items():
+        if k in _SETUP_LOG_ENDPOINT_KEYS:
+            out[k] = _redact_url_for_log(v)
+        elif k in _SETUP_LOG_SECRET_KEYS and v:
+            out[k] = f"<{type(v).__name__} len={len(str(v))}>"
+        else:
+            out[k] = v
+    return out
     return None
 
 
@@ -315,12 +341,17 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
         errors = {}
         schema = {}
         haid = await get_haid(self.hass)
+        # v1.1.27（批7）：进度完成（user_input is None）与表单提交（{}）是两个
+        # 态。旧写法把 None 归一成 {} 后判 `user_input is not None` 恒真 ⇒ 超时
+        # 引导表单整段不可达（_setup_wait_timed_out 成僵尸标志），用户 5 分钟
+        # 超时只会被静默 abort。
+        submitted = user_input is not None
         if user_input is None:
             user_input = {}
 
-        _LOGGER.info("setup_data: %s", self.setup_data)
+        _LOGGER.info("setup_data: %s", _redact_setup_for_log(self.setup_data))
         if not self.setup_data:
-            if user_input is not None:
+            if submitted:
                 if user_input.get("rewait"):
                     # F：uuid 未失效时设备 POST 可能迟到——保持同一
                     # setup_uuid 重启等待任务续等一轮（旧表单再提交只会
@@ -357,7 +388,7 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
         config_type = self.setup_data.get("config_type", "device")
         mcp_endpoint = _clean_mcp_endpoint(
             self.setup_data.get("mcp_endpoint") if self.setup_data else None)
-        _LOGGER.info("mcp_endpoint: %s", mcp_endpoint)
+        _LOGGER.info("mcp_endpoint: %s", _redact_url_for_log(mcp_endpoint))
 
         if config_type == "device":
             self._name = self.setup_data.get("speak_name") or self._name

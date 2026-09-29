@@ -86,6 +86,15 @@ class VoiceSceneStore:
                 return False, f"触发词'{trigger_phrase}'已存在，请使用其他词"
 
             scene_id = f"voice_scene_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            # v1.1.27（批7）：秒级时间戳同秒两次创建会算出同一 ID——后写顶掉
+            # 前写（scene 被覆盖），而 trigger_index 两条触发词反指同一 scene
+            # （旧触发词指到新动作上）。冲突即加后缀唯一化（不换形态，管理页
+            # 与 _bad_id 闸只认无点/无空格形）。
+            if scene_id in data.get("scenes", {}):
+                n = 1
+                while f"{scene_id}_{n}" in data.get("scenes", {}):
+                    n += 1
+                scene_id = f"{scene_id}_{n}"
             scene = {
                 "scene_id": scene_id,
                 "trigger_phrase": trigger_phrase,
@@ -388,7 +397,27 @@ class HassTriggerVoiceSceneIntent(intent.IntentHandler):
             }
 
         executed_actions = []
-        for action in scene.get("actions", []):
+        # v1.1.27（批7 M7 同口）存量脏形态韧性：PUT 早期版本/手工改 .storage 可
+        # 让 actions 混入非 dict（api.py 已加形态闸，存量数据仍可能带）——旧实现
+        # 在此裸 .get 直接 AttributeError → REST 500。非 dict 跳过，不炸。
+        raw_actions = scene.get("actions")
+        if not isinstance(raw_actions, list):
+            raw_actions = []
+        replay_actions = [a for a in raw_actions if isinstance(a, dict)]
+        if not replay_actions:
+            # PUT 允许写 actions: []（形态闸只判 list[dict]），而回放空列表
+            # all([])==True 会假报「已执行场景」——空动作如实拒回放。
+            _LOGGER.warning("场景「%s」无可执行动作（actions=%r）",
+                            trigger_phrase, raw_actions)
+            msg = f"场景「{trigger_phrase}」没有可执行的动作（动作列表为空）"
+            return {
+                "success": False,
+                "scene_id": scene.get("scene_id"),
+                "executed_actions": [],
+                "error": msg,
+                "message": msg,
+            }
+        for action in replay_actions:
             intent_name = action.get("intent") or action.get("name")
             params = action.get("params") or action.get("parameters", {})
             _LOGGER.info(
@@ -436,7 +465,11 @@ class HassTriggerVoiceSceneIntent(intent.IntentHandler):
                     {"intent": intent_name, "result": "error", "error": str(e)}
                 )
 
-        all_success = all(a.get("result") != "error" for a in executed_actions)
+        # v1.1.27：空回放已在上方拒掉，此处 bool 兜底防「零动作=全成功」复活
+        # （PUT 可写 actions: []，all([])==True 会假报「已执行场景」）。
+        all_success = all(
+            a.get("result") != "error" for a in executed_actions)
+        all_success = all_success and bool(executed_actions)
         out = {
             "success": all_success,
             "scene_id": scene.get("scene_id"),

@@ -156,7 +156,7 @@ def test_ws_transport_send_message_timeout_behavior():
         "        self.calls = 0\n"
         "    def update_activity_time(self):\n"
         "        self.calls += 1\n"
-        "    async def restart_connection(self, reason=''):\n"
+        "    async def restart_connection(self, reason='', **kw):\n"
         "        self.restarted = reason\n"
         + fn.group(0) + "\n" + helper.group(0)
     )
