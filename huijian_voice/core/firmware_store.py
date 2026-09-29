@@ -85,10 +85,17 @@ def ota_image_error(path) -> str:
     代码。第一道判 0xE9（ESI 镜像头），第二道判魔数。
 
     读不到/异常 → 返回 ""（判不了就不拦，与全仓 fail-open 纪律一致；容量闸仍在）。
+
+    2026-09-29 复核（真机日志实锤）：**不在盘 ≠ 异常**。清单面（`versions()`）对每个
+    登记版本都会调这里，未下载的版本以前每看一次面板就刷一行 WARNING（9 条登记刷 8
+    行——2.1.65 被容量闸先拒短路），还会把"在盘但读不出"（权限/坏盘）的真异常淹掉。
+    故 ENOENT 静默放行（"未下载"由行内 `on_disk` 字段表述）；其余 OSError 仍留痕。
     """
     try:
         with open(path, "rb") as f:
             head = f.read(0x24)
+    except FileNotFoundError:
+        return ""                       # 未在盘：没有可判对象，静默（常态，非告警）
     except OSError as e:
         logger.warning("[固件] 形态闸读头失败（放行）：%s", e)
         return ""

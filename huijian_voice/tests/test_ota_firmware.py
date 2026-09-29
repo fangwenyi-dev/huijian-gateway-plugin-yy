@@ -774,6 +774,45 @@ def test_ota_image_gate_uses_real_headers(tmp_path):
     assert fs.ota_image_error(tmp_path / "missing.bin") == "", "读不到=放行（fail-open）"
 
 
+def test_ota_image_gate_missing_file_is_silent(tmp_path, caplog):
+    """**未在盘 ⇒ 静默**放行（真机 2026-09-29 日志实锤：清单页每看一次刷 N 行 WARNING）。
+
+    "未下载"是常态、由行内 `on_disk` 字段表述，不是异常；真异常（权限/坏盘/目录）
+    必须仍留痕——见下一条。"""
+    import logging
+    with caplog.at_level(logging.WARNING, logger="huijian.firmware"):
+        assert fs.ota_image_error(tmp_path / "missing.bin") == ""
+    assert not [r for r in caplog.records if "形态闸读头失败" in r.getMessage()], caplog.text
+
+
+def test_ota_image_gate_unreadable_path_still_warns(tmp_path, caplog):
+    """存在但读不出（目录/权限/坏盘）⇒ 仍打 WARNING（别把真异常一起静音）。"""
+    import logging
+    a_dir = tmp_path / "adir"
+    a_dir.mkdir()
+    with caplog.at_level(logging.WARNING, logger="huijian.firmware"):
+        assert fs.ota_image_error(a_dir) == ""      # 判不了=放行（纪律不变）
+    assert [r for r in caplog.records if "形态闸读头失败" in r.getMessage()], caplog.text
+
+
+def test_versions_listing_does_not_warn_for_not_downloaded(tmp_path, caplog):
+    """清单面回归钉：lock 登记但未落盘 ⇒ `versions()` 不产生形态闸 WARNING。
+
+    这正是真机那串日志的入口（GET /api/firmware → status() → versions()）。"""
+    import logging
+    lock = _write_lock(tmp_path, [
+        {"version": "2.1.98", "file": "huijian-s3-2.1.98.bin",
+         "urls": ["https://example.com/huijian-s3-2.1.98.bin"],
+         "sha256": "a" * 64, "size": 100, "notes_zh": ""},
+    ])
+    st = fs.FirmwareStore(root=tmp_path / "data", lock_path=lock)
+    with caplog.at_level(logging.WARNING, logger="huijian.firmware"):
+        rows = {r["version"]: r for r in st.versions()}
+    assert rows["2.1.98"]["on_disk"] is False
+    assert rows["2.1.98"]["ota_ok"] is True          # 未在盘：形状无从判 ⇒ 不拦（容量闸仍过）
+    assert not [r for r in caplog.records if "形态闸读头失败" in r.getMessage()], caplog.text
+
+
 def test_issue_refuses_factory_image_even_when_small(tmp_path):
     """接线钉：小体积合并镜像必须在**签发口**就被拦（不能只靠容量闸）。"""
     data = b"\xe9" + b"\x00" * 0x1f + b"\x50\x00\x00\x00" + b"x" * 400
