@@ -21,6 +21,19 @@ sys.path.insert(0, str(ROOT))
 CC = ROOT / "custom_components" / "huijian_ai"
 INTEGRATION = CC
 
+
+def _fs_is_case_sensitive() -> bool:
+    """真探测（不看 os.name）：NTFS/默认 APFS 大小写**不敏感** ⇒ 同目录里
+    `Amy.bin` 与 `amy.bin` 是同一个文件（后写覆盖前者），大小写折叠碰撞
+    **在该平台上构造不出来**。同机不同卷结论可能不同，故按实际文件系统判。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        (Path(d) / "Aa.bin").write_bytes(b"")
+        return not (Path(d) / "aa.bin").exists()
+
+
+_FS_CASE_SENSITIVE = _fs_is_case_sensitive()
+
 FRAME = b"OPUSFRAME"
 
 
@@ -156,6 +169,7 @@ def _official(tmp, n=3, per=4):
     return v
 
 
+@pytest.mark.skipif(not _FS_CASE_SENSITIVE, reason="文件系统大小写不敏感：Amy.bin/amy.bin 异体不可构造")
 def test_merge_case_collision(tmp_path):
     from core.tts import merge_custom_voices
     official = _official(tmp_path)

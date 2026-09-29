@@ -423,7 +423,13 @@ class Agent:
                         targets += list((a["params"].get("target") or []))
                 if targets:
                     reg = await capability.registry_areas(self.ha)
-                    bad = capability.bad_target_area(targets, reg)
+                    # v1.1.28 补：`bad_target_area` 的聚合口径已是"**所有**带区域槽
+                    # 都不合格才拦"（即时执行侧靠就地剪槽兜底，创建侧不剪槽）。这里是
+                    # **入库前**预检，口径必须与本地创建侧 `_creation_area_problem`
+                    # 一致：任一槽区域不在册即拦——入库后是无人值守执行，不许带着未知
+                    # 区域落库（混合槽＝放走一个必半失败的动作）。
+                    bads = capability.bad_area_slots(targets, reg)
+                    bad = str((bads[0] or {}).get("area") or "").strip() if bads else ""
                     if bad:
                         return False, (f"「{bad}」这个房间在 Home Assistant 里不存在，"
                                        f"动作没执行——请核对房间名后重试")

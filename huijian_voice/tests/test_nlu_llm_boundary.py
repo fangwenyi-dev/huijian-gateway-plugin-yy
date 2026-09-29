@@ -552,6 +552,27 @@ def test_llm_scene_write_rejects_unknown_area():
     assert ok2 is True and ex.calls
 
 
+def test_llm_scene_write_rejects_mixed_areas():
+    """v1.1.28 补：混合槽（在册区域 + 未知区域）不得因"还有合格槽"就放行入库。
+
+    `bad_target_area` 的聚合口径已改为"**所有**带区域槽都不合格才拦"——即时执行侧
+    靠就地剪槽兜底，**创建侧不剪槽**；LLM 工具通道是入库前预检，口径必须与本地创建侧
+    `_creation_area_problem` 一致：任一槽区域不在册即拦（入库后是无人值守执行，带着
+    未知区域落库＝放走一个必半失败的动作）。
+    """
+    ex = Recorder()
+    ag = Agent(S(**{"llm.enabled": True, "llm.base_url": "http://x/v1"}), _AreaHA(), ex)
+    mixed = {"trigger_phrase": "晚安",
+             "actions": [{"intent": "TurnDeviceOn",
+                          "params": {"target": [{"area": "办公室",
+                                                 "devices": [{"name": "空调"}]}]}},
+                         {"intent": "TurnDeviceOn",
+                          "params": {"target": [{"area": "阁楼",
+                                                 "devices": [{"name": "灯"}]}]}}]}
+    ok, say = asyncio.run(ag._tool("HassCreateVoiceScene", mixed))
+    assert ok is False and "阁楼" in say and not ex.calls, say
+
+
 def test_llm_scene_write_gate_still_applies():
     ex = Recorder()
     ag_on = Agent(S(**{"llm.enabled": True, "llm.base_url": "http://x/v1"}), None, ex)

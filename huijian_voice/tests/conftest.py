@@ -28,6 +28,19 @@ if _existing is None or not any(_TESTS_DIR in str(p) for p in getattr(_existing,
 os.environ["HUIJIAN_DATA"] = tempfile.mkdtemp(prefix="huijian_test_")
 os.environ.setdefault("HUIJIAN_NLU_DATA", str(HERE / "nlu_data"))
 
+# Windows：py3.13 下 ctypes 找 opus.dll 只认 os.add_dll_directory。e2e_server /
+# e2e_client / _conv_bench* 都各自探测了仓旁 _winlibs/，**唯独 pytest 进程没做**
+# ⇒ 22 条 TTS 流 / 云档测试以「opus 绑定缺失」全红（环境性，非产品缺陷）。
+# 此处统一补上，语义与它们完全一致：HUIJIAN_OPUS_DLL_DIR 显式覆盖，否则自动
+# 探测仓旁 _winlibs/。必须在任何 core.* 导入之前执行（opuslib_next 装载即时
+# 解析 DLL）。
+if os.name == "nt":
+    _opus_dir = os.environ.get("HUIJIAN_OPUS_DLL_DIR") or str(HERE.parent / "_winlibs")
+    if os.path.isdir(_opus_dir):
+        os.environ["PATH"] = _opus_dir + os.pathsep + os.environ["PATH"]
+        if hasattr(os, "add_dll_directory"):
+            os.add_dll_directory(_opus_dir)
+
 import pytest  # noqa: E402
 
 

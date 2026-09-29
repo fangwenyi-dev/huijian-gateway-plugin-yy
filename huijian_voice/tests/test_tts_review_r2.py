@@ -23,6 +23,19 @@ from core.tts import (TtsEngine, _CloudOpusStream, _SPEED_MIN, _SPEED_MAX,
                       _RATE_MIN, _RATE_MAX, _DROP_TOLERANCE)
 
 
+def _fs_is_case_sensitive() -> bool:
+    """真探测（不看 os.name）：NTFS/默认 APFS 大小写**不敏感** ⇒ 同目录里
+    `Amy.bin` 与 `amy.bin` 是同一个文件（后写覆盖前者），大小写折叠碰撞
+    **在该平台上构造不出来**。同机不同卷结论可能不同，故按实际文件系统判。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        (Path(d) / "Aa.bin").write_bytes(b"")
+        return not (Path(d) / "aa.bin").exists()
+
+
+_FS_CASE_SENSITIVE = _fs_is_case_sensitive()
+
+
 class _S:
     def __init__(self, d=None):
         self.d = dict(d or {})
@@ -263,6 +276,7 @@ def test_main_firmware_fallback_uses_logger():
 
 
 # ── R2 #9：投递目录预览复刻 merge 的 F7 大小写折叠跳数 ──────────
+@pytest.mark.skipif(not _FS_CASE_SENSITIVE, reason="文件系统大小写不敏感：Amy.bin/amy.bin 异体不可构造")
 def test_preview_fold_collision_sid(tmp_path, monkeypatch):
     from core import const
     official_n, per = 103, 64

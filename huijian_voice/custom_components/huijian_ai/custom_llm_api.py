@@ -629,11 +629,21 @@ class HuijianControlAPI(llm.API):
                 # 键）——旧式 `get("success") is not False` 恒真 ⇒ 逐台全失败仍被
                 # 播「办好了」。按逐台行折算：任一台成功＝该步可用，全败＝失败。
                 rows = [r for r in response["results"] if isinstance(r, dict)]
-                ok = any(r.get("success") for r in rows) if rows else True
+                # v1.1.27 复审（本轮）：旧式 `if rows else True` 把「零成功证据」
+                # 翻成成功——空 results（或元素全非 dict）时 any() 本已为 False，
+                # 却被判「办好了」。SetDeviceMode 族无可用设备时已提前回
+                # {"success": False, "No available devices found"}，能走到这里的
+                # 空列表属异常形态 ⇒ 按「没有任何一台成功」如实判失败。
+                ok = any(r.get("success") for r in rows)
                 err = next((str(r.get("error")) for r in rows
-                            if not r.get("success") and r.get("error")), "")
+                            if not r.get("success") and r.get("error")), "") \
+                    or ("" if ok else "执行面未返回任何结果")
             else:
-                ok, err = True, ""
+                # 未知 dict 形态（无 success 键、无 results 键）：不一律翻成失败
+                # ——会误伤合法但非常规的成功形态；但**带 error 证据必须采信**，
+                # 旧式恒 True 会让「有失败原因」的响应也被播成「办好了」。
+                err = str(response.get("error") or "")
+                ok = not err
         else:
             succ = getattr(response, "success", None)
             if succ is None:
@@ -641,8 +651,20 @@ class HuijianControlAPI(llm.API):
                 # response_type=ERROR 表达）——旧判据 getattr(...,True) 恒真 ⇒
                 # 真机每一次失败都被报成功。
                 rtype = getattr(response, "response_type", None)
-                ok = str(getattr(rtype, "name", "") or "").upper() != "ERROR"
                 err = str(getattr(response, "error_code", "") or "")
+                if rtype is None:
+                    # 既非 dict、无 .success、也无 response_type ⇒ 不是标准
+                    # IntentResponse，此时 `"" != "ERROR"` 恒真（无证据即成功）。
+                    # 一律翻成失败会误伤未知但合法的对象，故保留 fail-open 并
+                    # **留痕**（异常形态可见，便于后续按实证收口）；有 error_code
+                    # 证据则照旧采信。
+                    _LOGGER.warning(
+                        "[custom_llm_api] 无法判定成败的响应形态 %s，按成功处理"
+                        "（请核对 handler 返回契约）",
+                        type(response).__name__)
+                    ok = not err
+                else:
+                    ok = str(getattr(rtype, "name", "") or "").upper() != "ERROR"
             else:
                 ok = succ is not False
                 err = str(getattr(response, "error", "") or "")

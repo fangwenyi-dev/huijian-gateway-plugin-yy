@@ -316,13 +316,26 @@ class Executor:
             return None
 
     async def _offline_names(self, name: str, args: dict) -> list[str]:
-        """目标里**确证 unavailable** 的那几台（v1.1.17 复审补漏，与 _availability_refuse
-        同口径：只认 'unavailable'，'unknown'/不在快照一律不算）。
+        """本条**确证没动成**的那几台的点名（与 _availability_refuse 同口径：只认
+        'unavailable'，'unknown'/不在快照一律不算）。
 
         病灶：可用态闸只在"**全部**离线"时拒答；「点名 3 台、2 台离线」是部分离线 ⇒
         闸放行 → 而 HA 对离线实体的 service call 照样回 success ⇒ 播报笼统成功，
         用户永远不知道那两台没动。这里把"哪几台没执行"在播报里点出来（只改播报，
         不改成败口径）。target 形与 entity_id 形都覆盖。
+
+        v1.1.28 修「离线孪生污染播报」（192.168.1.91 实锤）：`light.she_deng`（客厅
+        射灯，unavailable）与 `light.ban_gong_shi_she_deng`（办公室射灯）**同名**。
+        说「打开射灯」时真机真正被 turn_on 的是办公室那台（事后复核 state=on），但旧
+        口径把整个 target 按 name 重做一遍实体匹配，同名孪生因此被捞进来点名 ⇒
+        播报成了「好的，「射灯」现在离线、这条没执行」——与事实相反。
+        新口径（target 形）＝**逐个设备槽全票通过才算**：只有当用户点到的这一个名字
+        在本家解析到的**所有**实体都确证 unavailable 时才点名（此时无论集成挑了哪一台，
+        都确实没动成）；同名里只要还有一台可用 ⇒ 不许点名（那一台很可能才是真正被执行
+        的一台；宁可不点，绝不把做成了说成没做）。**未点名的槽**（整区/纯域）不适用
+        这条孪生规则——那里没有"按名重解析"这一步，区域+域本身就是真下发集合，其中
+        确证离线的每一台照旧逐台点名（v1.1.17 原意）。entity_id 形仍按实际下发的
+        entity_id 精确取（那本来就是"真下发集合"）。
         """
         try:
             raw = (args or {}).get("entity_id")
@@ -343,13 +356,32 @@ class Executor:
                 tgt = (args or {}).get("target")
                 if not isinstance(tgt, list) or not tgt:
                     return []
-                for ent in capability.resolve_candidates(
-                        states, getattr(self.ha, "_entity_area", {}) or {}, tgt):
-                    if str((ent or {}).get("state")) != "unavailable":
+                entity_area = getattr(self.ha, "_entity_area", {}) or {}
+                for slot in tgt:
+                    if not isinstance(slot, dict):
                         continue
-                    nm = str(((ent.get("attributes") or {}).get("friendly_name")) or "").strip()
-                    if nm:
-                        out.append(nm)
+                    for dev in (slot.get("devices") or []):
+                        if not isinstance(dev, dict):
+                            continue
+                        named = bool(str(dev.get("name") or "").strip())
+                        # 逐个设备槽单独解析——同槽里其它可用设备不得替这台背书，
+                        # 更不许被这台拖累（v1.1.28 孪生口径）
+                        same = capability.resolve_candidates(
+                            states, entity_area, [{**slot, "devices": [dev]}])
+                        if not same:
+                            continue                 # 这台查不到 ⇒ 无从点名
+                        if named and not all(str((e or {}).get("state")) == "unavailable"
+                                             for e in same):
+                            continue                 # 点名了、同名还有可用的 ⇒ 不许点名（孪生）
+                        # 未点名槽（整区/纯域）不适用孪生规则：区域+域本身就是真下发
+                        # 集合，其中确证离线的每一台都没动成 ⇒ 照旧逐台点名（v1.1.17）。
+                        for ent in same:
+                            if not named and str((ent or {}).get("state")) != "unavailable":
+                                continue
+                            nm = str(((ent.get("attributes") or {})
+                                      .get("friendly_name")) or "").strip()
+                            if nm:
+                                out.append(nm)
             return list(dict.fromkeys(out))
         except Exception:  # noqa: BLE001 判不了就不判（绝不凭空点名）
             logger.exception("[执行] 离线目标点名异常（不判）")
@@ -1258,7 +1290,10 @@ class Executor:
         names = "、".join([t.get("name", "") for t in targets if t.get("name")]) or "设备"
         areas = [t.get("area", "") for t in targets if t.get("area")]
         area = areas[0] if areas else ""
-        head = f"{area}的" if area else ""
+        # v1.1.28：区域继承补好后，friendly_name 自带房间名的实体（「办公室空调 Air
+        # Conditioner」）会被拼成「办公室的办公室空调 …」——念出来是重复房间名。名字
+        # 已经以该区域名开头时不再补前缀（只改播报，不改成败、不改目标）。
+        head = f"{area}的" if area and not str(names).startswith(area) else ""
         args = plan.args
         intent = plan.intent
         # 锁语义反转（D7 兜底）：目标名含「锁」

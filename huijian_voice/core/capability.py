@@ -297,18 +297,71 @@ def _ask_hint(ents: list[dict]) -> str:
 # 的畸形目标——创建入库后触发必半失败；即时执行则白跑一趟集成。
 # 判据只认"注册表里确实没有"这一种确定态：注册表未同步（_areas 空）⇒ 一律放行，
 # 与模块头同一纪律（宁漏放不误拒）。
-def bad_target_area(targets, reg_areas) -> Optional[str]:
-    """target 槽列表里第一个不在注册表里的 area；reg_areas 空 ⇒ None（判不了，放行）。"""
+def _slot_resolvable(slot: dict, states: dict, entity_area: dict) -> bool:
+    """该槽能否在本家**自己**落到实体（畸形区域闸的逐槽放行证据，v1.1.28）。
+
+    只有"该槽自身能落到具体实体"才允许放行整句：`resolve_candidates`
+    先按 area 过滤、再按 name/domains 过滤 ⇒ 区域名不在注册表里时，除非该字符串
+    恰好是某台设备 friendly_name 的一部分，否则恒空 ⇒ **未知区域不得跨区抓设备**
+    这条原始语义（本闸的存在理由）逐槽依然成立。
+    快照空/fail ⇒ False（无证据＝不许放行，退回"只认注册表"的旧口径）。"""
+    try:
+        if not states or not isinstance(slot, dict):
+            return False
+        return bool(resolve_candidates(states, entity_area or {}, [slot]))
+    except Exception:      # noqa: BLE001 判定故障=当作解析不出（不许放行）
+        return False
+
+
+def bad_area_slots(targets, reg_areas, states=None, entity_area=None) -> list:
+    """逐槽筛出**不合格**的目标槽：区域不在注册表、且本槽解析不出实体。
+
+    reg_areas 空（注册表未同步）⇒ 恒 []：判不了即放行，与模块头同一纪律。
+    无区域槽（area 为空）不在本闸管辖内（那是"整区/全屋"或纯按名的槽）。
+    返回的是**原槽 dict**（可被调用方就地剪除），永不抛。"""
+    out: list = []
     try:
         if not reg_areas:
-            return None
+            return out
         for t in targets or []:
             if not isinstance(t, dict):
                 continue
             a = str(t.get("area") or "").strip()
-            if a and a not in reg_areas:
-                return a
-        return None
+            if not a:
+                continue                              # 无区域槽：不在本闸管辖
+            if a in reg_areas:
+                continue                              # 区域在册：合格
+            if _slot_resolvable(t, states or {}, entity_area or {}):
+                continue                              # 该槽自身能落地：逐槽放行
+            out.append(t)
+    except Exception:      # noqa: BLE001 判不了=不合格槽为空（放行）
+        return []
+    return out
+
+
+def bad_target_area(targets, reg_areas, states=None, entity_area=None) -> Optional[str]:
+    """target 槽列表里**所有**带区域的槽都不合格时，返回第一个问题区域名。
+
+    v1.1.24 旧口径是"任一槽区域不在注册表 ⇒ 整句拦下"；v1.1.28 改为**逐槽判定**：
+    双语桥会把一个英文句拆成两个 Target 槽（"turn on the office light" ⇒
+    [{area:'office'…}, {area:'办公室'…}]），第二个槽已正确解析到实体，整句却被
+    第一个槽的英文区域名连坐拒掉（v1.1.25 的英文能力在真机上等于未兑现）。新口径
+    只在**所有带区域的槽**都不合格时才拦（"只要还有能解析到设备的槽" ⇒ 不拦整句），
+    其余不合格槽由调用方就地剪除
+    （`bad_area_slots`），**绝不带着未知区域下发**——本闸"防跨区误抓"的原意不丢。
+
+    reg_areas 空 ⇒ None（判不了，放行）；states 空 ⇒ 无实体证据 ⇒ 只认注册表。"""
+    try:
+        if not reg_areas:
+            return None
+        area_slots = [t for t in (targets or [])
+                      if isinstance(t, dict) and str(t.get("area") or "").strip()]
+        if not area_slots:
+            return None
+        bads = bad_area_slots(targets, reg_areas, states, entity_area)
+        if len(bads) != len(area_slots):
+            return None            # 还有合格的槽 ⇒ 不拦整句（不合格槽另行剪除）
+        return str((bads[0] or {}).get("area") or "").strip() or None
     except Exception:  # noqa: BLE001 判不了=放行
         return None
 

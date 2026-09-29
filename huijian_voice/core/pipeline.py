@@ -439,6 +439,26 @@ def _target_areas(args: dict) -> list[str]:
     return out
 
 
+def _target_domains(tgt) -> list[str]:
+    """target 槽里已声明的域并集（v1.1.28：给主域判据当输入，不另抄一张域族表）。
+
+    归一走 capability._domain_slots：LLM/上游把单域塞成字符串时，旧写法会把
+    "light" 炸成 ('l','i','g','h','t')。无域声明 ⇒ []（= 不过滤，不是"拒绝"）。
+    """
+    out: list[str] = []
+    try:
+        for slot in (tgt or []):
+            if not isinstance(slot, dict):
+                continue
+            for dev in (slot.get("devices") or []):
+                for dom in capability._domain_slots((dev or {}).get("domains")):
+                    if dom and dom not in out:
+                        out.append(dom)
+    except Exception:  # noqa: BLE001 提取失败=当未声明
+        return []
+    return out
+
+
 def _has_explicit_target(args: dict) -> bool:
     """target 已含区域或设备名 = 明示目标，不做继承/区域注入。"""
     return bool(_target_names(args) or _target_areas(args) or args.get("entity_id"))
@@ -1862,7 +1882,12 @@ class Pipeline:
         判据：动作目标的 area 必须在 **HA 区域注册表**（`ha._areas`）里存在；注册表
         未同步（_areas 空）⇒ 一律放行（fail-open，同 capability 纪律：宁漏放不误拒）。
         只判区域名——设备名不在册不判（离线/隐藏实体在册，误拒风险高）。永不抛。
-        v1.1.24：判据与即时执行侧共用 `capability.bad_target_area/registry_areas`。"""
+        v1.1.24：判据与即时执行侧共用 `capability.bad_target_area/registry_areas`。
+
+        v1.1.28：即时执行侧改了**逐槽**判据（`_plan_area_problem`），创建侧**不跟着
+        放宽**——入库是"以后没人盯着地自动执行"，这里不能像即时执行那样把不合格槽
+        剪掉（那等于把用户点的动作偷偷丢一个），也不能因为有别的槽合格就放行。
+        故仍按"任一槽区域不在册 ⇒ 拦下"的旧口径（这里不传 states ⇒ 只看注册表）。"""
         try:
             targets = (plan.args or {}).get("target")
             if not isinstance(targets, list) or not targets:
@@ -1871,29 +1896,81 @@ class Pipeline:
             if ha is None:
                 return None
             reg = await capability.registry_areas(ha)
-            return capability.bad_target_area(targets, reg)
+            bads = capability.bad_area_slots(targets, reg)
+            return str((bads[0] or {}).get("area") or "").strip() if bads else None
         except Exception:  # noqa: BLE001
             return None
 
     async def _plan_area_problem(self, plan: Optional[Plan]) -> Optional[str]:
-        """**即时执行**前的区域可解析性预检（v1.1.24，与创建侧同口径）：
-        主步 + extra_steps 的目标里，任一 area 在 HA 区域注册表里不存在 ⇒ 返回该名；
-        注册表未同步 ⇒ None（fail-open）。连写句解析出的畸形区域不再"发出去等集成
-        报错"，而是当场如实拦下。永不抛。"""
+        """**即时执行**前的区域可解析性预检（v1.1.24 引入，v1.1.28 改逐槽）。
+
+        旧口径（v1.1.24）：主步 + extra_steps 的目标里**任一** area 不在 HA 区域
+        注册表 ⇒ 整句拦下，为的是拦住连写句解析出的畸形区域（"办公室的射灯办公室"
+        这种），不再白跑一趟集成。
+        v1.1.28：判据改为**逐槽**——双语桥把一个英文句拆成两个槽
+        （`turn on the office light` ⇒ [{area:'office'}, {area:'办公室'}]），第二个
+        槽已正确解析到实体，不该被第一个槽的英文区域名连坐。处理次序：
+          ① 所有带区域的槽都不合格（区域不在册 **且** 本槽解析不出实体）⇒ 返回该
+             区域名，走原来的"整句拦下"话术；
+          ② 有合格的槽 ⇒ **就地剪掉**不合格的那些槽（未知区域绝不下发 —— 本闸"防
+             跨区误抓"的原意靠这一步保住），其余槽照常执行；某一份 target 会因此
+             被剪空 ⇒ 该份放弃整句拦下（空 target 会被下游当"全屋语义"放行，
+             比拦下危险得多）。
+        states 快照取不到 ⇒ 无逐槽证据 ⇒ 退回①的旧口径。
+        注册表未同步（reg 空）⇒ None（fail-open）。永不抛。"""
         if plan is None:
             return None
         try:
-            targets = list(((plan.args or {}).get("target") or []))
+            slots: list = []                  # [(持有该 target 列表的 args dict, key)]
+            targets: list = []
+            main_args = plan.args or {}
+            if isinstance(main_args.get("target"), list) and main_args.get("target"):
+                slots.append((main_args, "target"))
+                targets += list(main_args["target"])
             for st in (getattr(plan, "extra_steps", None) or []):
-                if isinstance(st, dict):
-                    targets += list(((st.get("args") or {}).get("target") or []))
-            if not targets:
+                if not isinstance(st, dict):
+                    continue
+                sub = st.get("args") or {}
+                if isinstance(sub.get("target"), list) and sub.get("target"):
+                    slots.append((sub, "target"))
+                    targets += list(sub["target"])
+            if not targets or not slots:
                 return None
             ha = getattr(self, "ha", None)      # 手工装配的管线可无 ha（fail-open）
             if ha is None:
                 return None
             reg = await capability.registry_areas(ha)
-            return capability.bad_target_area(targets, reg)
+            try:
+                states = await ha.states()
+            except Exception:                   # noqa: BLE001 快照读不到=无逐槽证据
+                states = {}
+            entity_area = getattr(ha, "_entity_area", {}) or {}
+            bads = capability.bad_area_slots(targets, reg, states, entity_area)
+            bad = capability.bad_target_area(targets, reg, states, entity_area)
+            first_bad = str((bads[0] or {}).get("area") or "").strip() if bads else ""
+            # 按**对象身份**比对（两个内容相同的槽是不同的槽，不许连坐）
+            bad_ids = {id(b) for b in bads}
+            if bad is None:
+                if not bads:
+                    return None                 # 全部合格
+                # ②：还有槽能解析到设备 ⇒ 剪掉不合格槽，别连坐整句
+                all_steps_ok = True
+                for holder, key in slots:
+                    cur = list(holder.get(key) or [])
+                    kept = [t for t in cur if id(t) not in bad_ids]
+                    if len(kept) == len(cur):
+                        continue                # 本份目标无不合格槽
+                    if kept:
+                        holder[key] = kept      # 就地剪除：未知区域绝不跟着下发
+                    else:
+                        all_steps_ok = False    # 整份目标都不可解析 ⇒ 不放行该步
+                if not all_steps_ok:
+                    return first_bad           # 剪空即等于"这一步没有可解析目标"
+                logger.info("[级联] 目标槽区域不可解析（已就地剪除 %d/%d 槽，"
+                            "其余照常执行）：%s", len(bads), len(targets),
+                            [str((b or {}).get("area") or "") for b in bads])
+                return None
+            return bad                          # ①：全不可解析 ⇒ 整句拦下（原话术）
         except Exception:  # noqa: BLE001
             return None
 
@@ -2055,13 +2132,148 @@ class Pipeline:
                     "AdjustDeviceAttribute", "SetDeviceMode",
                     "ControlWindow", "HassLock", "HassUnlock")
 
+    # ── v1.1.28：歧义目标的"主域"证据（复用既有域族判据，不另抄一张表）──
+    @staticmethod
+    def _plan_main_domains(intent: str, args: dict) -> tuple:
+        """本条计划的"主域"证据；证据不足一概返回 ()（无证据即不收窄）。
+
+        动机（2026-09-29 金标复测 / 192.168.1.91 实锤）：动态词表给的是**域并集**，
+        t0 字面表把「关闭平开窗」落成 domains=['button','cover','number']——一台开窗器
+        的零件兄弟（①开启/②暂停/③关闭/速度/力度）全进候选集；此时若无全等名，
+        旧 `_best_candidate` 直接取 `cands[0]` ⇒ 收敛到「平开窗 ① 开启」（方向相反）。
+
+        判据一律引既有单点（严禁这里再手写一张域族表）：
+          · ControlWindow → cover：窗动作的承载域（executor._LEG_WINDOW_DESIRED 与
+            capability.supports_attribute position→cover 同口径）；
+          · AdjustDeviceAttribute / SetDeviceMode → fast_path.attribute_domain_target
+            （无目标属性句补目标用的就是这一张表，两边必须同源）；
+          · HassLock / HassUnlock → lock（nlu.targets.args_target_lock 同族）；
+          · 开关族 → nlu.targets.primary_turn_domains（v1.1.24-B 主域优先级表，
+            #9「打开办公室空调」那条已验收的语义）。
+        """
+        try:
+            intent = str(intent or "")
+            args = args if isinstance(args, dict) else {}
+            if intent == "ControlWindow":
+                return ("cover",)
+            if intent in ("HassLock", "HassUnlock"):
+                return ("lock",)
+            if intent in ("AdjustDeviceAttribute", "SetDeviceMode"):
+                for sl in (attribute_domain_target(intent, args) or []):
+                    for d in ((sl or {}).get("devices") or []):
+                        doms = capability._domain_slots((d or {}).get("domains"))
+                        if doms:
+                            return doms
+                return ()
+            if intent in ("TurnDeviceOn", "TurnDeviceOff", "PauseDevice",
+                          "HassTurnOn", "HassTurnOff", "HassToggle"):
+                return tuple(T.primary_turn_domains(_target_domains(args.get("target"))))
+            return ()
+        except Exception:  # noqa: BLE001 判不出主域=不带证据（上层不得因此放飞）
+            return ()
+
+    @staticmethod
+    def _cand_name(c: dict) -> str:
+        """候选实体的展示名（friendly_name 优先，回落 entity_id）。永不抛。"""
+        try:
+            return str(((c or {}).get("attributes") or {}).get("friendly_name")
+                       or (c or {}).get("entity_id") or "")
+        except Exception:  # noqa: BLE001
+            return ""
+
+    @classmethod
+    def _best_candidate(cls, cands, tgt, intent=None, entity_area=None,
+                        main_domains: tuple = ()) -> Optional[str]:
+        """按证据优先级收敛到一台实体名；**收不住就返回 None**（绝不盲取 cands[0]）。
+
+        优先序（v1.1.28）：① 全等名 > ② 同区域 > ③ 域匹配（计划主域）> None。
+        旧口径在无全等名时直接 `cands[0]`，实锤两类误动作：
+          · 「关闭平开窗」→「平开窗 ① 开启」（**方向相反**的按钮）；
+          · 「把办公室空调温度调到26度」→「办公室空调 左右摆风」（switch，非空调本体）。
+        用户回「确认」就是一次误动作——退回首台并不比这两例更"可预期"，那只是把
+        注册表遍历顺序当判据用。
+        """
+        try:
+            pool = [c for c in (cands or []) if isinstance(c, dict)]
+            if not pool:
+                return None
+            want = ""
+            areas: list = []
+            for sl in (tgt or []):
+                if not isinstance(sl, dict):
+                    continue
+                a = str(sl.get("area") or "").strip()
+                if a:
+                    areas.append(a)
+                for d in (sl.get("devices") or []):
+                    nm = str((d or {}).get("name") or "").strip()
+                    if nm and not want:
+                        want = nm
+            if not want:
+                return None                       # 没点名：整区/全屋批量语义，不判
+            # ① 全等名（集成端 6 级匹配第 1 级即全等：传全等名就锁死这一台）
+            for c in pool:
+                if cls._cand_name(c) == want:
+                    return want
+            # ② 同区域（区域继承补好后这一层才真的有数据）
+            if areas:
+                same = [c for c in pool
+                        if str((entity_area or {}).get(
+                            str(c.get("entity_id") or ""), "") or "") in areas]
+                if len(same) == 1:
+                    return cls._cand_name(same[0])
+                if same:
+                    pool = same                   # 仍多台：带证据继续往下收窄
+            # ③ 域匹配：候选域 ∈ 计划主域
+            if main_domains:
+                hit = [c for c in pool
+                       if str(c.get("entity_id") or "").split(".", 1)[0]
+                       in main_domains]
+                if len(hit) == 1:
+                    return cls._cand_name(hit[0])
+                if len(hit) > 1:
+                    # 同域同名孪生（真机实锤：办公室/客厅两台 light 都叫「射灯」）：
+                    # 名字层面已无法区分，唯一可用的那一台才是用户想要的那一台
+                    # （resolve_candidates 已把 unavailable 沉底）。名字不同的一律
+                    # 不许从这里挑（那就是替用户猜）；**名字还必须与用户说的词全等**
+                    # （#17：说「指示灯」而归一成 name=灯时，把目标改写成「射灯」＝替
+                    # 用户认了另一台设备，须走 clarify）。
+                    names = list(dict.fromkeys(cls._cand_name(c) for c in hit))
+                    if len(names) == 1 and names[0] == want:
+                        avail = [c for c in hit if str(c.get("state")) != "unavailable"]
+                        if avail:
+                            return cls._cand_name(avail[0])
+            return None
+        except Exception:  # noqa: BLE001 判定故障=当"不收敛"（绝不猜一台）
+            logger.exception("[级联] 歧义收敛异常（按不收敛处理）")
+            return None
+
+    @staticmethod
+    def _ambiguity_clarify_say(names: list, n_entities: int = 0) -> str:
+        """收不住候选时的话术：列出来让用户说清，绝不替他挑一台（v1.1.28）。
+
+        n_entities＝候选**实体**台数（同名孪生时 distinct 只有一个名字，但确实是两台
+        设备——话术按台数说，免得念成"有 1 台设备名字相近"）。"""
+        nm: list = [str(n) for n in (names or []) if str(n)]
+        others = "、".join(nm[:3]) + ("…" if len(nm) > 3 else "")
+        n = max(int(n_entities or 0), len(nm))
+        return (f"家里有 {n} 台设备名字相近（{others}），我没法确定你要哪一台，"
+                f"这次先不动。带上房间名再说一次（比如「打开办公室的射灯」）。")
+
     def _ambiguity_ask(self, plan, origin):
         """点了名、却在本家匹配到**多台不同设备**时先问一句再动。
 
         真机 A 组实锤：指定 name=平开窗，实际命中的是隔壁「测试平开窗」——回执
         修好了"谎报成功"，但**动错设备**这件事仍然会发生。这里把计划收窄到最优
-        候选（全等名 > 同区域 > 首个）后借现成确认环问一句，不新增答案解析器，也
-        不动集成端。没点名的整区/全屋批量语义**不问**（那是用户明确的批量意图）。
+        候选（全等名 > 同区域 > 域匹配）后借现成确认环问一句，不新增答案解析器，
+        也不动集成端。没点名的整区/全屋批量语义**不问**（那是用户明确的批量意图）。
+
+        v1.1.28 两条硬改（2026-09-29 金标复测实锤）：
+          · 三级证据全落空 ⇒ **列候选让用户说清**（返回 clarify Reply），绝不静默替他
+            挑一台 —— 旧式在这种情况下写回 `cands[0]`，用户回「确认」即一次误动作；
+          · 证据能唯一定位 ⇒ 不打扰用户：把精确名与**主域**写回目标后照常执行
+            （域这一笔是必要的：t0 给的是域并集，留着并集下发＝让集成把兄弟零件
+            一起动，正是 #9「开关取主域」那条已验收的语义）。
         """
         try:
             if plan is None or plan.intent not in self._AMB_INTENTS:
@@ -2079,16 +2291,60 @@ class Pipeline:
                        for sl in tgt if isinstance(sl, dict)
                        for d in (sl.get("devices") or [])):
                 return None
+            entity_area = getattr(self.ha, "_entity_area", {}) or {}
             cands = capability.resolve_candidates(
                 getattr(self.ha, "_states", {}) or {},
-                getattr(self.ha, "_entity_area", {}) or {}, tgt)
-            names = [str(((c.get("attributes") or {}).get("friendly_name"))
-                         or c.get("entity_id", "")) for c in cands]
+                entity_area, tgt)
+            names = [self._cand_name(c) for c in cands]
             distinct = list(dict.fromkeys([n for n in names if n]))
-            if len(cands) < 2 or len(distinct) < 2:
+            if len(cands) < 2:
                 return None
-            pick = self._best_candidate(cands, tgt)
-            self._narrow_target(args, pick)
+            want = ""
+            for sl in tgt:
+                if not isinstance(sl, dict):
+                    continue
+                for d in (sl.get("devices") or []):
+                    nm = str((d or {}).get("name") or "").strip()
+                    if nm and not want:
+                        want = nm
+            exact = bool(want) and any(n == want for n in names)
+            if len(distinct) < 2 and (not want or exact):
+                # 多台候选**同名**：用户说的词与候选名全等（或压根没点名）⇒ 照旧按名
+                # 下发（集成端 6 级匹配第 1 级就是全等，不存在"替他挑一台"）。不全等
+                # （#17 反向钉：说「打开指示灯」归一成 name=灯，候选两台都叫「射灯」）
+                # ⇒ 不许静默下发，落到下面按三级证据收；收不住就列候选。
+                return None
+            main = self._plan_main_domains(plan.intent, args)
+            # 主域先做一次**收窄**：candidate 的域落在计划主域外的（同一台设备的按钮/
+            # 数值兄弟）不是"名字相近的设备"，而是同一台设备的零件，不该参与投票。
+            pool = cands
+            if main:
+                hit = [c for c in cands
+                       if str(c.get("entity_id") or "").split(".", 1)[0] in main]
+                if hit:
+                    pool = hit
+            narrowed_strict = pool is not cands
+            domain_note = main if (main and narrowed_strict) else None
+            pick = self._best_candidate(pool, tgt, plan.intent, entity_area, main)
+            if pick and len(list(dict.fromkeys(
+                    [self._cand_name(c) for c in pool if self._cand_name(c)]))) < 2:
+                # 证据已唯一定位（收窄后只剩一个名字）⇒ 不打扰用户，直接落到这一台。
+                # 金标复测 #5/#10/#11：这三条的真机形态都是"名字点对了、域证据也足够"，
+                # 旧码却在这里挂确认环 + 把 cands[0] 写回目标 ⇒ 用户说一次根本不动。
+                self._narrow_target(args, pick, domain_note)
+                logger.info("[级联] 歧义候选 %d 台 → 主域证据唯一定位到「%s」，"
+                            "直接执行（不打扰用户）", len(cands), pick)
+                return None
+            if not pick:
+                # 收不住 ⇒ 不许替用户挑：列出来请他说清（零下发、不挂执行桩）
+                text = self._ambiguity_clarify_say(distinct, len(cands))
+                logger.info("[级联] 歧义目标 %d 台（%s）→ 无收敛证据，列出让用户说清",
+                            len(distinct), "、".join(distinct[:3]))
+                return Reply(text, "clarify", ok=False,
+                             trace=list(getattr(plan, "trace", []))
+                             + [f"歧义未收敛{len(cands)}"])
+            # 域收敛：t0 给的是域并集，带着并集下发＝兄弟零件一起动（#9 同族语义）
+            self._narrow_target(args, pick, domain_note)
             others = "、".join(distinct[:3]) + ("…" if len(distinct) > 3 else "")
             text = (f"家里有 {len(distinct)} 台设备名字相近（{others}）。"
                     f"我先对「{pick}」执行，说「确认」就这么办，说「取消」先不动。")
@@ -2106,30 +2362,26 @@ class Pipeline:
             return None
 
     @staticmethod
-    def _best_candidate(cands, tgt) -> str:
-        """全等名 > 同区域（resolve_candidates 已按区域滤过）> 首个。返回实体名。"""
-        want = ""
-        for sl in (tgt or []):
-            for d in ((sl or {}).get("devices") or []):
-                want = str((d or {}).get("name") or "").strip()
-                if want:
-                    break
-            if want:
-                break
-        for c in cands:
-            if str(((c.get("attributes") or {}).get("friendly_name")) or "") == want:
-                return want
-        return str(((cands[0].get("attributes") or {}).get("friendly_name"))
-                   or cands[0].get("entity_id", ""))
+    def _narrow_target(args, name, domains=None) -> None:
+        """把计划目标换成选中的那台：集成端 6 级匹配第 1 级就是**全等**，
+        因此传精确 friendly_name 即可锁死设备，不需要新槽位形态。
 
-    @staticmethod
-    def _narrow_target(args, name) -> None:
-        """把计划目标名换成选中的那台：集成端 6 级匹配第 1 级就是**全等**，
-        因此传精确 friendly_name 即可锁死设备，不需要新槽位形态。"""
+        domains：只在"我们是靠主域证据才认出这一台"时才传（v1.1.28）——t0 字面表
+        给的是动态词表的**域并集**（「关闭平开窗」落成 button+cover+number），带着
+        并集下发等于把同一台设备的按钮/数值兄弟实体一起交给集成；收窄到承载域是
+        #9「开关取主域」那条已经验收过的同一条语义。
+        """
         for sl in (args.get("target") or []):
             for d in ((sl or {}).get("devices") or []):
                 if isinstance(d, dict) and str(d.get("name") or "").strip():
                     d["name"] = name
+                    if domains:
+                        cur = capability._domain_slots(d.get("domains"))
+                        want = [x for x in (domains or ()) if x in cur]
+                        # 主域必须是"已声明域"之一：凭空新增一个目标里没有的域，
+                        # 那是替用户换设备（比不收窄更危险）。
+                        if want:
+                            d["domains"] = list(want)
                     return
 
     async def _confirm_answer(self, text: str, origin: str) -> Optional[Reply]:

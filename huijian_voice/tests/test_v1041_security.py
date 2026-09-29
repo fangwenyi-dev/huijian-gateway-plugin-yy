@@ -246,10 +246,16 @@ def test_write_status_no_orphan_on_failure(tmp_path, monkeypatch):
         raise OSError("disk full")
 
     monkeypatch.setattr("core.model_store.os.replace", boom)
-    fd_before = len(_os.listdir("/proc/self/fd"))
+    # fd 计数只存在于 procfs：Windows 无 /proc/self/fd，该维度不可测。
+    # 但「不许抛」与「不留 .mst-*.tmp 孤儿」两条与平台无关，照验——
+    # 不整条 skip（整条跳会连这两个仍然有效的维度一起丢掉）。
+    _proc_fd = "/proc/self/fd"
+    _can_count_fd = _os.path.isdir(_proc_fd)
+    fd_before = len(_os.listdir(_proc_fd)) if _can_count_fd else None
     ms._write_status({"k": {"state": "ready"}})          # 不许抛
     assert list((tmp_path / "m").glob(".mst-*")) == []   # 不留孤儿 tmp
-    assert len(_os.listdir("/proc/self/fd")) <= fd_before + 1  # 不泄漏 fd
+    if _can_count_fd:
+        assert len(_os.listdir(_proc_fd)) <= fd_before + 1  # 不泄漏 fd
     monkeypatch.undo()
     ms._write_status({"k": {"state": "ready"}})          # 恢复正常路径
     assert (tmp_path / "m" / "st.json").exists()

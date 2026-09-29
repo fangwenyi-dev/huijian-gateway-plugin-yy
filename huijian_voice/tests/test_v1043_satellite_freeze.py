@@ -33,6 +33,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+# 平台能力：POSIX 才有 SIGALRM/setitimer（见 _with_watchdog 的平台性说明）。
+_HAS_SIGALRM = hasattr(signal, "SIGALRM") and hasattr(signal, "setitimer")
+
 ASAT_MAIN = ROOT / "custom_components" / "huijian_ai" / "assist_satellite.py"
 ASAT_STORE = ROOT.parent / "yyjicheng" / "custom_components" / "huijian_ai" / "assist_satellite.py"
 
@@ -116,7 +119,16 @@ def _self_stub(ids, states, cap=None):
 
 
 def _with_watchdog(fn, seconds=5):
-    """自旋兜底探测：挂死即 TimeoutError（信号在字节码间投递，纯同步死环杀得掉）。"""
+    """自旋兜底探测：挂死即 TimeoutError（信号在字节码间投递，纯同步死环杀得掉）。
+
+    ⚠ 平台性：依赖 POSIX `SIGALRM` + `setitimer`（纯同步死环只在信号投递点可被
+    打断）。Windows 无这两个接口 → 本看门狗**装载即 AttributeError**，挂死探测
+    在该平台上等于不存在（缺陷形态被伪装成 AttributeError 而非 TimeoutError）。
+    此处不伪造替代实现（线程超时杀不掉纯同步死环，反而留下永久自旋线程），
+    改为在调用方显式 skip 并留档：该防护只在 POSIX/CI 上被验证。
+    """
+    if not _HAS_SIGALRM:
+        raise pytest.skip("Windows 无 SIGALRM：自旋看门狗不可装载")
 
     def _boom(signum, frame):
         raise TimeoutError("事件循环自旋未退出（钉挂死缺陷复发）")

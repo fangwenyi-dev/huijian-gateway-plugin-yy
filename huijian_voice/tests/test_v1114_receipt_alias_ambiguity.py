@@ -137,6 +137,14 @@ STATES = {
                 "attributes": {"friendly_name": "测试平开窗 开窗器"}},
 }
 
+# 「书桌灯」的全等名到位 ⇒ 这台才是可收敛的形态（o = 书桌灯 / 测试书桌灯 两名）
+LIGHTS = {
+    "light.desk": {"entity_id": "light.desk", "state": "off",
+                   "attributes": {"friendly_name": "书桌灯"}},
+    "light.test_desk": {"entity_id": "light.test_desk", "state": "off",
+                        "attributes": {"friendly_name": "测试书桌灯"}},
+}
+
 
 def _pl(extra=None):
     p = Pipeline.__new__(Pipeline)
@@ -154,27 +162,45 @@ def _plan():
 
 
 def test_ambiguous_named_target_asks_instead_of_actuating():
+    """点在名字上的 target 命中多台 ⇒ 先挂确认环问一句（宽-Target）用异物设备。"""
     p = _pl()
-    r = p._ambiguity_ask(_plan(), "room-1")
+    p.ha = types.SimpleNamespace(_states=dict(LIGHTS), _entity_area={})
+    plan = Plan(intent="TurnDeviceOn",
+                args={"target": [{"devices": [{"name": "书桌灯",
+                                               "domains": ["light"]}]}]},
+                source="t0", utterance="打开书桌灯")
+    r = p._ambiguity_ask(plan, "room-1")
     assert r is not None and r.source == "confirm"
     assert "2 台" in r.text and "确认" in r.text, r.text
     assert "room-1" in p._confirm                      # 挂起，等答复
     # 计划已被收窄到全等候选（不是靠运气命中第一台）
     assert p._confirm["room-1"]["plan"].args["target"][0]["devices"][0]["name"] \
-        == "平开窗 开窗器"
+        == "书桌灯"
+
+
+def test_no_convergence_evidence_lists_candidates_and_picks_nothing():
+    """v1.1.28（2026-09-29 金标复测 #5 实锤）：三条证据都落空 ⇒ 绝不替用户挑一台。
+
+    name='平开窗' 在本家同时命中 button ①开启/②暂停/③关闭、number 速度/力度 与
+    cover 开窗器（『关闭平开窗』整机实况），旧口径到此取 `cands[0]` ⇒ 把「关闭」
+    收敛到「平开窗 ① 开启」（**方向相反**）；用户回「确认」即一次误动作。新纪律：
+    列出来让用户说清——宁可把候选全列给他选，也不许替他挑一台错的。
+    """
+    p = _pl()
+    plan = _plan()
+    r = p._ambiguity_ask(plan, "room-1")
+    assert r is not None and r.source == "clarify", r
+    txt = r.text or ""
+    assert "平开窗 开窗器" in txt and "测试平开窗 开窗器" in txt, txt
+    assert "room-1" not in p._confirm, "未收敛却挂了执行桩 ⇒ 用户误答确认即误动作"
+    assert plan.args["target"][0]["devices"][0]["name"] == "平开窗", "目标名被偷偷改写"
 
 
 def test_answer_yes_executes_the_narrowed_plan():
     """确认后执行的是**收窄后**的计划（灯对做载体：窗族另有既有的开关族专用闸，
     不是本批要验的东西，混在一起会把两条链的结论搅糊）。"""
-    lights = {
-        "light.desk": {"entity_id": "light.desk", "state": "off",
-                       "attributes": {"friendly_name": "书桌灯"}},
-        "light.test_desk": {"entity_id": "light.test_desk", "state": "off",
-                            "attributes": {"friendly_name": "测试书桌灯"}},
-    }
     p = _pl()
-    p.ha = types.SimpleNamespace(_states=lights, _entity_area={})
+    p.ha = types.SimpleNamespace(_states=dict(LIGHTS), _entity_area={})
     ex = FakeHAClient(results={"TurnDeviceOn": {"success": True}})
     p.executor = Executor(ex, None)
     p._note_target = lambda *a, **k: None
@@ -194,10 +220,14 @@ def test_answer_yes_executes_the_narrowed_plan():
 
 def test_answer_no_cancels_without_touching_devices():
     p = _pl()
+    p.ha = types.SimpleNamespace(_states=dict(LIGHTS), _entity_area={})
     ex = FakeHAClient(results={"TurnDeviceOn": {"success": True}})
     p.executor = Executor(ex, None)
     p._remember_turn = lambda *a, **k: None
-    p._ambiguity_ask(_plan(), "room-3")
+    p._ambiguity_ask(Plan(intent="TurnDeviceOn",
+                          args={"target": [{"devices": [{"name": "书桌灯",
+                                                         "domains": ["light"]}]}]},
+                          source="t0", utterance="打开书桌灯"), "room-3")
     r = asyncio.run(p._confirm_answer("取消", "room-3"))
     assert r is not None and "取消" in r.text
     assert ex.calls == [], "取消不得留下任何下发"
@@ -223,8 +253,54 @@ def test_best_candidate_prefers_exact_name_over_dict_order():
              {"entity_id": "cover.p", "attributes": {"friendly_name": "平开窗"}}]
     tgt = [{"devices": [{"name": "平开窗", "domains": ["cover"]}]}]
     assert Pipeline._best_candidate(cands, tgt) == "平开窗"
-    # 无全等名时明确退回首台（可预期、可复现，不猜"最像的"）
-    assert Pipeline._best_candidate(cands, [{"devices": [{"name": "那扇窗"}]}]) == "测试平开窗"
+    # v1.1.28：无全等名且无区域/域证据 ⇒ **不许**退回首台（旧口径在这里盲取
+    # cands[0]，实锤把「关闭平开窗」收敛到方向相反的「平开窗 ① 开启」）。
+    # 收不住就返回 None，由 _ambiguity_ask 把候选列给用户，而不是替他挑一台。
+    assert Pipeline._best_candidate(cands, [{"devices": [{"name": "那扇窗"}]}]) is None
+
+
+def test_best_candidate_converges_on_intent_main_domain():
+    """域证据：同一台设备的零件兄弟（button/number）不得压过承载域那一台。
+
+    金标复测 #5/#10 实锤形态：t0 给的是域并集 ⇒ 候选里混着「平开窗 ① 开启」
+    （button）与「平开窗 开窗器」（cover）。ControlWindow 的承载域是 cover，
+    此时**必须且只允许**收敛到 cover 那一台。
+    """
+    cands = [
+        {"entity_id": "button.pk_1", "state": "2026-01-01T00:00:00",
+         "attributes": {"friendly_name": "平开窗 ① 开启"}},
+        {"entity_id": "number.pk_speed", "state": "unknown",
+         "attributes": {"friendly_name": "平开窗 速度"}},
+        {"entity_id": "cover.pk", "state": "open",
+         "attributes": {"friendly_name": "平开窗 开窗器"}},
+    ]
+    tgt = [{"devices": [{"name": "平开窗",
+                         "domains": ["button", "cover", "number"]}]}]
+    assert Pipeline._best_candidate(cands, tgt, "ControlWindow",
+                                    {}, ("cover",)) == "平开窗 开窗器"
+    # 同名孪生形态（真机：办公室/客厅两台 light 都叫「射灯」）⇒ 取可用的那一台
+    twins = [
+        {"entity_id": "light.a", "state": "unavailable",
+         "attributes": {"friendly_name": "射灯"}},
+        {"entity_id": "light.b", "state": "off",
+         "attributes": {"friendly_name": "射灯"}},
+    ]
+    tgt2 = [{"devices": [{"name": "射灯",
+                          "domains": ["button", "light", "select", "switch"]}]}]
+    assert Pipeline._best_candidate(twins, tgt2, "AdjustDeviceAttribute",
+                                    {}, ("light",)) == "射灯"
+    # 主域来自属性槽：temperature ⇒ 只认 climate 本体，不认摆风 switch（#10 实锤）
+    ac = [
+        {"entity_id": "switch.ac_swing", "state": "on",
+         "attributes": {"friendly_name": "办公室空调 左右摆风"}},
+        {"entity_id": "climate.ac", "state": "fan_only",
+         "attributes": {"friendly_name": "办公室空调 Air Conditioner"}},
+    ]
+    tgt3 = [{"devices": [{"name": "办公室空调",
+                          "domains": ["button", "climate", "light", "number",
+                                      "select", "switch"]}]}]
+    assert Pipeline._best_candidate(ac, tgt3, "AdjustDeviceAttribute", {},
+                                    ("climate",)) == "办公室空调 Air Conditioner"
 
 
 def test_ambiguity_gate_can_be_switched_off():

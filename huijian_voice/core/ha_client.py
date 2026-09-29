@@ -252,11 +252,60 @@ class HAClient:
                 await self._load_registries()
 
     @staticmethod
-    def _parse_registry(rows, areas: dict) -> tuple[dict, dict, dict]:
+    def _device_area_map(rows, areas: dict) -> dict:
+        """设备注册表行 → {device_id: 区域名}（只收本家已注册的区域）。
+
+        区域挂在**设备**上时，实体自身的 area_id 为空，须由这里提供继承源。
+        areas 里没有的区域 id（已删/未同步）一律丢弃——区域名缺席时不得拿原始
+        uuid 顶替（下游按名比对，uuid 会造成"永远比对不上"的假失配）。
+        """
+        out: dict[str, str] = {}
+        for d in rows or []:
+            if not isinstance(d, dict):
+                continue
+            did = d.get("id")
+            aid = d.get("area_id")
+            if not did or not aid:
+                continue
+            nm = (areas or {}).get(aid)
+            if nm:
+                out[str(did)] = nm
+        return out
+
+    @staticmethod
+    def _needs_device_area(rows) -> bool:
+        """实体表里是否存在"自身无区域、但挂着设备"的行。
+
+        决定要不要补拉设备注册表：真客户端多一条 WS 命令开销很小，但对**不发
+        device_id 的替身/极老 HA**（以及自家 test_v1044 的 WS 假服务器）而言，
+        拉了就是一次 10s 命令级超时。这里按"确实有人需要继承"才拉——零候选
+        时一次网络往返都不浪费。"""
+        for e in rows or []:
+            if not isinstance(e, dict):
+                continue
+            if e.get("disabled_by") or e.get("hidden_by"):
+                continue
+            if not e.get("entity_id") or e.get("area_id"):
+                continue
+            if e.get("device_id"):
+                return True
+        return False
+
+    @staticmethod
+    def _parse_registry(rows, areas: dict,
+                        device_area: dict | None = None) -> tuple[dict, dict, dict]:
         """实体注册表行 → (entity→区域名, entity→语音别名列表, entity→device_class)。
 
         别名两形态都认：新版 HA 是字符串列表，老版是 {alias: {...}} dict；
         `name`（用户改名）本身就是最高优先级的"别名"，一并收。
+
+        v1.1.28 **区域继承**：实体自身 `area_id` 为空时，按本行 `device_id` 到
+        设备注册表查所属设备的区域（device_area 来自 _device_area_map）。实锤
+        动机：本机（192.168.1.91）`config/entity_registry/list` 的 `area_id`
+        **全为 null**、区域只挂在设备上 ⇒ 只读实体表时 `_entity_area` 恒空，
+        一切按区域收窄的逻辑（歧义闸/能力预裁/过宽目标闸/查询族区域过滤）
+        全部退化。**实体自带的区域恒优先**（用户在 HA 里给单颗实体挪了房间，
+        那就是它的房间；设备级只是它的缺省）。
         """
         ent_map: dict[str, str] = {}
         alias_map: dict[str, list[str]] = {}
@@ -272,6 +321,11 @@ class HAClient:
             aid = e.get("area_id")
             if aid:
                 ent_map[eid] = areas.get(aid, aid)
+            elif device_area:
+                # 区域继承（实体未自带时取设备所属区域；见本函数 docstring）
+                inherited = device_area.get(str(e.get("device_id") or ""))
+                if inherited:
+                    ent_map[eid] = inherited
             names: list[str] = []
             for key in ("name", "original_name"):
                 v = e.get(key)
@@ -386,8 +440,23 @@ class HAClient:
                         raise RuntimeError(f"WS 认证被拒: {str(first)[:120]}")
                     areas = {a["area_id"]: (a.get("name") or a["area_id"])
                              for a in (await self._ws_cmd(ws, "config/area_registry/list") or [])}
+                    ent_rows = await self._ws_cmd(ws, "config/entity_registry/list") or []
+                    # v1.1.28：设备注册表只做**区域继承增强**——拉失败/该老 HA 没有
+                    # 这条命令时随即降级到“只看实体自带区域”，绝不让整份注册表加载
+                    # 失败——区域是**增强项**，实体/别名/device_class 才是主数据；
+                    # 因增强项失败把主数据一起丢掉，等于重演 v1.0.44 那次"区域恒空
+                    # 但看似正常"的静默失误。
+                    dev_area: dict = {}
+                    if areas and self._needs_device_area(ent_rows):
+                        try:
+                            dev_area = self._device_area_map(
+                                await self._ws_cmd(ws, "config/device_registry/list") or [],
+                                areas)
+                        except Exception as de:
+                            logger.warning("[HA] 设备注册表拉取失败（区域继承降级为"
+                                           "实体自带区域）: %s", de)
                     ent_map, alias_map, dc_map = self._parse_registry(
-                        await self._ws_cmd(ws, "config/entity_registry/list") or [], areas)
+                        ent_rows, areas, dev_area)
                     return areas, ent_map, alias_map, dc_map
             except Exception as e:  # 端点形态差异：换下一个候选
                 last_err = e
@@ -403,7 +472,17 @@ class HAClient:
                 areas = {a["area_id"]: a.get("name", a["area_id"]) for a in await r.json()}
             async with self._session.get(self._url("/api/config/entity_registry/list")) as r:
                 rows = await r.json() if r.status == 200 else []
-            ent_map, alias_map, dc_map = self._parse_registry(rows or [], areas)
+            # 同 WS 通道口径：设备注册表只补区域继承，失败即降级（见 _ws_registries）
+            dev_area: dict = {}
+            if areas and self._needs_device_area(rows or []):
+                try:
+                    async with self._session.get(
+                            self._url("/api/config/device_registry/list")) as r:
+                        dev_area = self._device_area_map(
+                            await r.json() if r.status == 200 else [], areas)
+                except Exception as de:
+                    logger.debug("[HA] REST 设备注册表读取失败（区域继承降级）: %s", de)
+            ent_map, alias_map, dc_map = self._parse_registry(rows or [], areas, dev_area)
             return areas, ent_map, alias_map, dc_map, ""
         except Exception as e:
             return None, None, {}, {}, str(e)

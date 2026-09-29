@@ -40,6 +40,15 @@ ENTITIES = [
     {"entity_id": "sensor.t1", "area_id": "office"},
     {"entity_id": "sensor.t2", "area_id": None},
 ]
+# v1.1.28：区域只挂在**设备**上的形态（192.168.1.91 实况：entity_registry.area_id
+# 全为 null）⇒ 加载项必须补拉设备注册表做区域继承，否则 _entity_area 恒空。
+DEVICES = [{"id": "dev_bed", "area_id": "bed"}]
+ENTITIES_DEVICE_AREA = [
+    {"entity_id": "sensor.t1", "area_id": "office"},                    # 自带优先
+    {"entity_id": "sensor.t2", "area_id": None, "device_id": "dev_bed"},  # 继承
+    {"entity_id": "sensor.t3", "area_id": None, "device_id": "dev_gone"}, # 设备无区域
+    {"entity_id": "sensor.t4", "area_id": None},                       # 无设备可继承
+]
 
 
 def _result(mid, payload):
@@ -77,7 +86,17 @@ def _ha_ws_app(mode: str) -> web.Application:
             if t == "config/area_registry/list":
                 await ws.send_json(_result(data["id"], AREAS))
             elif t == "config/entity_registry/list":
-                await ws.send_json(_result(data["id"], ENTITIES))
+                rows = ENTITIES_DEVICE_AREA if mode in ("areadev", "devfail") \
+                    else ENTITIES
+                await ws.send_json(_result(data["id"], rows))
+            elif t == "config/device_registry/list":
+                if mode == "devfail":
+                    # 命令级失败形态：设备注册表是**增强项**，失败不得连累主数据
+                    await ws.send_json({"id": data["id"], "type": "result",
+                                        "success": False,
+                                        "error": {"code": "not_found"}})
+                else:
+                    await ws.send_json(_result(data["id"], DEVICES))
         return ws
 
     async def rest_404(request):   # 现代 HA：config REST 已删
@@ -190,6 +209,25 @@ def test_old_ha_rest_fallback(ha_base):
     areas, ent_area, _ = _load(ha_base)
     assert areas == {"office": "办公室", "bed": "卧室"}
     assert ent_area == {"sensor.t1": "办公室"}
+
+
+# ───────────── F：设备层区域继承（v1.1.28，192.168.1.91 实况）─────────────
+@pytest.mark.parametrize("ha_base", ["areadev"], indirect=True)
+def test_device_registry_area_is_inherited(ha_base):
+    """实体自身 area_id 为空 ⇒ 继承所属设备的区域；自带区域恒优先，无尘数据。"""
+    areas, ent_area, err = _load(ha_base)
+    assert areas == {"office": "办公室", "bed": "卧室"}
+    assert ent_area == {"sensor.t1": "办公室", "sensor.t2": "卧室"}, ent_area
+    assert "registry" not in err, err
+
+
+@pytest.mark.parametrize("ha_base", ["devfail"], indirect=True)
+def test_device_registry_failure_never_downgrades_entity_registry(ha_base):
+    """设备注册表拉取失败 ⇒ 降级为"只看实体自带"，实体/别名/device_class 不许丢。"""
+    areas, ent_area, err = _load(ha_base)
+    assert areas == {"office": "办公室", "bed": "卧室"}
+    assert ent_area == {"sensor.t1": "办公室"}, ent_area      # 主数据在，区域增强降级
+    assert "registry" not in err, err                          # 不是"整份注册表失败"
 
 
 # ─────────────────────────── D：端点派生 ───────────────────────────
