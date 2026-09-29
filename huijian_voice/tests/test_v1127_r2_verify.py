@@ -131,6 +131,14 @@ def test_llm_transport_cross_task_close_no_scope_error():
     环境（同一场景单跑绿、全量红），子进程隔离后判据只关于被测代码本身。"""
     import subprocess
 
+    # CI（Lint）环境不带 anyio/aiohttp：本钉按"缺依赖即跳过"处置（与 tts 面
+    # test_v1127_transport_creds_ui 的 _real_anyio 同口径），不得把 job 打红。
+    probe = subprocess.run([sys.executable, "-c", "import anyio, aiohttp"],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace")
+    if probe.returncode != 0:
+        pytest.skip(f"环境缺少 anyio/aiohttp（{(probe.stderr or '').strip()[:80]}）")
+
     CC = HERE / "custom_components" / "huijian_ai"
     script = r'''
 import asyncio, importlib.util, sys, types

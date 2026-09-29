@@ -714,6 +714,9 @@ def test_www_innerhtml_error_messages_escaped():
 # ══ ⑦ conversation.py：超时 scope 不横跨 yield + 全文降 DEBUG ════════
 @pytest.fixture()
 def _real_anyio():
+    # CI 的 Lint 环境不带 anyio（本仓 TTS/并发类钉按"缺依赖即跳过"处置，
+    # 与 opus/SIGALRM 类环境钉同口径）——旧写法裸 import 会把整条 job 打红。
+    pytest.importorskip("anyio", reason="环境未装 anyio（CI Lint 口径）")
     keys = [k for k in list(sys.modules) if k == "anyio" or k.startswith("anyio.")]
     saved = {k: sys.modules[k] for k in keys}
     for k in keys:
