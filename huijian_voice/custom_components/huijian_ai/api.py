@@ -16,7 +16,7 @@ from .const import DOMAIN
 from .intent_automation import (get_automation_manager,
                                 get_automation_store,
                                 peek_automation_manager)
-from .intent_voice_scene import get_voice_scene_store
+from .intent_voice_scene import get_voice_scene_store, legacy_auto_window_area
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -332,10 +332,27 @@ class TestSceneView(HomeAssistantView):
                 )
 
             executed = []
+            skipped_legacy: list = []
             has_errors = False
             for action in actions:
                 intent_name = action.get("intent") or action.get("name")
                 params = action.get("params") or action.get("parameters", {})
+                # 第四轮对抗复核：本端点自建循环直调意图，绕过了
+                # HassTriggerVoiceScene 的存量自动补窗闸 ⇒ 管理页点「测试」照样按区
+                # 压全区窗钮。两条回放执行器必须共用同一道闸（同判据同收窄）。
+                _lw_area = legacy_auto_window_area(action, actions,
+                                                   scene.get("created_at"))
+                if _lw_area:
+                    _lw_dir = {"open": "开窗", "close": "关窗"}.get(
+                        str(params.get("action") or "").strip().lower(), "窗动作")
+                    _LOGGER.warning("场景测试「%s」跳过存量自动补窗动作（区域=%s %s）",
+                                    trigger_phrase, _lw_area, _lw_dir)
+                    executed.append({"intent": intent_name,
+                                     "result": "skipped_legacy",
+                                     "reason": f"旧版自动补的「{_lw_area}」"
+                                               f"{_lw_dir}动作已跳过"})
+                    skipped_legacy.append(f"「{_lw_area}」{_lw_dir}")
+                    continue
                 ha_slots = {k: {"value": v} for k, v in params.items()}
                 try:
                     async with asyncio.timeout(30):
@@ -367,7 +384,10 @@ class TestSceneView(HomeAssistantView):
 
             if has_errors:
                 return self.json({"success": False, "error": "部分动作执行失败", "executed": executed})
-            return self.json({"success": True, "message": "测试完成"})
+            note = ("测试完成" + ("，旧版自动补的 " + "、".join(skipped_legacy)
+                                 + "动作已跳过（如非本意请在面板编辑删除）")
+                    if skipped_legacy else "测试完成")
+            return self.json({"success": True, "message": note})
         except Exception as e:
             _LOGGER.error("Test scene failed: %s", e, exc_info=True)
             return self.json({"success": False, "error": str(e)}, status_code=500)

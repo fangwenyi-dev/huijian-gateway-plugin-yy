@@ -985,10 +985,26 @@ def test_c1_explicit_window_device_still_converts():
 # ══ C1 续（存量面）：旧启发式留在用户库里的窗动作，回放不执行且点名 ══════
 # 创建侧删启发式只挡住"以后"；它 v1.0.0~v1.1.32 期间追加的动作仍在 .storage
 # （STORAGE_VERSION 未升版、无迁移），回放会按区域压全区窗钮——同一个伤害。
-def _replay_scene(hass, trigger_phrase, actions):
-    """写入一条场景后真跑 HassTriggerVoiceScene 回放；返回 (回执, 实际执行到的动作)。"""
+_LEGACY_STAMP = "2026-08-01T00:00:00+00:00"      # 早于启发式退场＝存量
+_POST_STAMP = "2026-10-01T00:00:00+00:00"        # 晚于退场＝新写，绝不跳
+
+
+def _replay_scene(hass, trigger_phrase, actions, created_at=_LEGACY_STAMP):
+    """写入一条场景后真跑 HassTriggerVoiceScene 回放；返回 (回执, 实际执行到的动作)。
+
+    create_scene 只会盖"当下"，所以要按用例把 created_at 改成目标时刻
+    （存量/新写/无戳三态）；存储替身与产品共用同一 dict 对象，改它即生效。
+    """
     store = _fresh_scene_store(hass)
     assert asyncio.run(store.create_scene(trigger_phrase, actions))[0] is True
+    mem = _ST._MEM.get(vs.STORAGE_KEY) or {}
+    rec = next((r for r in (mem.get("scenes") or {}).values()
+                if r.get("trigger_phrase") == trigger_phrase), None)
+    assert rec is not None, "场景没写进存储替身"
+    if created_at is None:
+        rec.pop("created_at", None)
+    else:
+        rec["created_at"] = created_at
     ran = []
 
     async def _fake_action(intent_obj, intent_name, params):
@@ -1025,8 +1041,27 @@ def test_c1_legacy_stored_window_action_skipped_at_replay():
     assert len(skipped) == 1 and "办公室" in skipped[0]["reason"], out
 
 
+def test_c1_retired_heuristic_does_not_swallow_new_scenes():
+    """来源收窄（第四轮对抗复核抓出的假阳性）：匿名区级窗动作**也是**现行 LLM
+    可写的正当形状（intent_automation.py 的示例逐字如此），且现网实证模型仍写
+    "单动作多域" ⇒ 只能靠创建时刻划界：退场之后创建的、以及没有 created_at 的
+    （启发式唯一写入口 create_scene 自 v1.0.0 就逐条盖戳 ⇒ 无戳必非其产物），
+    一律照常执行。"""
+    out_new, ran_new = _replay_scene(_plain_hass(), "新写的多域窗场景",
+                                     _LEGACY_SUPPLEMENTED, created_at=_POST_STAMP)
+    assert ran_new == ["TurnDeviceOn", "ControlWindow"], \
+        f"退场之后创建的场景被误跳: {ran_new}"
+    assert "跳过" not in (out_new.get("message") or ""), out_new
+
+    out_no, ran_no = _replay_scene(_plain_hass(), "无戳场景",
+                                  _LEGACY_SUPPLEMENTED, created_at=None)
+    assert ran_no == ["TurnDeviceOn", "ControlWindow"], \
+        f"无 created_at（不可能出自启发式）被误跳: {ran_no}"
+    assert "跳过" not in (out_no.get("message") or ""), out_no
+
+
 def test_c1_legacy_guard_does_not_swallow_legit_window_actions():
-    """反向不变量（防闸过宽把用户意图一起吃掉）：
+    """反向不变量（防闸过宽把用户意图一起吃掉）——同用存量戳，只改形状：
     ①只有开窗这一个动作的场景（用户明说"打开客厅的窗"）照常执行；
     ②窗动作带了设备名，即使同区有多域开关也照常执行。"""
     out1, ran1 = _replay_scene(_plain_hass(), "只开窗", [
@@ -1050,3 +1085,40 @@ def test_c1_legacy_guard_does_not_swallow_legit_window_actions():
     assert ran2 == ["TurnDeviceOn", "ControlWindow"], \
         f"点了设备名的窗被误跳: {ran2}"
     assert "跳过" not in (out2.get("message") or ""), out2
+
+
+def test_c1_close_direction_and_fail_denominator():
+    """两处文案/计数缺陷（对抗复核抓出）：
+    ①close 向（TurnDeviceOff 的产物）被跳不得播成「开窗动作」；
+    ②被跳过的动作不进失败分母——Turn 失败时报 1/1，不是 1/2。"""
+    actions = [
+        {"name": "TurnDeviceOff",
+         "parameters": {"target": [{"area": "卧室", "devices": [
+             {"name": "灯", "domains": ["light"]},
+             {"name": "空调", "domains": ["climate"]}]}]}},
+        {"name": "ControlWindow",
+         "parameters": {"target": [{"area": "卧室",
+                                    "devices": [{"domains": ["button"]}]}],
+                        "action": "close"}},
+    ]
+    store = _fresh_scene_store(_plain_hass())
+    assert asyncio.run(store.create_scene("晚安老场景", actions))[0] is True
+    mem = _ST._MEM.get(vs.STORAGE_KEY) or {}
+    for rec in (mem.get("scenes") or {}).values():
+        if rec.get("trigger_phrase") == "晚安老场景":
+            rec["created_at"] = _LEGACY_STAMP
+
+    async def _turn_fails(intent_obj, intent_name, params):
+        if intent_name == "TurnDeviceOff":
+            return {"success": False, "error": "设备离线"}
+        return {"success": True}
+
+    handler = vs.HassTriggerVoiceSceneIntent()
+    handler._execute_action_with_timeout = _turn_fails
+    out = asyncio.run(handler.async_handle(types.SimpleNamespace(
+        hass=_plain_hass(), slots={"trigger_phrase": {"value": "晚安老场景"}})))
+    msg = out.get("error") or out.get("message") or ""
+    assert "关窗" in str([a for a in out["executed_actions"]
+                         if a.get("result") == "skipped_legacy"][0]["reason"]), out
+    assert "1/1" in msg, f"被跳过的动作混进了分母（应 1/1）: {msg}"
+    assert "开窗" not in msg, f"close 向播成开窗: {msg}"

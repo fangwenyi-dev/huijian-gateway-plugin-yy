@@ -252,18 +252,49 @@ class HassCreateVoiceSceneIntent(intent.IntentHandler):
             return {"success": False, "error": result}
 
 
-def _legacy_auto_window_area(action: dict, siblings: list) -> str:
+# 「自动补窗」启发式退场时刻：v1.1.33（2026-09-30）起创建侧不再产出按区补窗动作。
+# 只有**创建时刻早于它**的存量记录才可能是旧启发式的产物；此后创建的匿名区级窗动作
+# 只能来自模型/面板的正当写入（`intent_automation.py` 的 LLM 示例逐字就是
+# target:[{area,devices:[{domains:[button]}]}]，且现网实证模型仍会写出"单动作多域"），
+# 一律不跳。
+_AUTO_WINDOW_RETIRED_AT = datetime(2026, 9, 30, tzinfo=timezone.utc)
+
+
+def _scene_predates_auto_window_retirement(created_at: Any) -> bool:
+    """场景创建时刻是否早于启发式退场——只有"是"才有资格被当作存量补窗。
+
+    无 created_at / 解析失败 ⇒ False（放行）：启发式唯一的写入口是
+    `VoiceSceneStore.create_scene`，而它自 v1.0.0 首发就逐条盖 created_at
+    ⇒ **没戳的记录不可能出自启发式那条路**（PUT/面板写的同理），不凭"猜旧"动手。
+    """
+    if not created_at:
+        return False
+    try:
+        raw = str(created_at).strip().replace("Z", "+00:00")
+        ts = datetime.fromisoformat(raw)
+    except Exception:  # noqa: BLE001 时间戳形态异常按"非存量"处置，绝不因它跳动作
+        return False
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts < _AUTO_WINDOW_RETIRED_AT
+
+
+def legacy_auto_window_area(action: dict, siblings: list,
+                            created_at: Any = None) -> str:
     """识别**已删除的**「自动补窗」启发式留在存量库里的窗动作，回其区域名；否则空串。
 
     启发式（v1.0.0~v1.1.32）已在创建侧删除，但它当年追加的动作仍躺在用户
     `.storage` 里（STORAGE_VERSION 未升版、无迁移），回放会按区域压该区所有窗钮
-    ——正是它被删掉的理由本身，所以删创建不等于止损。三件指纹缺一不认（认不准
+    ——正是它被删掉的理由本身，所以删创建不等于止损。四件判据缺一不认（认不准
     就按用户意图照常执行，宁漏不误删）：
+      ⓪该场景的创建时刻早于启发式退场（见上）；
       ①窗动作目标只带 area、devices 里没有设备名（匿名）；
       ②同场景有 TurnDeviceOn/Off 指向同一区域；
       ③那条开关覆盖 ≥2 个非 button 域，且窗动作方向与它同向
         （旧码 window_action = "open" if TurnDeviceOn else "close"）。
     """
+    if not _scene_predates_auto_window_retirement(created_at):
+        return ""
     if (action.get("name") or action.get("intent")) not in (
             "ControlWindow", "WindowControl"):
         return ""
@@ -373,18 +404,21 @@ class HassTriggerVoiceSceneIntent(intent.IntentHandler):
         for action in replay_actions:
             intent_name = action.get("intent") or action.get("name")
             params = action.get("params") or action.get("parameters", {})
-            _lw_area = _legacy_auto_window_area(action, replay_actions)
+            _lw_area = legacy_auto_window_area(action, replay_actions,
+                                               scene.get("created_at"))
             if _lw_area:
                 # 存量旧启发式补的窗动作：**不执行，也不静默**——回执里点名说
                 # 跳过了哪个区域（用户没点名的窗任何方向都不动；要恢复就在场景
                 # 里明说开窗，或去面板删掉这条动作）。
-                _LOGGER.warning("场景「%s」存量自动补窗动作（区域=%s）已跳过",
-                                trigger_phrase, _lw_area)
+                _lw_dir = {"open": "开窗", "close": "关窗"}.get(
+                    str(params.get("action") or "").strip().lower(), "窗动作")
+                _LOGGER.warning("场景「%s」存量自动补窗动作（区域=%s %s）已跳过",
+                                trigger_phrase, _lw_area, _lw_dir)
                 executed_actions.append(
                     {"intent": intent_name, "result": "skipped_legacy",
-                     "reason": f"旧版自动补的「{_lw_area}」窗动作已跳过"}
+                     "reason": f"旧版自动补的「{_lw_area}」{_lw_dir}动作已跳过"}
                 )
-                legacy_skips.append(_lw_area)
+                legacy_skips.append((_lw_area, _lw_dir))
                 continue
             _LOGGER.info(
                 f"Executing scene action: intent={intent_name}, params={params}"
@@ -443,16 +477,20 @@ class HassTriggerVoiceSceneIntent(intent.IntentHandler):
             out["message"] = f"已执行场景：{trigger_phrase}"
             if legacy_skips:
                 out["message"] += (
-                    "，旧版自动补的「"
-                    + "、".join(dict.fromkeys(legacy_skips))
-                    + "」开窗动作已跳过")
+                    "，旧版自动补的 "
+                    + "、".join(f"「{a}」{d}" for a, d in dict.fromkeys(legacy_skips))
+                    + "动作已跳过")
         else:
             # v1.0.41 审查 S1：部分失败时 message 不能再带「已执行场景」成功话术——
             # core/executor 失败分支取 error or message 折叠播报，设备离线等失败会被
             # 播成"已执行"（与 v1.0.39 逐实体折算同病灶的场景路径漏网）。error 优先，
             # message 同步置失败文案，防直呼 message 的旧消费方二次踩雷。
-            nfail = sum(1 for a in executed_actions if a.get("result") == "error")
-            fail_msg = f"场景「{trigger_phrase}」{nfail}/{len(executed_actions)} 个动作没执行成功"
+            # 分母只算**真尝试过**的动作：被跳过的存量补窗不是失败，混进分母会把
+            # 「1/1 没成功」播成「1/2 没成功」（用户听成两个动作坏了一个）。
+            attempted = [a for a in executed_actions
+                         if a.get("result") != "skipped_legacy"]
+            nfail = sum(1 for a in attempted if a.get("result") == "error")
+            fail_msg = f"场景「{trigger_phrase}」{nfail}/{len(attempted)} 个动作没执行成功"
             out["error"] = fail_msg
             out["message"] = fail_msg
         return out

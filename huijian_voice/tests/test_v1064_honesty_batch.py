@@ -88,11 +88,19 @@ def _scene_ns(result_factory):
     exec(compile(_extract_func_src(CC / "intent_helper.py",  # noqa: S102
                                    "validate_slots_safely"),
                  "<intent_helper.extract>", "exec"), ns)
-    # 2026-09-30（C1 存量面）：async_handle 还调模块级 _legacy_auto_window_area
-    # （旧「自动补窗」动作回放闸）——同口径抽真函数注入，不用恒空替身。
-    exec(compile(_extract_func_src(CC / "intent_voice_scene.py",
-                                   "_legacy_auto_window_area"),
-                 "<scene.legacy_extract>", "exec"), ns)
+    # 2026-09-30（C1 存量面）：async_handle 还调模块级 legacy_auto_window_area
+    # （旧「自动补窗」动作回放闸）——同口径抽真函数注入，不用恒空替身。它内部
+    # 还调创建时刻判据 `_scene_predates_auto_window_retirement`，一并抽真身；
+    # 该函数用 datetime.fromisoformat ⇒ ns 得给出 datetime/timezone。
+    from datetime import datetime as _dt, timezone as _tz
+    from typing import Any as _Any
+    ns["datetime"], ns["timezone"], ns["Any"] = _dt, _tz, _Any
+    for _fn in ("legacy_auto_window_area",
+                "_scene_predates_auto_window_retirement"):
+        exec(compile(_extract_func_src(CC / "intent_voice_scene.py", _fn),
+                     "<scene.legacy_extract>", "exec"), ns)
+    assert callable(ns.get("legacy_auto_window_area")), "回放闸未注入"
+    assert callable(ns.get("_scene_predates_auto_window_retirement")), "时间戳判据未注入"
     # v1.1.29：成败折算已收口到 intent_result.fold_action_ok——真源注入（漂移即红），
     # 与上面的 validate_slots_safely 同规。
     exec(compile((CC / "intent_result.py").read_text(encoding="utf-8"),  # noqa: S102

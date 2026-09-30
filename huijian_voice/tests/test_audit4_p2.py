@@ -364,6 +364,39 @@ def test_p2_asr_local_exc_sets_round_reason():
 
 
 # ── P2-28/29：代次闸与自愈代次（行为钉：真调传输层，不断言源码文本）──
+@pytest.fixture()
+def hj_mods():
+    """真装载 huijian/{ws,tts,stt,llm}_transport，用例后还原 sys.modules。
+
+    creds_ui 的 hj_modules 夹具只覆盖 ws/tts/stt，本钉还要 llm；且**必须还原**——
+    直调 `_load_hj()` 会把 huijian*/anyio* 替身泄漏给后续用例（顺序敏感）。"""
+    import importlib.util
+    import sys as _sys
+    import test_v1127_transport_creds_ui as creds
+
+    def _keys():
+        return [k for k in list(_sys.modules)
+                if k == "anyio" or k.startswith("anyio.")
+                or k == "huijian" or k.startswith("huijian.")]
+
+    saved = {k: _sys.modules[k] for k in _keys()}
+    for k in _keys():
+        del _sys.modules[k]
+    mods = creds._load_hj()
+    spec = importlib.util.spec_from_file_location(
+        "huijian.llm_transport", CC / "huijian" / "llm_transport.py")
+    llm_mod = importlib.util.module_from_spec(spec)
+    _sys.modules["huijian.llm_transport"] = llm_mod
+    spec.loader.exec_module(llm_mod)
+    mods["llm_transport"] = llm_mod
+    try:
+        yield mods
+    finally:
+        for k in _keys():
+            _sys.modules.pop(k, None)
+        _sys.modules.update(saved)
+
+
 def _restart_recorder(tr):
     """把 restart_connection 换成"建协程即记账"替身——实参在协程构造时就绑定，
     所以 `_schedule_restart` 到底带没带代次，这里看到的就是它传出去的。"""
@@ -380,11 +413,10 @@ def _restart_recorder(tr):
     return calls
 
 
-def _bare_transport(mod, cls_name):
-    import test_v1127_transport_creds_ui as creds
+def _bare_transport(mod, cls_name, gen=7):
     tr = getattr(mod, cls_name).__new__(getattr(mod, cls_name))
     tr.logger = logging.getLogger("hj_p2_gen_gate")
-    tr._conn_gen = 3
+    tr._conn_gen = gen                 # 故意不等于类默认/0，防"恰好相等"蒙绿
     tasks = []
 
     class _Hass:
@@ -397,60 +429,52 @@ def _bare_transport(mod, cls_name):
     return tr, tasks
 
 
-def test_p2_ws_restart_carries_generation():
-    import test_v1127_transport_creds_ui as creds
-    mods = creds._load_hj()
-    ws, _tasks = _bare_transport(mods["ws_transport"], "WsTransport")
+def test_p2_ws_restart_carries_generation(hj_mods):
+    ws, _tasks = _bare_transport(hj_mods["ws_transport"], "WsTransport")
     calls = _restart_recorder(ws)
 
-    ws._schedule_restart("x", generation=3)
-    assert calls == [("x", 3)], \
+    ws._schedule_restart("x", generation=7)
+    assert calls == [("x", 7)], \
         f"_schedule_restart 未把代次透传 restart_connection: {calls}"
 
-    class _Stall:
+    class _StallThenSwap:
+        """writer 卡死期间连接被换掉（gen 7→9）。正确形传**发送时刻**的 7（晚到的
+        清算遇代次不符即早退，不拆新连接）；若实现改成超时支现取 self._conn_gen，
+        就会传 9＝"当前代次"＝照样拆新连接。旧钉两态同值分不出取样时刻，这条分得出。"""
+        def __init__(self, target):
+            self._target = target
+
         async def send(self, msg):
+            self._target._conn_gen = 9
             await asyncio.sleep(30)
 
     ws.update_activity_time = lambda: None
-    ws._send_writer = _Stall()
+    ws._send_writer = _StallThenSwap(ws)
     ws._SEND_HANDOFF_TIMEOUT_S = 0.05
     asyncio.run(ws.send_message({"a": 1}))
-    assert ("send stalled", 3) in calls, \
-        f"send 卡死自愈未带发送时刻代次（=不设闸，晚到会拆新连接）: {calls}"
+    assert ("send stalled", 7) in calls, \
+        f"send 卡死自愈带的代次不等于发送时刻取样（应 7，取到 9 就是执行时刻现取）: {calls}"
 
 
-def test_p2_tts_stale_claim_restart_carries_generation():
+def test_p2_tts_stale_claim_restart_carries_generation(hj_mods):
     """P2-29 的同类第二处：TTS 无人认领接管也走 _schedule_restart。
     restart_connection 的闸是 `generation is not None and …`——**不传等于不设闸**，
     后台任务真正跑起来时若已换连，它会把新连接拆掉并把 _proto 归零。"""
-    import test_v1127_transport_creds_ui as creds
-    mods = creds._load_hj()
-    tts, _tasks = _bare_transport(mods["tts_transport"], "TtsTransport")
+    tts, _tasks = _bare_transport(hj_mods["tts_transport"], "TtsTransport")
     tts._round_active = True
     tts._is_connected = True
     tts._current_ws = types.SimpleNamespace(closed=False)   # is_connected 的判据
     calls = _restart_recorder(tts)
 
-    assert tts._claim_round() == 3, "接管后应回本轮认领的连接代次"
-    assert ("TTS stale claim taken over", 3) in calls, \
+    assert tts._claim_round() == 7, "接管后应回本轮认领的连接代次"
+    assert ("TTS stale claim taken over", 7) in calls, \
         f"接管清算没带代次（旧形=无条件拆连接）: {calls}"
 
 
-def test_p2_llm_gen_gate_and_closed_resource():
+def test_p2_llm_gen_gate_and_closed_resource(hj_mods):
     """轮中换连 ⇒ 本轮收口成 error 帧；stop()/换连关流 ⇒ ClosedResourceError
     也被收口（旧形直穿 conversation）。两条都真驱动 async generator。"""
-    import test_v1127_transport_creds_ui as creds
-    import importlib.util
-    import sys as _sys
-    mods = creds._load_hj()
-    name = "huijian.llm_transport"
-    if name not in _sys.modules:
-        spec = importlib.util.spec_from_file_location(
-            name, CC / "huijian" / "llm_transport.py")
-        mod = importlib.util.module_from_spec(spec)
-        _sys.modules[name] = mod
-        spec.loader.exec_module(mod)
-    llm_mod = _sys.modules[name]
+    llm_mod = hj_mods["llm_transport"]
 
     def _fresh():
         import anyio
@@ -493,6 +517,71 @@ def test_p2_llm_gen_gate_and_closed_resource():
     item2 = asyncio.run(_closed_stream())
     assert isinstance(item2, dict) and item2.get("error"), \
         f"关流异常必须收口成 error 帧（旧形直穿 conversation），实得 {item2!r}"
+
+
+def test_p2_llm_gate_static_guard_without_anyio():
+    """元钉（CI Lint 也跑）：上面那条行为钉在无 anyio/aiohttp 环境整条 skip ⇒
+    若只靠它，llm 代次闸与 ClosedResourceError 收口在 CI 里等于**无人守**（假绿）。
+    这条按 AST 绑进 `await_message` 函数体取比较式与 except 子句——钉的是语法
+    节点不是裸标识符，注释里提一句糊弄不过去。"""
+    import ast as _ast
+    src = (CC / "huijian" / "llm_transport.py").read_text(encoding="utf-8")
+    fn = next((n for n in _ast.walk(_ast.parse(src))
+               if isinstance(n, _ast.AsyncFunctionDef) and n.name == "await_message"), None)
+    assert fn is not None, "找不到 LlmTransport.await_message"
+
+    gate_ok = False
+    for n in _ast.walk(fn):
+        if not isinstance(n, _ast.Compare):
+            continue
+        operands = [n.left, *n.comparators]
+        has_conn = any(isinstance(o, _ast.Attribute) and o.attr == "_conn_gen"
+                       for o in operands)
+        has_round = any(isinstance(o, _ast.Name) and o.id == "_round_gen"
+                        for o in operands)
+        gate_ok = has_conn and has_round
+        if gate_ok:
+            break
+    assert gate_ok, "await_message 内没有 `self._conn_gen … _round_gen` 比较（代次闸失效）"
+
+    def _tname(node):
+        if isinstance(node, _ast.Name):
+            return node.id
+        if isinstance(node, _ast.Attribute):
+            return node.attr
+        if isinstance(node, _ast.Tuple):
+            return ",".join(_tname(e) for e in node.elts)
+        return ""
+
+    caught = {_tname(h.type) for h in _ast.walk(fn)
+              if isinstance(h, _ast.ExceptHandler) and h.type is not None}
+    assert "ClosedResourceError" in caught, \
+        f"未捕 anyio.ClosedResourceError（stop/换连会直穿 conversation）: {caught}"
+
+
+def test_c1_test_scene_view_shares_the_replay_gate():
+    """接线钉（绑作用域，纯静态⇒CI 可跑）：`api.py` 的 TestSceneView.post 必须
+    真调回放闸，且**排在真执行之前**。第四轮对抗复核抓出的绕过口：管理页「测试」
+    自建循环直调 ha_intent.async_handle，闸只写在 HassTriggerVoiceScene 里 ⇒
+    点一下测试照样按区域压全区窗钮。"""
+    import ast as _ast
+    src = (CC / "api.py").read_text(encoding="utf-8")
+    post = None
+    for cls in _ast.walk(_ast.parse(src)):
+        if isinstance(cls, _ast.ClassDef) and cls.name == "TestSceneView":
+            for fn in cls.body:
+                if isinstance(fn, _ast.AsyncFunctionDef) and fn.name == "post":
+                    post = fn
+    assert post is not None, "找不到 TestSceneView.post"
+    gate = [c.lineno for c in _ast.walk(post)
+            if isinstance(c, _ast.Call) and isinstance(c.func, _ast.Name)
+            and c.func.id == "legacy_auto_window_area"]
+    assert gate, "TestSceneView.post 没走存量自动补窗闸（面板测试口可按区压窗）"
+    execs = [n.lineno for n in _ast.walk(post)
+             if isinstance(n, _ast.Attribute) and n.attr == "async_handle"]
+    assert execs, "TestSceneView.post 里找不到真执行点（判据无从对照）"
+    assert min(gate) < min(execs), \
+        f"闸必须排在 async_handle 之前，否则窗动作已落地: gate={gate} exec={execs}"
 
 
 # ── P2-30/31：config_flow 两处 ───────────────────────────────────
