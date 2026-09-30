@@ -466,8 +466,11 @@ def test_settings_defaults_have_klar_section():
 def test_pipeline_dispatch_wired():
     pl = _text("core/pipeline.py")
     assert "from .nlu.klar_client import KlarClient" in pl
-    # v1.0.92：裁决入口恒带 known_areas（控制步目标证据闸的原料）
-    assert "select_primary_plan(fp_plan, kl_plan, self._known_areas())" in pl
+    # v1.0.92：裁决入口恒带 known_areas（控制步目标证据闸的原料）。
+    # 折叠空白再比：实参换行不算断开（v1.1.35 入口又多了 device_names，行宽必换行）。
+    flat = " ".join(pl.split())
+    assert ("select_primary_plan(fp_plan, kl_plan, self._known_areas(), "
+            "self._device_names())") in flat, "主裁决入口没把两份原料传进去"
     mn = _text("core/main.py")
     assert "self.klar = KlarClient(self.settings)" in mn and "klar=self.klar" in mn
     assert "await self.klar.close()" in mn
