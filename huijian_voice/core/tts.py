@@ -1051,6 +1051,7 @@ class TtsEngine:
         prov = self._provider()
         if self._tts is not None and self.loaded_provider() == prov:
             return True
+        key = PROVIDER_MODEL_KEYS[prov]
         if self._tts is not None:
             # v1.1.5 引擎换绑（web 切 provider）：在飞合成让位在载引擎先干完，
             # 本轮保持旧嗓（不断播报），下一轮 models 循环（≤60s）再换。
@@ -1059,12 +1060,30 @@ class TtsEngine:
                     logger.info("[TTS] 引擎换绑 %s→%s 推迟（合成/整轮在飞），下一轮重试",
                                 self.loaded_provider(), prov)
                     return True
+            # 第四轮审计 P1：目标档**就绪性前置**（不持锁——ensure 可能跨境下载）。
+            # 旧序先卸旧嗓再验新档：目标档缺声码器/未下完时两档皆无，播报从
+            # "旧嗓能用"塌成彻底无声，违本函数"本轮保持旧嗓不断播"的口径。
+            # 未就绪=只备料不清旧嗓，下一轮 models 循环重试（退避由 store 管）。
+            if not self.store.model_dir_for(key):
+                try:
+                    self.store.ensure(key)
+                except Exception as e:  # noqa: BLE001 备料异常按未就绪处理
+                    logger.error("[TTS] 换绑备料异常: %s", e)
+                if not self.store.model_dir_for(key):
+                    logger.warning("[TTS] 换绑推迟：目标档 %s 未就绪，本轮保持旧嗓 %s",
+                                   prov, self.loaded_provider())
+                    return True
+            with self._lock:
+                if self._tts is not None and (self._busy or self._round_busy):
+                    # 备料（阻塞 IO）期间又起了新轮：让位，下一轮再换
+                    logger.info("[TTS] 引擎换绑 %s→%s 推迟（备料期间起新轮），下一轮重试",
+                                self.loaded_provider(), prov)
+                    return True
                 self._tts = None
             self._cache.clear()
             self._cache_bytes = 0
             logger.warning("[TTS] 引擎换绑：%s → %s（句级缓存清空，跨引擎音频不作废即用）",
                            self.loaded_provider(), prov)
-        key = PROVIDER_MODEL_KEYS[prov]
         d = self.store.model_dir_for(key)
         if not d:
             try:

@@ -104,6 +104,11 @@ class HuijianSetupView(HuijianHttpView):
 
 
 class HuijianRemoveView(HuijianHttpView):
+    # 第四轮审计 P1：解绑是破坏性写，而本口此前匿名 + 签名密钥只是设备 MAC
+    # （BLE 广播明文，非秘密）⇒ 局域网内知 speak_id+mac 者可解绑卫星。
+    # 与同文件 satellites/ota/continuous 同口径加 HA 令牌闸；签名校验保留
+    # （双闸：令牌 + 签名，签名算法不删以免动跨端契约）。
+    requires_auth = True
     url = "/api/huijian-ai/remove"
     name = "api:huijian-ai:remove"
 

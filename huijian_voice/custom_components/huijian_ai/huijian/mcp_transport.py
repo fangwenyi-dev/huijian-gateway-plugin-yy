@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 import aiohttp
@@ -56,9 +57,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry):
 
     global mcp_transport_id
     mcp_transport_id += 1
+    # 第四轮审计 P1：端点走脱敏助手（基类同口径）——mcp endpoint 可内嵌
+    # ?token=，原文进 INFO 即凭据落 HA 日志（v1.0.48 纪律，本通道此前漏网）。
     _LOGGER.info(
         "Set mcp endpoint and ensure connected: endpoint=%s id=%s",
-        endpoint,
+        McpTransport._redact_endpoint(endpoint),
         mcp_transport_id,
     )
     logger = logging.getLogger(__name__ + "." + str(mcp_transport_id))
@@ -113,8 +116,10 @@ class McpTransport(WsTransport):
                 await self._establish_websocket_connection_with_options(options)
 
         except Exception as err:
+            # 第四轮审计 P1：端点脱敏后再落日志（含 token 的 URL 不得进 HA 日志）
             self.logger.exception(
-                "Failed to connect to websocket at %s: %s", self.endpoint, err
+                "Failed to connect to websocket at %s: %s",
+                self._redact_endpoint(self.endpoint), err,
             )
             raise
 
@@ -122,7 +127,8 @@ class McpTransport(WsTransport):
 
     async def _establish_websocket_connection_with_options(self, options):
         """Establish WebSocket connection and run server tasks."""
-        self.logger.info("Connecting to: %s", self.endpoint)
+        self.logger.info("Connecting to: %s",
+                         self._redact_endpoint(self.endpoint))
         assert self.endpoint, "No endpoint configured"
         assert self._mcp_server, "MCP server not created"
         if not self.should_reconnect:
@@ -185,18 +191,37 @@ class McpTransport(WsTransport):
                     message = session_message.message
                 else:
                     message = session_message
-                self.logger.info("Send message: %s", message)
-                await self._current_ws.send_str(
-                    message.model_dump_json(by_alias=True, exclude_none=True)
+                payload = message.model_dump_json(by_alias=True, exclude_none=True)
+                # 第四轮审计 P1：出帧全文不进 INFO（含工具参数/家居文本），
+                # 与基类 ws_transport 同口径：只留长度，全文降 DEBUG。
+                self.logger.info(
+                    "Send message: %d chars%s",
+                    len(payload),
+                    " (full text at DEBUG)" if self.logger.isEnabledFor(logging.DEBUG) else "",
                 )
+                self.logger.debug("Send message full: %s", payload)
+                await self._current_ws.send_str(payload)
         except Exception as err:
             self.logger.error("Error writing to WebSocket: %s", str(err), exc_info=True)
         finally:
             self.logger.info("Websocket writer stopped")
             try:
-                await self._current_ws.close()
-            except Exception as err:
-                self.logger.error("Error closing WebSocket: %s", err)
+                if self._current_ws and not self._current_ws.closed:
+                    # 第四轮审计 P1：基类 T3 同款带闸收口——半开 TCP 上裸 close
+                    # 无限挂会让任务组拆不净（_loop_task 恒 not done → 之后每次
+                    # ensure_connected 白等 15s = v1.0.40 僵尸签名）。超时即 abort。
+                    await asyncio.wait_for(self._current_ws.close(), 5)
+            except Exception as err:  # noqa: BLE001（含 TimeoutError）
+                if isinstance(err, asyncio.TimeoutError):
+                    self.logger.warning("writer close timeout, abort: %s",
+                                        self._redact_endpoint(self.endpoint))
+                    try:
+                        t = self._current_ws and self._current_ws.transport
+                        t and t.abort()
+                    except Exception:  # noqa: BLE001
+                        pass
+                else:
+                    self.logger.error("Error closing WebSocket: %s", err)
 
     async def _process_text_message(self, msg: aiohttp.WSMessage) -> bool:
         """Process a text message from WebSocket. False = 消费端已消失（须收口重连）。

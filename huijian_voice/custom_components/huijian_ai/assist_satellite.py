@@ -634,6 +634,9 @@ class EsphomeAssistSatellite(
 
         self._is_running = False
         self._stop_pipeline()
+        # 第四轮审计 P1：实体摘除（reload/删除）后该轮不会再收敛——
+        # 活跃轮状态位不清会骑到下一次 setup 的新实体上（播报永久 0 字节）。
+        self._entry_data.async_set_assist_pipeline_state(False)
 
     @callback
     def _zombie_tts_guard_active(self) -> bool:
@@ -1372,6 +1375,15 @@ class EsphomeAssistSatellite(
             return
         self._stop_udp_server()
         self._active_pipeline_index = 0
+        # 第四轮审计 P1：当前轮已结束且没有在飞推流 ⇒ 活跃轮状态位必须收口。
+        # 旧形只有 RUN_END（无 TTS 支）与 _converge_response 两处清，而
+        # _converge_response 对 CancelledError 豁免、断连/摘实体路径两者都不走
+        # ⇒ assist_pipeline_state 卡 True ⇒ 之后**每条播报**被 _announce_gate 判
+        # 「撞活跃轮」→ API 音频板播报永久 0 字节，直到有人再说一句话。
+        # 在飞推流（未 done）不清：音频还在放，清了会让 announce 抢走下行。
+        _st = getattr(self, "_tts_streaming_task", None)
+        if _st is None or _st.done():
+            self._entry_data.async_set_assist_pipeline_state(False)
         _LOGGER.debug("Pipeline finished")
 
     def handle_timer_event(

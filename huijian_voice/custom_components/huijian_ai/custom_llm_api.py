@@ -128,6 +128,15 @@ def _args_targets_lock(arguments):
 # 之后 `HassTriggerVoiceScene`（args 只有 trigger_phrase）回放全程免确认。
 # 触发链的 args 里没有动作面 → 回查场景库取存量动作再判（同一把闸）。
 _RISKY_SCENE_INTENTS = frozenset({"HassCreateVoiceScene", "HassTriggerVoiceScene"})
+# 第四轮审计 P1：**自动化两链同形漏网**——HassCreateAutomation /
+# HassUpdateAutomation 的 actions[].params.target 与场景完全同形，同样可藏
+# 「免确认解锁」，而阈值/感应触发时 _execute_actions 直接下发 TurnDeviceOff(锁)
+# = 解锁。本通道没有加载项那套"创建不拦、播报点名"的兜底（v1.1.22 用户拍板
+# 只作用于语音链），故与场景两链同闸：命中即拒、引导走确认流。
+_RISKY_ACTION_CHAIN_INTENTS = frozenset({
+    "HassCreateVoiceScene", "HassTriggerVoiceScene",
+    "HassCreateAutomation", "HassUpdateAutomation",
+})
 
 
 def scene_actions_hit_risk(actions) -> bool:
@@ -554,12 +563,12 @@ class HuijianControlAPI(llm.API):
     async def _scene_chain_hits_risk(
         self, hass: HomeAssistant, intent_type: str, arguments: dict
     ) -> bool:
-        """场景创建/触发两链的风险扫描（v1.1.27；见 _RISKY_SCENE_INTENTS 注释）。
+        """场景/自动化动作链的风险扫描（v1.1.27 场景面；第四轮审计扩自动化面）。
 
         触发链 args 只有 trigger_phrase，动作面在场景库里 → 回查存量动作再判。
         库读取异常按放行处理（fail-open，与 _args_targets_lock 同口径）并留痕。
         """
-        if intent_type not in _RISKY_SCENE_INTENTS:
+        if intent_type not in _RISKY_ACTION_CHAIN_INTENTS:
             return False
         args = arguments if isinstance(arguments, dict) else {}
         if scene_actions_hit_risk(args.get("actions")):

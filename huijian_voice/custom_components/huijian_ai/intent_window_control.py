@@ -396,10 +396,14 @@ class ControlWindowIntent(intent.IntentHandler):
                 _LOGGER.info("After number normalization: device_name='%s'", device_name)
 
             window_name = extract_window_name(device_name or "")
-            action = find_action_in_text(device_name or "")
-
-            if not action and action_slot:
-                action = find_action_in_text(action_slot)
+            # 第四轮审计 P0：**显式 action 槽优先**。设备名里的动词语素只是名字的
+            # 一部分（「开窗器/开窗机」的"开"），不得压过用户说出的动作——旧序
+            # 「先按名推、推不出才读槽」把「关闭开窗器」按成「开启」键并回
+            # success:True（find_action_in_text 剥名后残"开器"命中 open 关键词）。
+            # 槽位缺席/解析不出时才回落名称推动作（旧客户端只有名字的形态）。
+            action = find_action_in_text(action_slot) if action_slot else None
+            if not action:
+                action = find_action_in_text(device_name or "")
 
             _LOGGER.info("Extracted: window_name='%s', action='%s'", window_name, action)
 

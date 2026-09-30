@@ -284,6 +284,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> b
     await manager.async_start()
 
     await mcp_transport.async_setup_entry(hass, entry)
+    # 第四轮审计 P1：语音自动化监听**重新武装**。async_unload_entry 里
+    # reset_automation_globals() 已真注销 EVENT_STATE_CHANGED 与整点 tick，
+    # 而重新武装此前只在 get_automation_manager 懒建时发生——条目 reload
+    # （保存选项/重配/删设备）后无人再调它 ⇒ 全屋传感器/时间自动化**静默停摆**
+    # （管理页触发日志也恒空），只有重启 HA 才复活。此处每次条目 setup 都补一发
+    # （get_automation_manager 幂等：实例已活只返回，不重复登记）。
+    if entry.data.get(CONF_CONFIG_TYPE) != "assist":
+        get_automation_manager(hass)
     # 语音卫星入驻后自动补建 assist 引擎条目（若 HA 尚无）：三平台实体
     # (conversation/stt/tts) 随慧尖设备安装自动注册、端点默认本机加载项 :8000。
     # 不 await——补建走独立 config flow(SOURCE_IMPORT)，失败 fail-open。

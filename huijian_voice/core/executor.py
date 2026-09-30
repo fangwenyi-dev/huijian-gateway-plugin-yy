@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
+from contextvars import ContextVar
 from typing import Optional
 
 from . import capability
@@ -18,6 +19,11 @@ from .nlu.schema import ATTR_CN, ATTR_TO_WIRE
 from .nlu.fast_path import Plan, color_word, is_pronoun, normalize_polite
 
 logger = logging.getLogger("huijian.executor")
+
+# 第四轮审计 P1（跨会话串播）：本轮的"代打"留痕桶按**任务**隔离——Executor 是
+# 进程单例，旧形 self._repointed 共享表被并发会话互相复位/串写（A 轮播报带上
+# B 轮的「已改指」注）。contextvars 天然按 asyncio 任务隔离；run() 每轮置新桶。
+_REPOINTED: ContextVar[Optional[list]] = ContextVar("huijian_repointed", default=None)
 
 ACT_CN = {"open": "打开", "close": "关闭", "pause": "暂停", "a": "内倒", "tilt": "内倒"}
 # ATTR_CN 已上收到契约单点（core/nlu/schema.py），本模块直接引用。
@@ -499,8 +505,11 @@ class Executor:
                 else:
                     args["entity_id"] = [new if e == old else e for e in (args.get("entity_id") or [])]
                 rec = (nm, str(area_map.get(new) or "").strip())
-                if rec not in self._repointed:
-                    self._repointed.append(rec)
+                bucket = _REPOINTED.get()
+                if bucket is None:
+                    bucket = self._repointed     # 桶缺席（直接调用本方法）=旧口径
+                if rec not in bucket:
+                    bucket.append(rec)
                 logger.info("[执行] 目标离线·同名改指 %s → %s（%s%s）", old, new, nm,
                             f"·{rec[1]}" if rec[1] else "")
         except Exception:  # noqa: BLE001 改指故障=不改（闸仍在后面兜底）
@@ -653,11 +662,16 @@ class Executor:
         上一句的留痕不得粘到下一句。
         v1.1.17：改指目标有区域时一并念出（同名两台靠名字分不出房间，不报区域
         等于让用户以为动的是他说的那间）；区域未知则不加，绝不编。
+        第四轮审计 P1：读**本轮任务**的桶（run() 置入）——旧形读共享表，
+        并发会话互相复位/串写（A 轮播报带上 B 轮的注）。
         """
-        if not self._repointed:
+        notes = _REPOINTED.get()
+        if notes is None:
+            notes = self._repointed          # 桶缺席（测试直接调本方法）=旧口径
+        if not notes:
             return ok, reply
         segs = []
-        for nm, area in dict.fromkeys(self._repointed):
+        for nm, area in dict.fromkeys(notes):
             segs.append(f"「{nm}」离线，已改指同名的另一台" + (f"，在{area}" if area else ""))
         note = "（注：" + "；".join(segs) + "）"
         return ok, (reply.rstrip() + note if reply else note)
@@ -698,6 +712,7 @@ class Executor:
             for st in (getattr(plan, "extra_steps", None) or [])]
         self.last_run = {"steps": len(steps), "applied": 0, "indeterminate": False}
         self._repointed = []                 # 本轮的"代打"留痕按轮复位（见 _named）
+        _REPOINTED.set([])                   # 第四轮审计 P1：任务隔离桶（并发会话不串）
         results = []
         missing: list[str] = []              # 链中"这屋里查无此名"的分句（D2）
         noops: list[str] = []                # 链中"目标已在要求状态"的空操作分句（D2）
@@ -711,8 +726,13 @@ class Executor:
             # 会静默对改指后的目标执行、且丢"已改指"留痕）
             args = dict(args) if isinstance(args, dict) else args
             # v1.1.21：本步原话优先（链路逐腿带 utterance）；缺省回落整句原话
+            # 第四轮审计 P1：首腿必须取**自己的分句原话**（first_utterance）——
+            # 旧形 idx==0 吃整句，「打开客厅的灯然后关上推拉窗」的灯腿被窗腿的
+            # 词误拒（v1.1.21 注释自述病灶只修了次腿）。空串仍回落整句（旧行为）。
             _utt = plan.utterance or ""
-            if idx > 0:
+            if idx == 0:
+                _utt = getattr(plan, "first_utterance", None) or _utt
+            elif idx > 0:
                 _es = getattr(plan, "extra_steps", None) or []
                 if idx - 1 < len(_es):
                     _utt = str((_es[idx - 1] or {}).get("utterance") or _utt)

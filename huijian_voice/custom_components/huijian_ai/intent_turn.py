@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from contextvars import ContextVar
 from typing import Any, Literal
 
 import voluptuous as vol
@@ -27,6 +28,14 @@ from .intent_helper import (EntityInfo, HaDeviceItem, HaTargetItem,
 from .intent_window_const import normalize_chinese_numbers
 
 _LOGGER = logging.getLogger(__name__)
+
+# 第四轮审计 P1（turn 族逐台真值）：本轮服务调用的失败原因收集桶。
+# contextvars 天然按任务隔离——handler 是共享单例，用实例属性会跨并发请求串台。
+# handle_match_target 包装器安装/复位，_run_then_background 追加。
+# （intent_lock 已按"逐台真值"根修；turn 族此前只 log，失败设备照进
+# control_targets、整单 success:True，谎报直达用户耳朵。）
+_CALL_FAILURES: ContextVar[list | None] = ContextVar(
+    "huijian_turn_call_failures", default=None)
 
 
 class TurnDeviceIntentBase(intent.IntentHandler):
@@ -162,6 +171,7 @@ class TurnDeviceIntentBase(intent.IntentHandler):
         control_targets = list(window_control_targets)
         entity_key_map = set()
         unsupported: list[str] = []
+        call_failed: list[str] = []
         for item in candidate_entities:
             _LOGGER.info(
                 f"Operate target: area={item.area_name} name={item.name} id={item.entity.id}"
@@ -171,12 +181,21 @@ class TurnDeviceIntentBase(intent.IntentHandler):
                 # v1.0.42 PauseDevice：不可暂停的域（灯/开关/锁…）不冒动、不谎报。
                 unsupported.append(item.name or item.state.entity_id)
                 continue
+            if isinstance(ok, str):
+                # 第四轮审计 P1：服务调用失败/超时的这台**不进** control_targets，
+                # 也不许整单报成功（旧形只 log，谎报直达用户耳朵）。
+                _LOGGER.warning(
+                    "服务调用未成功（如实记账，不进成功面）：%s → %s",
+                    item.name or item.state.entity_id, ok,
+                )
+                call_failed.append(f"{item.name or item.state.entity_id}：{ok}")
+                continue
             entity_key = f"{item.area_name}-{item.name}"
             if entity_key not in entity_key_map:
                 entity_key_map.add(entity_key)
                 control_targets.append({"name": item.name, "area": item.area_name})
 
-        if not control_targets and unsupported:
+        if not control_targets and (unsupported or call_failed):
             # v1.1.27：窗侧失败并入主返回——旧版只在"窗成灯败"分支消费
             # window_errors，「关掉窗和灯」窗败灯成时返回体里毫无痕迹。
             window_tail = (
@@ -185,24 +204,27 @@ class TurnDeviceIntentBase(intent.IntentHandler):
             # 暂停语义话术原样保留（有钉）；其余服务（开关/锁…）域不支持时给通用话术——
             # v1.1.24：域不支持本服务的候选现在走"跳过"路径（见 handle_match_target），
             # 全部候选都被跳过时才算失败，且话术不能再挂"暂停"字样。
-            if service == "huijian_pause":
-                return {
-                    "success": False,
-                    "error": "暂不支持暂停该设备：" + "、".join(unsupported[:3])
-                             + window_tail,
-                }
-            return {
-                "success": False,
-                "error": "这些设备不支持该操作：" + "、".join(unsupported[:3])
-                         + window_tail,
-            }
+            parts: list[str] = []
+            if unsupported:
+                parts.append(
+                    ("暂不支持暂停该设备：" if service == "huijian_pause"
+                     else "这些设备不支持该操作：") + "、".join(unsupported[:3])
+                )
+            if call_failed:
+                parts.append("这些设备没操作成功：" + "；".join(call_failed[:3]))
+            return {"success": False, "error": "；".join(parts) + window_tail}
         result: dict[str, Any] = {
             "success": True,
             "control_targets": control_targets,
         }
-        if window_errors:
-            # 窗侧失败（全败或部分败）一律并入主返回：窗败灯成不得只播"关了"。
-            result["partial_error"] = f"Window: {', '.join(window_errors)}"
+        if window_errors or call_failed:
+            # 窗侧/调用失败（全败或部分败）一律并入主返回：失败腿不得只播"成功"。
+            segs: list[str] = []
+            if window_errors:
+                segs.append(f"Window: {', '.join(window_errors)}")
+            if call_failed:
+                segs.append("Failed: " + "；".join(call_failed))
+            result["partial_error"] = "；".join(segs)
         return result
 
     # v1.0.42 家电族：暂停语义的域→服务表（"停下当前动作"而非关机回舱）。
@@ -237,6 +259,24 @@ class TurnDeviceIntentBase(intent.IntentHandler):
         return True
 
     async def handle_match_target(
+        self, intent_obj: intent.Intent, state: State, service: str
+    ) -> bool | str | None:
+        """逐台真值的唯一出口（第四轮审计 P1）。
+
+        None=已确认下发；False=该域不支持该服务（原语义，调用方计入"不支持"）；
+        str=服务调用**失败/未确认**的原因（调用方计入失败名单，绝不进
+        control_targets、绝不整单报成功）。"""
+        bucket: list[str] = []
+        token = _CALL_FAILURES.set(bucket)
+        try:
+            result = await self._handle_match_target(intent_obj, state, service)
+        finally:
+            _CALL_FAILURES.reset(token)
+        if result is False:
+            return False
+        return bucket[-1] if bucket else None
+
+    async def _handle_match_target(
         self, intent_obj: intent.Intent, state: State, service: str
     ) -> bool | None:
         hass = intent_obj.hass
@@ -479,6 +519,11 @@ class TurnDeviceIntentBase(intent.IntentHandler):
         """Run task with timeout to (hopefully) catch validation errors.
 
         After the timeout the task will continue to run in the background.
+
+        第四轮审计 P1：本方法被 handle_match_target 包装器装了失败收集桶
+        （_CALL_FAILURES，contextvars 按任务隔离）——失败/超时/取消在此**记账**，
+        调用方按真值决定该台是否进 control_targets（旧形只 log，失败设备照进
+        control_targets、整单 success:True；intent_lock 已同款根修，turn 族漏改）。
         """
         try:
             done, pending = await asyncio.wait({task}, timeout=self.service_timeout)
@@ -496,6 +541,7 @@ class TurnDeviceIntentBase(intent.IntentHandler):
                         )
 
                 task.add_done_callback(_log_exception)
+                self._record_call_failure(f"服务调用超时未确认（{task.get_name()}）")
             elif done:
                 # v1.0.90（现场 18:09:11.983 与 10:25:41.742 复现的根因）：
                 # `asyncio.wait` **不会**取回已完成任务的异常，超时支有
@@ -507,6 +553,8 @@ class TurnDeviceIntentBase(intent.IntentHandler):
                 # 漏了一半）。补齐另一半：异常在此消费并点名，不再进全局错误流。
                 for t in done:
                     if t.cancelled():
+                        self._record_call_failure(
+                            f"服务调用被取消（{t.get_name()}）")
                         continue
                     exc = t.exception()
                     if exc is not None:
@@ -514,11 +562,19 @@ class TurnDeviceIntentBase(intent.IntentHandler):
                             "服务调用失败（已消费，不再产生未取回异常）%s: %s",
                             t.get_name(), exc,
                         )
+                        self._record_call_failure(str(exc))
         except asyncio.CancelledError:
             _LOGGER.debug("Service call was cancelled: %s", task.get_name())
             task.cancel()
             await asyncio.wait({task}, timeout=5)
             raise
+
+    @staticmethod
+    def _record_call_failure(reason: str) -> None:
+        """把失败原因记进本轮的收集桶（无桶=不在 handle_match_target 包装器内）。"""
+        bucket = _CALL_FAILURES.get()
+        if bucket is not None:
+            bucket.append(str(reason or "服务调用未确认"))
 
     @staticmethod
     def _is_window_target(domains: list[str], name: str | None) -> bool:

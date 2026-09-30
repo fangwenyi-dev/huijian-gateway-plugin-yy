@@ -387,7 +387,7 @@ _ATTR_ONLY = re.compile(
     # 50%」「风速调到最大」这类 设为/调到 复合形整段不认（掉 parse_target 撞
     # 质量门=整句 MISS）；极值档（最大/最小）与"一半"根本没位置。改具名分段，
     # area/attr 仍占 1/2 号组（既有 group(1)/group(2) 引用不破）。
-    r"^\s*([\u4e00-\u9fff]{1,4}?(?:室|厅|房|间|区|馆|楼))?[的]?"
+    r"^\s*([\u4e00-\u9fff]{1,4}?(?:室|厅|房|间|区|馆|楼|卧|台|关|廊|院|厨|卫|库|阁|园|层|梯))?[的]?"
     r"(亮度|色温|温度|风量|风速|湿度|位置|开合度)"
     r"(调到|调为|调成|调至|设为|设到|设成|设置为|设置到|设置成|调整到|升高到|降低到"
     r"|调|设|整|到|至|为|成)*"
@@ -396,7 +396,12 @@ _ATTR_ONLY = re.compile(
     # v1.1.27：val 由 {1,3} 放宽到 {1,4} —— 色温族裸数值（不带 K）是 4 位
     # （「色温调成5000」）；**4 位只对色温有语义**，其余属性词撞 4 位裸数在
     # _build_plan 里如实 MISS（见该处量程闸），不放宽到会被误吃的量纲。
-    r"\s*(?P<val>\d{1,4})?\s*(?:[%％度℃])?\s*"
+    # 第四轮审计 P1：val 补中文数词（「亮度调到五十」「风速调到三档」旧形只吃
+    # \d ⇒ 整句退化成"属性词升格成设备名"或 MISS）；单位类补「档/挡」
+    # （「风速调到3档」同族，与 resolve_absolute_lane 的档口径对齐）。
+    # 负向断言 (?![点些])：「调高一点」的「一」是惯用语不是数值，吃进去会把
+    # 色温相对档 ±500 压成 ±1（v1111 色温钉实测致红）。
+    r"\s*(?P<val>\d{1,4}|[零一二三四五六七八九十百]{1,6}(?![点些]))?\s*(?:[%％度℃档挡])?\s*"
     r"(?P<sp>百分之[零一二三四五六七八九十百]+|一半|最大|最小|最高|最低|最强|最弱|满档)?\s*"
     r"(?:的)?(?:一点|一些|点|些)?\s*$")
 _ATTR_DOMAIN = {"亮度": "light", "色温": "light", "温度": "climate",
@@ -573,6 +578,9 @@ class Plan:
     # ── klar 一级 NLU 专用（其余来源恒默认值，构造全兼容）──
     speech: str = ""                              # 引擎自带的中文播报（优先于话术层）
     extra_steps: list = field(default_factory=list)  # 多分句后续步骤 [{name,args}]
+    # 链式复合句首腿的分句原话（执行层 `_turn_gate` 用；空=非链，回落整句 utterance）。
+    # 第四轮审计 P1：只有次腿带分句原话时，首腿会被同桌其他分句的窗族词误拒。
+    first_utterance: str = ""
     # 显式全屋语义（"打开所有灯/全部灯/全屋的灯"）：目标不带区域不带名字，只留域过滤；
     # 空间化（卫星区域注入）与创建侧区域继承都必须让路，否则"所有灯"会被缩成一间屋。
     whole_house: bool = False
@@ -1450,6 +1458,17 @@ class FastPath:
         if intent == "AdjustDeviceAttribute" and rest_text and (mm := _ATTR_ONLY.match(rest_text)):
             area, attr_word = mm.group(1) or "", mm.group(2)
             _attribute = extra.get("attribute") or _T0_ATTR_WORD.get(attr_word, "")
+            # 第四轮审计 P1：上游档（t0_prefix / T1 重试标签）与用户明说的属性词
+            # **跨域**打架时听用户原话——「客厅湿度调到60」的 t0_prefix 已解出
+            # attribute=humidity，被 T1 标签 AdjustTemperature 覆写成 temperature，
+            # 而集成 humidifier 域只注册 humidity ⇒ 整句恒 unsupported。同域打架
+            # （如 色温 ↔ color 都属 light）维持上游值不动；@absolute 哨兵另有支。
+            _lit_attr = _T0_ATTR_WORD.get(attr_word, "")
+            if (_lit_attr and _attribute and _attribute != _lit_attr
+                    and _attribute != _ABSOLUTE
+                    and _ADJUST_DOMAIN.get(_attribute) != _ATTR_DOMAIN.get(attr_word)):
+                trace.append(f"属性名跨域纠偏:{_attribute}→{_lit_attr}（用户原话）")
+                _attribute = _lit_attr
             _dl = str(extra.get("delta") or "").strip()
             # v1.1.27 @绝对值哨兵泄漏修复：本支此前把 extra 的哨兵**原样**带进 args
             # ——「打开一半的亮度」产 attribute='@absolute'（集成注册表无此名=
@@ -1466,6 +1485,9 @@ class FastPath:
                 _attribute, _dl = _res
                 trace.append(f"绝对值族落:{_attribute}={_dl}@{_dom0}")
             _val, _dir, _sp = mm.group("val"), mm.group("dir"), mm.group("sp")
+            if _val and not _val.isdigit():
+                # 第四轮审计 P1：中文数词就地转阿拉伯（与 百分之五十/一半 同口径）
+                _val = str(T.cn2num(_val))
             if _val and len(_val) >= 4 and attr_word != "色温":
                 # v1.1.27 量程闸：4 位裸数只有色温族（K）有语义（亮度 0~255、
                 # 开度/湿度/风速 0~100、温度两位）；别的属性词吃 4 位裸数是 typo

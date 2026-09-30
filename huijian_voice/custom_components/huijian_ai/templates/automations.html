@@ -49,6 +49,31 @@
 
     <script>
         const API_BASE = '/api/huijian-ai/automations';
+        // 第四轮审计 P1：删除端点已加 HA 令牌闸（v1.1.30 A11），本页此前裸 fetch
+        // ⇒ 恒 401。只读列表保持匿名；写操作由用户提供**长期访问令牌**，只存
+        // 本机 localStorage，仅作 Bearer 头发送（安全闸不放宽）。
+        const TOKEN_KEY = 'huijian_ha_token';
+        function haToken() { return localStorage.getItem(TOKEN_KEY) || ''; }
+        function ensureToken() {
+            let t = haToken();
+            if (!t) {
+                t = (window.prompt('删除需要 HA 长期访问令牌（HA 左下角用户名 → 安全 → 长期访问令牌）。令牌只保存在本机浏览器。') || '').trim();
+                if (t) { localStorage.setItem(TOKEN_KEY, t); }
+            }
+            return t;
+        }
+        async function fetchWrite(url, opts) {
+            if (!ensureToken()) { throw new Error('未提供 HA 令牌，写操作已取消'); }
+            opts = opts || {};
+            opts.headers = Object.assign({}, opts.headers || {},
+                                         { 'Authorization': 'Bearer ' + haToken() });
+            const res = await fetch(url, opts);
+            if (res.status === 401 || res.status === 403) {
+                localStorage.removeItem(TOKEN_KEY);
+                throw new Error('HA 令牌无效或已过期——已清除，请重试并粘贴新令牌');
+            }
+            return res;
+        }
 
         async function loadAutomations() {
             const content = document.getElementById('content');
@@ -103,7 +128,7 @@
             btn.textContent = '删除中...';
 
             try {
-                const response = await fetch(API_BASE + '/' + automationId, { method: 'DELETE' });
+                const response = await fetchWrite(API_BASE + '/' + automationId, { method: 'DELETE' });
                 const data = await response.json();
                 if (data.success) {
                     showToast('删除成功', 'success');

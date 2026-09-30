@@ -88,6 +88,33 @@
     <script>
         const SCENES_API = '/api/huijian-ai/voice-scenes';
         const AUTOS_API = '/api/huijian-ai/automations';
+        // 第四轮审计 P1：写端点已加 HA 令牌闸（v1.1.30 A11），而本页此前裸 fetch
+        // ⇒ 删除/改名/试运行恒 401。本页由 HA 匿名提供（只读面保持匿名），写操作
+        // 由用户提供**长期访问令牌**：只存本机 localStorage，仅作 Bearer 头发送，
+        // 不上传任何第三方（安全闸不放宽）。
+        const TOKEN_KEY = 'huijian_ha_token';
+        function haToken() { return localStorage.getItem(TOKEN_KEY) || ''; }
+        function ensureToken() {
+            let t = haToken();
+            if (!t) {
+                t = (window.prompt('写操作需要 HA 长期访问令牌（HA 左下角用户名 → 安全 → 长期访问令牌）。令牌只保存在本机浏览器。') || '').trim();
+                if (t) { localStorage.setItem(TOKEN_KEY, t); }
+            }
+            return t;
+        }
+        function clearToken() { localStorage.removeItem(TOKEN_KEY); }
+        async function fetchWrite(url, opts) {
+            if (!ensureToken()) { throw new Error('未提供 HA 令牌，写操作已取消'); }
+            opts = opts || {};
+            opts.headers = Object.assign({}, opts.headers || {},
+                                         { 'Authorization': 'Bearer ' + haToken() });
+            const res = await fetch(url, opts);
+            if (res.status === 401 || res.status === 403) {
+                clearToken();
+                throw new Error('HA 令牌无效或已过期——已清除，请重试并粘贴新令牌');
+            }
+            return res;
+        }
 
         async function safeJson(resp) {
             try { return await resp.json(); }
@@ -103,7 +130,7 @@
             btn.disabled = true;
             btn.textContent = '删除中...';
             try {
-                const res = await fetch(SCENES_API + '/' + sceneId, { method: 'DELETE' });
+                const res = await fetchWrite(SCENES_API + '/' + sceneId, { method: 'DELETE' });
                 const data = await safeJson(res);
                 if (data.success) {
                     showToast('删除成功', 'success');
@@ -123,7 +150,7 @@
             btn.disabled = true;
             btn.textContent = '删除中...';
             try {
-                const res = await fetch(AUTOS_API + '/' + automationId, { method: 'DELETE' });
+                const res = await fetchWrite(AUTOS_API + '/' + automationId, { method: 'DELETE' });
                 const data = await safeJson(res);
                 if (data.success) {
                     showToast('删除成功', 'success');
@@ -159,7 +186,7 @@
             const btn = document.getElementById('editSaveBtn');
             btn.disabled = true; btn.textContent = '保存中...';
             try {
-                const res = await fetch(SCENES_API + '/' + sceneId, {
+                const res = await fetchWrite(SCENES_API + '/' + sceneId, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ trigger_phrase: newPhrase })
@@ -199,7 +226,7 @@
             const btn = document.getElementById('autoEditSaveBtn');
             btn.disabled = true; btn.textContent = '保存中...';
             try {
-                const res = await fetch(AUTOS_API + '/' + autoId, {
+                const res = await fetchWrite(AUTOS_API + '/' + autoId, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ trigger: trigger })
@@ -230,7 +257,7 @@
             btn.disabled = true;
             btn.textContent = '测试中...';
             try {
-                const res = await fetch('/api/huijian-ai/test-scene', {
+                const res = await fetchWrite('/api/huijian-ai/test-scene', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ trigger_phrase: triggerPhrase })
@@ -254,7 +281,7 @@
             btn.disabled = true;
             btn.textContent = '测试中...';
             try {
-                const res = await fetch('/api/huijian-ai/test-automation', {
+                const res = await fetchWrite('/api/huijian-ai/test-automation', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ automation_id: autoId })

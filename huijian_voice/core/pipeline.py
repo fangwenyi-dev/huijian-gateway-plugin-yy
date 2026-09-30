@@ -1687,7 +1687,12 @@ class Pipeline:
                       # 窗腿的词误拒（该做的不做，实测整链零执行）。
                       extra_steps=[{"name": p.intent, "args": p.args, "source": p.source,
                                     "utterance": p.utterance or ""}
-                                   for p in plans[1:]])
+                                   for p in plans[1:]],
+                      # 第四轮审计 P1：v1.1.21 只给**次腿**带了分句原话，首腿仍在
+                      # 执行层读整句 plan.utterance ⇒ 「打开客厅的灯然后关上推拉窗」
+                      # 的灯腿被窗腿的词误拒，整链零执行（v1.1.21 注释自述病灶的
+                      # 首腿漏修）。首腿分句原话单独交付，执行层 idx==0 优先取它。
+                      first_utterance=first.utterance or "")
         return (None, merged, plans, end_in_chain)
 
     async def _try_compound(self, text: str, origin: str) -> Optional[Reply]:
