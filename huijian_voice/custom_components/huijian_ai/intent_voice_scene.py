@@ -5,14 +5,12 @@ from typing import Any
 
 import voluptuous as vol
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import intent
 from homeassistant.helpers.storage import Store
 from homeassistant.util.json import JsonObjectType
 
-from .intent_device_shared import WINDOW_KEYWORDS, split_actions_by_device
+from .intent_device_shared import split_actions_by_device
 from .intent_result import fold_action_ok
 from .intent_helper import validate_slots_safely
 
@@ -219,108 +217,6 @@ class HassCreateVoiceSceneIntent(intent.IntentHandler):
             vol.Required("actions"): vol.All(cv.ensure_list, [dict]),
         }
 
-    async def _auto_supplement_windows(
-        self, hass: HomeAssistant, actions: list[dict]
-    ) -> list[dict]:
-        """Auto-add ControlWindow for areas that have window buttons but LLM missed them.
-
-        When a TurnDeviceOn/Off covers multiple domain types in an area (e.g.
-        light+switch+climate) but forgets window(button), this method detects
-        window buttons via HA entity registry and auto-supplements a ControlWindow action.
-        """
-        ent_registry = er.async_get(hass)
-        area_reg = ar.async_get(hass)
-
-        area_has_window = {}
-        for entity_entry in ent_registry.entities.values():
-            if entity_entry.domain != "button":
-                continue
-            name = (entity_entry.name or entity_entry.original_name or "").lower()
-            if not any(kw in name for kw in WINDOW_KEYWORDS):
-                continue
-            if entity_entry.area_id:
-                area_entry = area_reg.async_get_area(entity_entry.area_id)
-                if area_entry and area_entry.name:
-                    area_has_window[area_entry.name] = True
-
-        if not area_has_window:
-            return actions
-
-        actions_with_many_domains = []
-        for action in actions:
-            intent_name = action.get("name") or action.get("intent", "")
-            if intent_name not in ("TurnDeviceOn", "TurnDeviceOff"):
-                continue
-            params = action.get("parameters") or action.get("params", {})
-            targets = params.get("target", [])
-            if not isinstance(targets, list):
-                targets = [targets]
-            all_domains = set()
-            for t in targets:
-                if not isinstance(t, dict):
-                    continue
-                for d in t.get("devices", []):
-                    if isinstance(d, dict):
-                        all_domains.update(d.get("domains", []))
-            non_button_count = len([d for d in all_domains if d != "button"])
-            if non_button_count >= 2:
-                actions_with_many_domains.append(action)
-
-        if not actions_with_many_domains:
-            return actions
-
-        def _find_area_name(target: dict) -> str | None:
-            if target.get("area"):
-                return target["area"]
-            if target.get("area_id"):
-                entry = area_reg.async_get_area(target["area_id"])
-                if entry:
-                    return entry.name
-            return None
-
-        existing_window_areas = set()
-        for action in actions:
-            if action.get("name") not in ("ControlWindow", "WindowControl"):
-                continue
-            params = action.get("parameters") or action.get("params", {})
-            for t in params.get("target", []):
-                if isinstance(t, dict):
-                    area = _find_area_name(t)
-                    if area:
-                        existing_window_areas.add(area)
-
-        new_actions = list(actions)
-        for action in actions_with_many_domains:
-            intent_name = action.get("name") or action.get("intent", "")
-            params = action.get("parameters") or action.get("params", {})
-            for t in params.get("target", []):
-                if not isinstance(t, dict):
-                    continue
-                area = _find_area_name(t)
-                if not area or area not in area_has_window:
-                    continue
-                if area in existing_window_areas:
-                    continue
-
-                window_action = "open" if intent_name == "TurnDeviceOn" else "close"
-                new_actions.append(
-                    {
-                        "name": "ControlWindow",
-                        "parameters": {
-                            "target": [
-                                {"area": area, "devices": [{"domains": ["button"]}]}
-                            ],
-                            "action": window_action,
-                        },
-                    }
-                )
-                existing_window_areas.add(area)
-                _LOGGER.info(
-                    f"自动补充: 区域'{area}'缺少窗户控制, 添加ControlWindow action"
-                )
-
-        return new_actions
-
     async def async_handle(self, intent_obj: intent.Intent) -> JsonObjectType:
         slots, fail = validate_slots_safely(
             self, intent_obj, "HassCreateVoiceScene")
@@ -337,15 +233,11 @@ class HassCreateVoiceSceneIntent(intent.IntentHandler):
         if not actions:
             return {"success": False, "error": "动作列表不能为空"}
 
+        # 只做「明说的窗设备 → ControlWindow」拆分（split_actions_by_device），
+        # 不做任何「同区多域动作自动补窗」推断：用户/模型没点名的窗，任何方向都
+        # 不许动——误开/误关窗的代价远大于漏做（产品口径同「所有设备不冒然全动」）。
         split_actions = split_actions_by_device(actions)
         _LOGGER.info("HassCreateVoiceScene split_actions=%s", split_actions)
-
-        supplemented = await self._auto_supplement_windows(
-            intent_obj.hass, split_actions
-        )
-        if len(supplemented) != len(split_actions):
-            _LOGGER.info("自动补充后: %s个action", len(supplemented))
-        split_actions = supplemented
 
         store = get_voice_scene_store(intent_obj.hass)
         success, result = await store.create_scene(trigger_phrase, split_actions)
@@ -358,6 +250,65 @@ class HassCreateVoiceSceneIntent(intent.IntentHandler):
             }
         else:
             return {"success": False, "error": result}
+
+
+def _legacy_auto_window_area(action: dict, siblings: list) -> str:
+    """识别**已删除的**「自动补窗」启发式留在存量库里的窗动作，回其区域名；否则空串。
+
+    启发式（v1.0.0~v1.1.32）已在创建侧删除，但它当年追加的动作仍躺在用户
+    `.storage` 里（STORAGE_VERSION 未升版、无迁移），回放会按区域压该区所有窗钮
+    ——正是它被删掉的理由本身，所以删创建不等于止损。三件指纹缺一不认（认不准
+    就按用户意图照常执行，宁漏不误删）：
+      ①窗动作目标只带 area、devices 里没有设备名（匿名）；
+      ②同场景有 TurnDeviceOn/Off 指向同一区域；
+      ③那条开关覆盖 ≥2 个非 button 域，且窗动作方向与它同向
+        （旧码 window_action = "open" if TurnDeviceOn else "close"）。
+    """
+    if (action.get("name") or action.get("intent")) not in (
+            "ControlWindow", "WindowControl"):
+        return ""
+    params = action.get("params") or action.get("parameters") or {}
+    targets = params.get("target") or []
+    if isinstance(targets, dict):
+        targets = [targets]
+    if len(targets) != 1 or not isinstance(targets[0], dict):
+        return ""
+    t = targets[0]
+    area = str(t.get("area") or "").strip()
+    devices = t.get("devices") or []
+    if isinstance(devices, dict):
+        devices = [devices]
+    if not area or any(isinstance(d, dict) and str(d.get("name") or "").strip()
+                       for d in devices):
+        return ""
+    want = str(params.get("action") or "").strip().lower()
+    if want not in ("open", "close"):
+        return ""
+    for sib in siblings:
+        if sib is action or not isinstance(sib, dict):
+            continue
+        s_name = sib.get("name") or sib.get("intent")
+        if s_name not in ("TurnDeviceOn", "TurnDeviceOff"):
+            continue
+        if want != ("open" if s_name == "TurnDeviceOn" else "close"):
+            continue
+        s_params = sib.get("params") or sib.get("parameters") or {}
+        s_targets = s_params.get("target") or []
+        if isinstance(s_targets, dict):
+            s_targets = [s_targets]
+        domains: set = set()
+        same_area = False
+        for st in s_targets:
+            if not isinstance(st, dict):
+                continue
+            if str(st.get("area") or "").strip() == area:
+                same_area = True
+            for d in (st.get("devices") or []):
+                if isinstance(d, dict):
+                    domains.update(str(x) for x in (d.get("domains") or []))
+        if same_area and len([d for d in domains if d != "button"]) >= 2:
+            return area
+    return ""
 
 
 class HassTriggerVoiceSceneIntent(intent.IntentHandler):
@@ -418,9 +369,23 @@ class HassTriggerVoiceSceneIntent(intent.IntentHandler):
                 "error": msg,
                 "message": msg,
             }
+        legacy_skips: list = []
         for action in replay_actions:
             intent_name = action.get("intent") or action.get("name")
             params = action.get("params") or action.get("parameters", {})
+            _lw_area = _legacy_auto_window_area(action, replay_actions)
+            if _lw_area:
+                # 存量旧启发式补的窗动作：**不执行，也不静默**——回执里点名说
+                # 跳过了哪个区域（用户没点名的窗任何方向都不动；要恢复就在场景
+                # 里明说开窗，或去面板删掉这条动作）。
+                _LOGGER.warning("场景「%s」存量自动补窗动作（区域=%s）已跳过",
+                                trigger_phrase, _lw_area)
+                executed_actions.append(
+                    {"intent": intent_name, "result": "skipped_legacy",
+                     "reason": f"旧版自动补的「{_lw_area}」窗动作已跳过"}
+                )
+                legacy_skips.append(_lw_area)
+                continue
             _LOGGER.info(
                 f"Executing scene action: intent={intent_name}, params={params}"
             )
@@ -476,6 +441,11 @@ class HassTriggerVoiceSceneIntent(intent.IntentHandler):
         }
         if all_success:
             out["message"] = f"已执行场景：{trigger_phrase}"
+            if legacy_skips:
+                out["message"] += (
+                    "，旧版自动补的「"
+                    + "、".join(dict.fromkeys(legacy_skips))
+                    + "」开窗动作已跳过")
         else:
             # v1.0.41 审查 S1：部分失败时 message 不能再带「已执行场景」成功话术——
             # core/executor 失败分支取 error or message 折叠播报，设备离线等失败会被

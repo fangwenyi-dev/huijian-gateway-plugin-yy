@@ -585,3 +585,77 @@ def test_llm_scene_write_gate_still_applies():
     for name in ("HassCreateVoiceScene", "HassDeleteVoiceScene"):
         ok2, say2 = asyncio.run(ag_off._tool(name, {}))
         assert ok2 is False and "没开启" in say2, name
+
+
+# ── C5 收口：改自动化「仅改动作」的区域继承（时间触发器/非尾字区名）─────
+def test_modify_time_trigger_inherits_area_from_old_actions():
+    """时间触发器（at）没有实体可继承 → 退一档用旧动作里已存的区域，
+    「把自动化1的动作改成打开空调」照常可执行（改动作不换房间）。"""
+    ex = Recorder(automations=[
+        {"automation_id": "a2", "trigger": {"at": "07:00"},
+         "actions": [{"intent": "TurnDeviceOn", "params": {
+             "target": [{"area": "客厅",
+                         "devices": [{"name": "空调", "domains": ["climate"]}]}]}}]},
+    ])
+    r = _casc(_pipe(executor=ex), "把自动化1的动作改成打开空调")
+    assert r.ok, r.text
+    p = [x for x in ex.calls if x.intent == "HassUpdateAutomation"][-1]
+    tgt = p.args["actions"][0]["params"]["target"][0]
+    assert tgt["area"] == "客厅" and tgt["devices"][0]["domains"] == ["climate"]
+
+
+def test_modify_multi_area_old_actions_no_guess():
+    """旧动作横跨两个区域（客厅灯+卧室空调）时线索有歧义 → 不许拿第一
+    个区域兜底猜房间；同「无来源」口径如实拒收、零改动。"""
+    ex = Recorder(automations=[
+        {"automation_id": "a4", "trigger": {"at": "07:00"},
+         "actions": [
+             {"intent": "TurnDeviceOn", "params": {
+                 "target": [{"area": "客厅", "devices": [{"name": "灯"}]}]}},
+             {"intent": "TurnDeviceOn", "params": {
+                 "target": [{"area": "卧室", "devices": [{"name": "空调"}]}]}},
+         ]},
+    ])
+    r = _casc(_pipe(executor=ex), "把自动化1的动作改成打开空调")
+    assert not r.ok and "没听懂" in r.text, r.text
+    assert [x for x in ex.calls if x.intent == "HassUpdateAutomation"] == []
+
+
+def test_modify_time_trigger_no_area_source_honest_refuse():
+    """两处都无线索（时间触发器 + 旧动作无区域）→ 如实拒收、旧数据零改动
+    （绝不猜房间）。"""
+    ex = Recorder(automations=[
+        {"automation_id": "a2", "trigger": {"at": "07:00"},
+         "actions": [{"intent": "TurnDeviceOn", "params": {}}]},
+    ])
+    r = _casc(_pipe(executor=ex), "把自动化1的动作改成打开空调")
+    assert not r.ok and "没听懂" in r.text, r.text
+    assert [x for x in ex.calls if x.intent == "HassUpdateAutomation"] == []
+
+
+def test_modify_full_sentence_area_without_tail_char_inherits():
+    """触发描述的区名不带「室厅房」尾字（阳台/主卧/玄关）也要能继承——
+    extract_prefix 判据够不着，退化 HA 区名表切分（split_area_head）。
+    形态=**改写链全句**（desc 来自口说文本，生产真实；仅改动作时 desc 是
+    库内已解析的 ASCII entity_id，不走本支）。"""
+    ex = Recorder(automations=[
+        {"automation_id": "a1", "trigger": {"at": "07:00"},
+         "actions": [{"intent": "TurnDeviceOn", "params": {
+             "target": [{"area": "客厅", "devices": [{"name": "灯"}]}]}}]},
+    ])
+    r = _casc(_pipe(executor=ex), "把自动化1改成当阳台温度超过30度就打开空调")
+    assert r.ok, r.text
+    p = [x for x in ex.calls if x.intent == "HassUpdateAutomation"][-1]
+    tgt = p.args["actions"][0]["params"]["target"][0]
+    assert tgt["area"] == "阳台", tgt
+
+
+def test_create_automation_area_without_tail_char_inherits():
+    """创建链同口径：「当阳台温度超过30度就打开空调」→ 动作区域=阳台。
+    （非尾字区名在创建链上靠 split_area_head 退化析出——钉住真实受益面。）"""
+    ex = Recorder()
+    r = _casc(_pipe(executor=ex), "当阳台温度超过30度就打开空调")
+    assert r.ok and r.source == "creation", r.text
+    p = [x for x in ex.calls if x.intent == "HassCreateAutomation"][-1]
+    tgt = p.args["actions"][0]["params"]["target"][0]
+    assert tgt["area"] == "阳台", tgt

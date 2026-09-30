@@ -503,7 +503,9 @@ class TurnDeviceIntentBase(intent.IntentHandler):
         service_data: dict[str, Any] = {ATTR_ENTITY_ID: state.entity_id}
         _LOGGER.info("Operate target fallback: service=%s name=%s", service, service_data)
         await self._run_then_background(
-            hass.async_create_task_internal(
+            # 第四轮审计 C7：改用 HA 公开面 async_create_task（旧形用的
+            # async_create_task_internal 属非公开 API，跨版本随时可撤）。
+            hass.async_create_task(
                 hass.services.async_call(
                     state.domain,
                     service,

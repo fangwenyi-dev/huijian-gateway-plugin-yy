@@ -46,6 +46,9 @@ class LlmTransport(WsTransport):
         scope；整轮仍是墙钟 deadline（语义不变：超过 timeout 未收口即 error 帧）。
         """
         content = ""
+        # 第四轮审计 P2：本轮开局连接代次（与 tts/stt 同款闸）——轮中被换连时
+        # 本轮的 reader 已失效，继续读会把旧流残帧算进新连接的回合。
+        _round_gen = getattr(self, "_conn_gen", None)
         # v1.0.93 退下旗：加载项 end 帧只在 True 时带 end_dialogue 键；
         # 这里透传到聚合 Delta 上（conversation 实体消费时记账）。False/缺席
         # =逐字节旧帧形，旧加载项零暴露。
@@ -56,6 +59,10 @@ class LlmTransport(WsTransport):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError
+                if _round_gen is not None and self._conn_gen != _round_gen:
+                    _LOGGER.warning("connection replaced mid-round (gen %s→%s)"
+                                    "，本轮按连接关闭收口", _round_gen, self._conn_gen)
+                    raise StopAsyncIteration
                 with anyio.fail_after(remaining):
                     data = await self._recv_reader.__anext__()
                 if data.state == "end":
@@ -80,6 +87,10 @@ class LlmTransport(WsTransport):
             yield Dict(error="Response timeout")
         except StopAsyncIteration:
             _LOGGER.error("response stream closed before end frame")
+            yield Dict(error="WebSocket connection closed")
+        except anyio.ClosedResourceError:
+            # stop()/换连关掉内存流时 receive 抛它——旧形未捕，直穿 conversation
+            _LOGGER.error("response stream closed (resource closed)")
             yield Dict(error="WebSocket connection closed")
 
     async def async_remove_entry(self):

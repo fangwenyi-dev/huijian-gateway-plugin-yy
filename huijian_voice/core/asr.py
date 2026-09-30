@@ -321,7 +321,10 @@ class AsrEngine:
             self.last_used = time.time()
             return text.replace("　", "").strip()
         except Exception:
+            # 第四轮审计 P2：异常必须落**本轮分因**——旧形只写日志、返回 ""，
+            # 回执与"真静音"逐字节同形（设备侧无从区分，只能靠人猜）。
             logger.exception("[STT] 本地识别异常")
+            self._set_reason("本地识别异常（详见加载项日志）", reason_out)
             return ""
         finally:
             with self._lock:

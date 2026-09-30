@@ -347,11 +347,7 @@ class FakeHass:
         self.tasks = []
 
     def async_create_task(self, coro, *a, **kw):
-        task = asyncio.ensure_future(coro)
-        self.tasks.append(task)
-        return task
-
-    def async_create_task_internal(self, coro, name=None, *a, **kw):
+        # C7 口径：只给公开面；internal 不提供（回退旧 API 即红）。
         task = asyncio.ensure_future(coro)
         self.tasks.append(task)
         return task

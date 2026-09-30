@@ -224,7 +224,10 @@ class HAClient:
                 if ok is None:
                     items = [x for x in (obj.get("states") or obj.get("results") or [])
                              if isinstance(x, dict)]
-                    ok = any(x.get("success", True) for x in items) if items else False
+                    # 第四轮审计 C4：缺 success 键的行按**失败**计（与集成侧单点
+                    # fold_action_ok 同向；旧形默认 True 与那边相反）。三族真实行
+                    # 都显式带 success，本改动只影响未知形态，方向取保守。
+                    ok = any(x.get("success") for x in items) if items else False
                 return {"success": bool(ok), **obj, "raw": obj}
             for key in ("response", "data", "result"):
                 inner = obj.get(key)
@@ -348,7 +351,12 @@ class HAClient:
                 continue            # 停用/隐藏实体不进词表（真机护栏）
             aid = e.get("area_id")
             if aid:
-                ent_map[eid] = areas.get(aid, aid)
+                # 第四轮审计 C3：区域已删（注册表里查无）时**不得拿 uuid 顶替**
+                # ——与 _device_area_map『已删区域一律丢弃』同纪律；宁可无区域，
+                # 下游按无元数据处理，也绝不把 uuid 当区域名念给用户。
+                _an = areas.get(aid)
+                if _an:
+                    ent_map[eid] = _an
             elif device_area:
                 # 区域继承（实体未自带时取设备所属区域；见本函数 docstring）
                 inherited = device_area.get(str(e.get("device_id") or ""))

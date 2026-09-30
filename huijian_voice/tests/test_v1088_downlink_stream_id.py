@@ -405,8 +405,10 @@ class _Self:
         self.is_connected = True
         self._conn_gen = 3
 
-    def _schedule_restart(self, why):
-        self.restarts.append(why)
+    def _schedule_restart(self, why, generation=None):
+        # 2026-09-30（P2-29 同类面）：记账带上代次——restart_connection 的闸是
+        # `generation is not None and …`，调用方不传等于整段不设闸。
+        self.restarts.append((why, generation))
 
 
 def test_transport_claims_round_and_drops_unclaimed_inbound():
@@ -423,7 +425,8 @@ def test_transport_claims_round_and_drops_unclaimed_inbound():
 
     s2 = _Self(active=True)          # 上一轮认领没释放 → 当场接管
     assert claim(s2) == 3 and s2._round_active is True
-    assert s2.restarts, "接管陈旧认领必须换连清算（不等一个不会来的释放）"
+    assert ("TTS stale claim taken over", 3) in s2.restarts, \
+        f"接管陈旧认领必须换连清算、且带上本轮代次（不带=不设闸）: {s2.restarts}"
 
 
 def test_welcome_negotiation_round_trip():

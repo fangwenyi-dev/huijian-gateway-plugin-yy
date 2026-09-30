@@ -1149,6 +1149,18 @@ class Pipeline:
         self._remember_turn(origin, text, say)
         return Reply(say, "creation", True, plan.trace)
 
+    @staticmethod
+    def _desc_area(desc: str) -> str:
+        """触发描述 → 区域名：尾字扫描优先；退 HA 区名表切分（阳台/主卧/
+        玄关等不带「室厅房」尾字的高频区名）。两法都不中回空串。"""
+        desc = str(desc or "")
+        if not desc:
+            return ""
+        area, _rest = T.extract_prefix(desc)
+        if not area:
+            area, _rest = T.split_area_head(desc)
+        return area or ""
+
     def _scope_action_area(self, plan: Plan, clause: str, c: dict) -> Plan:
         """动作句没写区域时，继承触发条件里的区域（2026-09-15 用户令）：
         「当客厅温度超过28度就开灯」＝**客厅的灯**；只有用户明说「打开所有灯/
@@ -1156,10 +1168,8 @@ class Pipeline:
         已写区域的零改动；推断出的"区域"不是真区域（如"客厅灯温度"）也不注入。"""
         if plan is None or getattr(plan, "whole_house", False) or is_whole_house(clause):
             return plan
-        desc = str(c.get("desc") or "")
-        if not desc:
-            return plan
-        area, _rest = T.extract_prefix(desc)
+        area = self._desc_area(str(c.get("desc") or "")) or str(
+            c.get("area_hint") or "")
         if not area:
             return plan
         known = self._known_areas()
@@ -1428,6 +1438,24 @@ class Pipeline:
         self._remember_turn(origin, text, say)
         return Reply(say, "creation", True, plan.trace)
 
+    @staticmethod
+    def _auto_rows_area(row: dict) -> str:
+        """旧动作里的区域线索（改动作不换房间时的继承后备源）。
+        多条动作指向**多个不同区域** = 线索有歧义 → 回空串（不猜房间，
+        维持「两处都无线索 → 如实拒收」的同口径）。"""
+        areas = set()
+        for a in (row.get("actions") or []):
+            if not isinstance(a, dict):
+                continue
+            params = a.get("params") or a.get("parameters") or {}
+            targets = params.get("target") or []
+            if isinstance(targets, dict):
+                targets = [targets]
+            for t in targets:
+                if isinstance(t, dict) and str(t.get("area") or "").strip():
+                    areas.add(str(t["area"]).strip())
+        return areas.pop() if len(areas) == 1 else ""
+
     async def _automation_modify(self, c: dict, text: str, origin: str) -> Reply:
         """语音改自动化（本地闭环补全，零 LLM）：新句是完整条件句 → 连触发条件
         一起换；只给动作 → 保留原触发条件只换动作；只给条件（"每天…点"）→ 只换
@@ -1476,12 +1504,17 @@ class Pipeline:
         actions: Optional[list] = None
         y_say = ""
         if y_text:
+            area_hint = ""
             if trigger is None:
                 # 仅改动作：旧触发条件里的区域名（"客厅温度"→客厅）作为无目标
-                # 动作句的区域继承来源，让「把自动化1的动作改成打开空调」可执行
+                # 动作句的区域继承来源，让「把自动化1的动作改成打开空调」可执行。
+                # 时间触发器（at）没有实体可继承 ⇒ 退一档用旧动作里已存的区域；
+                # 两处都无线索 → 维持如实拒收（绝不猜房间）。
                 desc = str((row.get("trigger") or {}).get("entity_id") or "")
+                area_hint = self._auto_rows_area(row)
             built = await self._build_actions(
-                {"kind": "automation", "y": y_text, "desc": desc or ""}, text)
+                {"kind": "automation", "y": y_text, "desc": desc or "",
+                 "area_hint": area_hint}, text)
             if isinstance(built, Reply):
                 return built                        # 动作听不懂：旧数据原样不动
             actions, y_say = built
@@ -1557,10 +1590,8 @@ class Pipeline:
         执行侧按名字子串命中整个客厅的设备——2026-09-15 实证：这种目标会把客厅
         所有设备一起打开。故命中"区域当名字"的形态一律作废，改用动词+区域+设备
         语序重排（"打开客厅空调"）；重排不成 → 不继承、如实拒收。"""
-        desc = str(c.get("desc") or "")
-        if not desc:
-            return None
-        area, rest = T.extract_prefix(desc)
+        area = self._desc_area(str(c.get("desc") or "")) or str(
+            c.get("area_hint") or "")
         if not area:
             return None
         merged = await self._match_fp(f"{area}{clause}")
@@ -1664,7 +1695,10 @@ class Pipeline:
                 # 「确认」只执行这一腿（其余腿静默丢），退前清掉挂起防误执行。
                 if ask.source == "clarify":
                     return (ask, None, [], False)
-                self._confirm.pop(origin, None)
+                # 第四轮审计 P2：挂起键一律归一（写入侧全是 `origin or "panel"`）——
+                # 旧形 pop 未归一 origin，origin 为空时挂起清不掉，TTL 内一句
+                # 「嗯」就执行一条**从未问出口**的计划。
+                self._confirm.pop(origin or "panel", None)
                 return (None, None, [], False)
             # risky 判定放到注入后：代词分句继承出「锁」类目标同样要拦
             s = self._spec_of(p)

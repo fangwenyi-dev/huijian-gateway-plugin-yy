@@ -10,6 +10,7 @@
 """
 import json
 import pathlib
+import re
 
 from core.ha_client import HAClient
 from core.executor import Executor
@@ -117,13 +118,21 @@ def test_tts_no_raw_opus_injection():
 def test_registry_devices_fixed_entities_untouched():
     """devices 视图已改迭代形；entities 仍是裸 dict（迭代只得 id 键串）——
     core@dev 源码实证无 entities 版 deprecated 视图，迭代 entities 是 P0 炸点，
-    此钉防后人"顺手对齐"。"""
+    此钉防后人"顺手对齐"。
+
+    2026-09-30：场景「自动补窗」启发式删除后 intent_voice_scene 不再碰注册表；
+    scene 侧由「逐字要求补窗那行」改为**形态守卫**（任何文件里裸迭代
+    `.entities:` 即红），保护面不缩。"""
     helper = (CC / "intent_helper.py").read_text(encoding="utf-8")
     scene = (CC / "intent_voice_scene.py").read_text(encoding="utf-8")
     assert ".devices.values()" not in helper, "devices 映射用 2027.9 硬失效"
     assert "for device_entry in dev_reg.devices:" in helper
     assert "ent_reg.entities.values()" in helper, "entities 是裸 dict，须 .values()"
-    assert "ent_registry.entities.values()" in scene
+    bare = re.compile(r"for \w+ in [\w.]+\." + "entities:")
+    for name, src in (("intent_helper.py", helper),
+                      ("intent_voice_scene.py", scene)):
+        assert not bare.search(src), \
+            f"{name}: 裸迭代 entities（得 id 键串）——必须 .values()"
 
 
 # ── M3/L4：admin 写路由 id/触发词闸门（真函数行为钉）───────────────

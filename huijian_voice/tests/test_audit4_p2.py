@@ -9,6 +9,8 @@ import asyncio
 import json
 import re
 import shutil
+import logging
+import types
 import subprocess
 import tempfile
 from pathlib import Path
@@ -267,3 +269,319 @@ def test_p3_translations_token_and_lock_doc():
     assert "gh-proxy 代理→GitHub 直连→Gitee 兜底" in lock, "lock _doc 顺序未更正"
     acr = (HERE.parent / "scripts" / "acr_transcode.py").read_text(encoding="utf-8")
     assert "def head(self" in acr and "dst.head(" in acr, "秒传探测未改真 HEAD"
+
+
+# ══ P2 未修 8 条收口批（工作树）钉 ═══════════════════════════════════
+
+# ── P2-14：链歧义退单发清挂起必须用归一键 ─────────────────────────
+def test_p2_confirm_pop_uses_normalized_key():
+    """_chain_decide 里的清挂起必须用归一键（_confirm_answer 等处的
+    pop(origin) 都在 `origin = origin or "panel"` 之后，属合法——按 AST 只看
+    _chain_decide）。"""
+    import ast as _ast
+    src = (HERE / "core" / "pipeline.py").read_text(encoding="utf-8")
+    tree = _ast.parse(src)
+    bad = []
+    for fn in _ast.walk(tree):
+        if not (isinstance(fn, _ast.AsyncFunctionDef) and fn.name == "_chain_decide"):
+            continue
+        for call in _ast.walk(fn):
+            if (isinstance(call, _ast.Call) and isinstance(call.func, _ast.Attribute)
+                    and call.func.attr == "pop" and call.args
+                    and isinstance(call.args[0], _ast.Name)
+                    and call.args[0].id == "origin"):
+                bad.append(call.lineno)
+    assert not bad, f"_chain_decide 回潮未归一 pop（行 {bad}）：origin 为空时挂起清不掉"
+    assert 'self._confirm.pop(origin or "panel", None)' in src
+
+# ── P2-17/18：半度步进可达 + 越档吸附（不再抛英文） ─────────────────
+def _calc_target():
+    import ast as _ast
+    import textwrap
+    from enum import Enum as _Enum
+    from typing import Literal
+    src = (CC / "intent_adjust_attribute.py").read_text(encoding="utf-8")
+    tree = _ast.parse(src)
+    ns: dict = {"intent": types.SimpleNamespace(
+        IntentHandleError=type("IHE", (Exception,), {})),
+        "_LOGGER": logging.getLogger("t"), "Literal": Literal,
+        "Enum": _Enum, "DeltaSupport": object}   # 注解占位（Literal 别名）
+    ns["UnsupportAdjustmentError"] = ns["intent"].IntentHandleError("unsupported")
+    for node in tree.body:
+        if isinstance(node, _ast.ClassDef) and node.name == "AdjustType":
+            exec(compile(_ast.get_source_segment(src, node), "<e>", "exec"), ns)  # noqa: S102
+    fn = next(n for n in _ast.walk(tree)
+              if isinstance(n, _ast.FunctionDef) and n.name == "calc_target")
+    code = "class _Ctx:\n" + textwrap.indent(
+        _ast.get_source_segment(src, fn), "    ") + "\n"
+    exec(compile(code, "<calc>", "exec"), ns)  # noqa: S102
+
+    def call(adjust, value, min_change, *, cur=None, unit="", special="",
+             lo=0, hi=100):
+        c = ns["_Ctx"]()
+        c.adjust, c.value, c.unit, c.special = adjust, value, unit, special
+        return c.calc_target(cur, min_change, min_change, lo, hi, {"number"})
+    return ns["AdjustType"], call
+
+
+def test_p2_half_degree_and_step_snap():
+    AdjustType, call = _calc_target()
+    # 0.5 度步进：目标值不得被 int() 截断
+    assert call(AdjustType.SET, 26.5, 0.5, cur=24, lo=16, hi=30) == 26.5
+    assert call(AdjustType.INCREASE, 0.5, 0.5, cur=26, lo=16, hi=30) == 26.5
+    # step=25 的百分比设备：「调到60%」吸附到最近档（旧形抛英文错误）
+    assert call(AdjustType.SET, 60, 25) == 50
+    assert call(AdjustType.DECREASE, -30, 25, cur=60) == 25
+    # step=1 的原行为不变
+    assert call(AdjustType.SET, 60, 1) == 60
+    # 对抗复核（2026-09-30）：吸附档不得逆行——INCREASE 必须高于当前值、
+    # DECREASE 必须低于（旧形 51→50、99→100 反向走）
+    assert call(AdjustType.INCREASE, 10, 25, cur=51) == 75
+    assert call(AdjustType.DECREASE, -1, 25, cur=99) == 75
+    assert call(AdjustType.INCREASE, 10, 25, cur=50) == 75    # 原位不算调高
+    assert call(AdjustType.DECREASE, -10, 25, cur=100) == 75  # 原位不算调低
+
+
+# ── P2-21：本地 STT 异常必须落本轮分因 ─────────────────────────────
+def test_p2_asr_local_exc_sets_round_reason():
+    import threading as _th
+    from core.asr import AsrEngine
+
+    class _Rec:
+        def create_stream(self):
+            raise RuntimeError("boom")
+
+    class _S:
+        def get(self, k, dv=None):
+            return "sensevoice"
+
+    eng = AsrEngine.__new__(AsrEngine)
+    eng._rec, eng._lock, eng._busy, eng.settings = _Rec(), _th.Lock(), 0, _S()
+    sink: dict = {}
+    out = eng._local_transcribe(b"\x00" * 100, reason_out=sink)
+    assert out == "" and "异常" in str(sink.get("reason") or ""), \
+        f"本地识别异常必须写本轮分因（否则与真静音同形）: {sink}"
+
+
+# ── P2-28/29：代次闸与自愈代次（行为钉：真调传输层，不断言源码文本）──
+def _restart_recorder(tr):
+    """把 restart_connection 换成"建协程即记账"替身——实参在协程构造时就绑定，
+    所以 `_schedule_restart` 到底带没带代次，这里看到的就是它传出去的。"""
+    calls = []
+
+    def _rec(reason="", generation=None):
+        calls.append((reason, generation))
+
+        async def _noop():
+            return None
+        return _noop()
+
+    tr.restart_connection = _rec
+    return calls
+
+
+def _bare_transport(mod, cls_name):
+    import test_v1127_transport_creds_ui as creds
+    tr = getattr(mod, cls_name).__new__(getattr(mod, cls_name))
+    tr.logger = logging.getLogger("hj_p2_gen_gate")
+    tr._conn_gen = 3
+    tasks = []
+
+    class _Hass:
+        def async_create_background_task(self, coro, name=None):
+            tasks.append(coro)
+            coro.close()
+            return None
+
+    tr.hass = _Hass()
+    return tr, tasks
+
+
+def test_p2_ws_restart_carries_generation():
+    import test_v1127_transport_creds_ui as creds
+    mods = creds._load_hj()
+    ws, _tasks = _bare_transport(mods["ws_transport"], "WsTransport")
+    calls = _restart_recorder(ws)
+
+    ws._schedule_restart("x", generation=3)
+    assert calls == [("x", 3)], \
+        f"_schedule_restart 未把代次透传 restart_connection: {calls}"
+
+    class _Stall:
+        async def send(self, msg):
+            await asyncio.sleep(30)
+
+    ws.update_activity_time = lambda: None
+    ws._send_writer = _Stall()
+    ws._SEND_HANDOFF_TIMEOUT_S = 0.05
+    asyncio.run(ws.send_message({"a": 1}))
+    assert ("send stalled", 3) in calls, \
+        f"send 卡死自愈未带发送时刻代次（=不设闸，晚到会拆新连接）: {calls}"
+
+
+def test_p2_tts_stale_claim_restart_carries_generation():
+    """P2-29 的同类第二处：TTS 无人认领接管也走 _schedule_restart。
+    restart_connection 的闸是 `generation is not None and …`——**不传等于不设闸**，
+    后台任务真正跑起来时若已换连，它会把新连接拆掉并把 _proto 归零。"""
+    import test_v1127_transport_creds_ui as creds
+    mods = creds._load_hj()
+    tts, _tasks = _bare_transport(mods["tts_transport"], "TtsTransport")
+    tts._round_active = True
+    tts._is_connected = True
+    tts._current_ws = types.SimpleNamespace(closed=False)   # is_connected 的判据
+    calls = _restart_recorder(tts)
+
+    assert tts._claim_round() == 3, "接管后应回本轮认领的连接代次"
+    assert ("TTS stale claim taken over", 3) in calls, \
+        f"接管清算没带代次（旧形=无条件拆连接）: {calls}"
+
+
+def test_p2_llm_gen_gate_and_closed_resource():
+    """轮中换连 ⇒ 本轮收口成 error 帧；stop()/换连关流 ⇒ ClosedResourceError
+    也被收口（旧形直穿 conversation）。两条都真驱动 async generator。"""
+    import test_v1127_transport_creds_ui as creds
+    import importlib.util
+    import sys as _sys
+    mods = creds._load_hj()
+    name = "huijian.llm_transport"
+    if name not in _sys.modules:
+        spec = importlib.util.spec_from_file_location(
+            name, CC / "huijian" / "llm_transport.py")
+        mod = importlib.util.module_from_spec(spec)
+        _sys.modules[name] = mod
+        spec.loader.exec_module(mod)
+    llm_mod = _sys.modules[name]
+
+    def _fresh():
+        import anyio
+        send, recv = anyio.create_memory_object_stream(10)
+        tr = object.__new__(llm_mod.LlmTransport)
+        tr._recv_reader = recv
+        tr._conn_gen = 3
+        tr.logger = logging.getLogger("hj_p2_llm_gate")
+        return tr, send, recv
+
+    async def _swapped_mid_round():
+        tr, send, recv = _fresh()
+        gen = tr.await_message(timeout=5)
+        task = asyncio.create_task(gen.__anext__())
+        await asyncio.sleep(0)              # 生成器体起跑：采样本轮代次=3
+        tr._conn_gen = 9                    # 轮中被换连
+        await send.send(types.SimpleNamespace(
+            state="start", type="text", data=None))
+        try:
+            return await task
+        finally:
+            await send.aclose()
+            await recv.aclose()
+
+    item = asyncio.run(_swapped_mid_round())
+    assert isinstance(item, dict) and item.get("error"), \
+        f"轮中换连必须收口成 error 帧，实得 {item!r}"
+
+    async def _closed_stream():
+        tr, send, recv = _fresh()
+        gen = tr.await_message(timeout=5)
+        task = asyncio.create_task(gen.__anext__())
+        await asyncio.sleep(0)
+        await recv.aclose()                 # 读端被关＝stop()/换连的形态
+        try:
+            return await task
+        finally:
+            await send.aclose()
+
+    item2 = asyncio.run(_closed_stream())
+    assert isinstance(item2, dict) and item2.get("error"), \
+        f"关流异常必须收口成 error 帧（旧形直穿 conversation），实得 {item2!r}"
+
+
+# ── P2-30/31：config_flow 两处 ───────────────────────────────────
+def test_p2_config_flow_host_submit_and_delete_aggregation():
+    src = (CC / "config_flow.py").read_text(encoding="utf-8")
+    i = src.index("async def async_step_user(")
+    blk = src[i:i + 900]
+    assert "CONF_HOST in user_input" in blk and "_async_step_user_base(user_input)" in blk, \
+        "手工表单提交必须回表单步（旧形被 qrcode 静默丢弃）"
+    j = src.index('if user_input is not None:\n            to_delete = user_input.get')
+    dblk = src[j:j + 2600]
+    assert "if to_delete or to_delete_auto:" in dblk, "两族删除必须一次收口"
+    assert "场景删除失败：" in dblk and "自动化删除失败：" in dblk, "失败必须展示"
+    assert "if deleted:\n                    return self.async_show_form" not in dblk, \
+        "回潮早退（删了场景就丢自动化）"
+
+
+# ══ C 段收口批（工作树）钉 ═══════════════════════════════════════════
+
+def test_c2_speech_never_raises_on_bad_rows():
+    """`{"control_targets":[None]}`/`{"states":[None]}` 旧形会 AttributeError，
+    违 speech() 的"永不炸"约定。"""
+    from conftest import FakeHAClient
+    from core.executor import Executor
+    from core.nlu.fast_path import Plan
+    ex = Executor(FakeHAClient(), None)
+    plan = Plan("TurnDeviceOn", {"target": [{"devices": [{"name": "灯"}]}]}, "t0")
+    for bad in ({"control_targets": [None]},
+                {"control_targets": [{"name": "灯"}, None]},
+                {"states": [None], "success": True}):
+        out = ex.speech(plan, bad)          # 不抛即通过
+        assert isinstance(out, str) and out
+
+
+def test_c3_deleted_area_not_replaced_by_uuid():
+    from core.ha_client import HAClient
+    rows = [{"entity_id": "light.x", "area_id": "gone-uuid", "device_id": None,
+             "disabled_by": None, "hidden_by": None}]
+    ent_map, _alias, _cls = HAClient._parse_registry(rows, areas={})
+    assert "light.x" not in ent_map, \
+        "已删区域被 uuid 顶替（与 _device_area_map『已删区域一律丢弃』相反）"
+    rows2 = [{"entity_id": "light.y", "area_id": "a1", "device_id": None,
+              "disabled_by": None, "hidden_by": None}]
+    ent_map2, _a, _c = HAClient._parse_registry(rows2, areas={"a1": "客厅"})
+    assert ent_map2.get("light.y") == "客厅", "正常区域路径不得回归"
+
+
+def test_c4_missing_success_row_counts_as_failure():
+    from core.ha_client import HAClient
+    out = HAClient._normalize_result(200, '{"states": [{"name": "x"}]}', "n")
+    assert out["success"] is False, \
+        "缺 success 的行必须按失败计（与集成侧 fold_action_ok 同向，旧形默认 True）"
+    ok = HAClient._normalize_result(200, '{"states": [{"name": "x", "success": true}]}', "n")
+    assert ok["success"] is True
+
+
+def test_c6_stt_rid_overwritten_each_round():
+    src = (HERE / "core" / "session.py").read_text(encoding="utf-8")
+    assert "self._rid = self._parse_rid(obj) or 0" in src, \
+        "STT rid 必须每轮覆盖（旧形 if r: 会跨轮回显上一轮身份）"
+    assert "if r:\n                    self._rid = r" not in src
+
+
+def test_c7_public_task_api_only():
+    src = (HERE / "custom_components" / "huijian_ai" / "intent_turn.py").read_text(encoding="utf-8")
+    assert "hass.async_create_task_internal(" not in src, "非公开 API 回潮"
+    assert "hass.async_create_task(" in src
+
+
+def test_c8_pipeline_creation_isolates_dynamic_vocab():
+    src = (HERE / "tests" / "test_pipeline_creation.py").read_text(encoding="utf-8")
+    assert "_isolate_dynamic_vocab" in src and "clear_vocab()" in src, \
+        "缺 targets 动态词表隔离 fixture（用例顺序敏感）"
+
+
+@pytest.mark.skipif(NODE is None, reason="无 node")
+def test_c_escape_attr_in_automations_page():
+    """删除按钮改 dataset 取参：文本不再拼进内联 onclick 的 JS 字符串。"""
+    html = (CC / "templates" / "automations.html").read_text(encoding="utf-8")
+    assert "function escapeAttr(" in html, "缺属性级转义"
+    assert "onclick=\"deleteAutomation(this)\"" in html, "按钮未改 dataset 形态"
+    assert "deleteAutomation(\''" not in html, "回潮：文本拼进内联 handler"
+    assert "data-trigger=\"' + escapeAttr(triggerText) + '\"" in html
+    # 内联脚本仍须语法可过（本仓前端守卫同源）
+    m = re.search(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", html, re.S)
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
+                                     encoding="utf-8") as f:
+        f.write(m.group(1))
+        tmp = f.name
+    r = subprocess.run([NODE, "--check", tmp], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+    assert r.returncode == 0, r.stderr[:400]

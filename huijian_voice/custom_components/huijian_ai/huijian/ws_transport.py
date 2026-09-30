@@ -374,6 +374,7 @@ class WsTransport:
         if not self._send_writer:
             self.logger.warning("Cannot send message, send writer is not available")
             return
+        _gen = self._conn_gen            # 第四轮审计 P2：发送时刻的连接代次
         try:
             await asyncio.wait_for(
                 self._send_writer.send(message), self._SEND_HANDOFF_TIMEOUT_S)
@@ -385,18 +386,24 @@ class WsTransport:
             self.logger.warning(
                 "send_message 交付超 %.0fs——writer 卡死（半开 TCP/消费者消失），"
                 "主动换连自愈", self._SEND_HANDOFF_TIMEOUT_S)
-            self._schedule_restart("send stalled")
+            # 带代次：15s 超时期间若已换连，restart_connection 因代次不符早退
+            # ——旧形无代次，会把**新**连接拆掉再重连（v1.1.27 代次闸漏口）。
+            self._schedule_restart("send stalled", generation=_gen)
 
-    def _schedule_restart(self, reason: str) -> None:
+    def _schedule_restart(self, reason: str, generation: int | None = None) -> None:
         """restart_connection 的火后即忘包装（send_message 内不可自等待：
-        它会拆掉本 writer 队列，而调用栈还挂在这条 send 上）。"""
+        它会拆掉本 writer 队列，而调用栈还挂在这条 send 上）。
+
+        generation：调用方发送时刻的代次——期间已换连时由 restart_connection
+        按同判据早退（见其 docstring 与 _conn_gen 纪律）。"""
         try:
             if self.hass is not None:
                 self.hass.async_create_background_task(
-                    self.restart_connection(reason), "huijian_ai_ws_restart")
+                    self.restart_connection(reason, generation=generation),
+                    "huijian_ai_ws_restart")
             else:  # 测试/无 hass 环境
                 asyncio.get_running_loop().create_task(
-                    self.restart_connection(reason))
+                    self.restart_connection(reason, generation=generation))
         except Exception:  # noqa: BLE001 自愈动作本身绝不能再炸调用栈
             self.logger.exception("schedule restart failed: %s", reason)
 

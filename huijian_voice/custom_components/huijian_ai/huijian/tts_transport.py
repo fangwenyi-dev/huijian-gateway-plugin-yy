@@ -136,7 +136,12 @@ class TtsTransport(WsTransport):
                 "TTS 上一轮认领未释放（消费端未走收口）——本轮接管并断连清算残留")
             self._round_active = False
             if self.is_connected:
-                self._schedule_restart("TTS stale claim taken over")
+                # 带代次（P2-29 同口径）：后台任务真正跑起来时若已换连，
+                # restart_connection 因代次不符早退。**不带代次等于不设闸**
+                # （见 ws_transport.restart_connection 的 `is not None` 判据），
+                # 旧形会拆掉新连接并把 _proto 归零。
+                self._schedule_restart("TTS stale claim taken over",
+                                       generation=self._conn_gen)
         self._round_active = True
         return self._conn_gen
 

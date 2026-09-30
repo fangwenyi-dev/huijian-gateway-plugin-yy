@@ -197,6 +197,11 @@ class Delta:
             target_value = None
             # e.g., 10.5 in [10, 11]
             for valid_value in [left_stepped_value, right_stepped_value]:
+                # 第四轮审计 P2：**恰在档上直接采用**——旧循环对 INCREASE 不 break，
+                # 0.5 步进时「调高0.5度」会从 26.5 再被"向上对齐"到 27（放大成整度）。
+                if abs(user_target_value - valid_value) < 1e-9:
+                    target_value = valid_value
+                    break
                 if abs(user_target_value - valid_value) < 1:
                     target_value = valid_value
                     # Align to the smaller value when descrease or set.
@@ -206,10 +211,33 @@ class Delta:
                     ):
                         break
             if target_value is None:
-                raise intent.IntentHandleError(
-                    f"violates the change step: {min_change}"
-                )
-        return int(max(min_value, min(max_value, target_value)))
+                # 第四轮审计 P2：用户值落在两档之间时**吸附到最近档**——旧形抛
+                # 英文 "violates the change step: 25" 直达话术（step=25/33 的
+                # 百分比设备必中）。同距时：降档/设值取小，升档取大。
+                d_left = abs(user_target_value - left_stepped_value)
+                d_right = abs(right_stepped_value - user_target_value)
+                if (self.adjust == AdjustType.DECREASE
+                        or self.adjust == AdjustType.SET):
+                    target_value = (left_stepped_value if d_left <= d_right
+                                    else right_stepped_value)
+                else:
+                    target_value = (right_stepped_value if d_right <= d_left
+                                    else left_stepped_value)
+                # 对抗复核（2026-09-30）：吸附档**不得逆行**——「调高10%」在非
+                # 网格当前值上（51%，step=25）曾吸到 50% 反向走；「调低1%」在
+                # 99% 上曾吸到 100%。几何保证：INCREASE 的右档恒高于当前值、
+                # DECREASE 的左档恒低于（floor(x)+step > x），逆则改选对侧。
+                if (self.adjust == AdjustType.INCREASE
+                        and target_value <= current_value):
+                    target_value = right_stepped_value
+                elif (self.adjust == AdjustType.DECREASE
+                        and target_value >= current_value):
+                    target_value = left_stepped_value
+                _LOGGER.info("step snap: %s -> %s (step=%s)",
+                             user_target_value, target_value, min_change)
+        _clamped = max(min_value, min(max_value, target_value))
+        # 第四轮审计 P2：0.5 度步进的目标值不得被 int() 截断（26.5→26）。
+        return int(_clamped) if float(_clamped).is_integer() else _clamped
 
 
 def parse_delta(raw: str):
@@ -501,7 +529,14 @@ def adjust_climate_temperature(ctx: AdjustmentContext, target: AdjustmentTarget)
     min_temperature = ctx.state.attributes.get(climate.const.ATTR_MIN_TEMP, 10)
     max_temperature = ctx.state.attributes.get(climate.const.ATTR_MAX_TEMP, 30)
     temperature_step = ctx.state.attributes.get(climate.const.ATTR_TARGET_TEMP_STEP, 1)
-    temperature_step = max(temperature_step, 1)  # >=1
+    # 第四轮审计 P2：旧形 max(step, 1) 把 0.5 度步进抬成 1（半度机型永不可达：
+    # 「调到26.5度」→26、「调高0.5度」→±1）；地板降到 0.5，并把真实步进
+    # 传给 calc_target 的 min_change（旧形硬编码 1）。
+    try:
+        temperature_step = float(temperature_step)
+    except (TypeError, ValueError):
+        temperature_step = 1.0
+    temperature_step = max(temperature_step, 0.5)
     target.attributes = {
         "supported_adjust_step": temperature_step,
         "min_value": min_temperature,
@@ -518,7 +553,7 @@ def adjust_climate_temperature(ctx: AdjustmentContext, target: AdjustmentTarget)
     target_temperature = ctx.delta.calc_target(
         current_temperature,
         temperature_step,
-        1,
+        temperature_step,          # 第四轮审计 P2：真实步进（旧形硬编码 1）
         min_temperature,
         max_temperature,
         supports={"number"},

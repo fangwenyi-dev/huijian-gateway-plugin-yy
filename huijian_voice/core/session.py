@@ -208,9 +208,10 @@ class SttSession(BaseSession):
             if state == "start":
                 self._pcm.clear()          # 新一轮 utterance（含 realtime restart）
                 self._dec_fail = 0         # 失败帧计数与缓冲同生命期
-                r = self._parse_rid(obj)
-                if r:
-                    self._rid = r          # v1.0.92：本轮身份（不带=沿用 0=legacy）
+                # 第四轮审计 C6：**每轮覆盖**（与 TtsSession 同口径）——旧形
+                # `if r:` 只在带值时写，同连接混用带/不带 rid 的客户端会把
+                # 上一轮的 rid 回显到本轮（消费端错配）。不带=0=legacy 原样。
+                self._rid = self._parse_rid(obj) or 0
             elif state == "stop":
                 await self._transcribe_and_reply(self._parse_rid(obj) or self._rid)
             # detect/cancel: 无操作（cancel 由下一轮 start 清缓冲天然生效）

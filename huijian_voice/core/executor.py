@@ -1323,14 +1323,18 @@ class Executor:
             return f"好的，{who}{verb}" if who else \
                 ("好的，锁已打开" if intent == "HassUnlock" else "好的，已上锁")
         # control_targets 族（TurnDeviceOn/Off、ControlWindow、AdjustDeviceAttribute、SetDeviceMode）
-        targets = result.get("control_targets") or []
+        # 第四轮审计 C2：内层行守卫——{"control_targets":[None]} 旧形会在
+        # _targets_speech 里 AttributeError，违本方法"callers 永不炸"的约定。
+        targets = [t for t in (result.get("control_targets") or [])
+                   if isinstance(t, dict)]
         if targets:
             return self._targets_speech(plan, targets)
         if (result.get("message") or "").strip():
             msg = str(result["message"]).strip()
             return msg if any("\u4e00" <= c <= "\u9fff" for c in msg) else zh_error(msg)
         if result.get("states"):
-            names = [s.get("name", "") for s in result["states"] if s.get("success")]
+            names = [s.get("name", "") for s in (result.get("states") or [])
+                     if isinstance(s, dict) and s.get("success")]
             if plan.intent == "AdjustDeviceAttribute" and names:
                 # v1.0.34：属性调节族不回 control_targets，旧话术只剩"已处理"
                 # 丢数值（甚至因 raw 折叠只剩裸「好的」）——借 control_targets

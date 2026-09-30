@@ -285,7 +285,14 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Handle a flow initialized by the user."""
+        """Handle a flow initialized by the user.
+
+        第四轮审计 P2：带 host/port 的提交必须回**手工表单步**——旧版无条件转
+        qrcode，而 qrcode 步整体不读 user_input ⇒ 拉取失败后「改 IP 重试」的输入
+        被静默丢弃、跳进扫码空等 5 分钟（恢复路径成死胡同）。
+        """
+        if user_input is not None and CONF_HOST in user_input:
+            return await self._async_step_user_base(user_input)
         return await self.async_step_qrcode(user_input=user_input)
 
     async def async_step_qrcode(self, user_input=None):
@@ -1524,44 +1531,43 @@ class OptionsFlowHandler(OptionsFlowWithReload):
             to_delete = user_input.get("to_delete", [])
             if isinstance(to_delete, str):
                 to_delete = [to_delete]
-            if to_delete:
-                deleted = []
-                failed = []
-                for scene_id in to_delete:
-                    success, msg = await voice_store.delete_scene(scene_id=scene_id)
-                    if success:
-                        deleted.append(scene_id)
-                    else:
-                        failed.append(f"{scene_id}: {msg}")
-                if deleted:
-                    return self.async_show_form(
-                        step_id="voice_scene_delete_result",
-                        description_placeholders={
-                            "result_msg": f"已删除 {len(deleted)} 个场景"
-                        },
-                        last_step=False,
-                    )
-
             to_delete_auto = user_input.get("to_delete_auto", [])
             if isinstance(to_delete_auto, str):
                 to_delete_auto = [to_delete_auto]
-            if to_delete_auto:
-                deleted_auto = []
-                failed_auto = []
-                for auto_id in to_delete_auto:
-                    success, msg = await auto_store.delete_automation(auto_id)
-                    if success:
-                        deleted_auto.append(auto_id)
-                    else:
-                        failed_auto.append(f"{auto_id}: {msg}")
+            # 第四轮审计 P2：两类删除**一次收口**——旧形删了场景就 `if deleted:
+            # return`，同一次提交里勾的自动化整段被丢；且 failed/failed_auto 算了
+            # 不展示（静默半删）。现在两族结果合并进同一条 result_msg，失败逐条点名。
+            deleted: list = []
+            failed: list = []
+            deleted_auto: list = []
+            failed_auto: list = []
+            for scene_id in to_delete:
+                success, msg = await voice_store.delete_scene(scene_id=scene_id)
+                if success:
+                    deleted.append(scene_id)
+                else:
+                    failed.append(f"{scene_id}: {msg}")
+            for auto_id in to_delete_auto:
+                success, msg = await auto_store.delete_automation(auto_id)
+                if success:
+                    deleted_auto.append(auto_id)
+                else:
+                    failed_auto.append(f"{auto_id}: {msg}")
+            if to_delete or to_delete_auto:
+                parts = []
+                if deleted:
+                    parts.append(f"已删除 {len(deleted)} 个场景")
+                if failed:
+                    parts.append("场景删除失败：" + "；".join(failed[:3]))
                 if deleted_auto:
-                    return self.async_show_form(
-                        step_id="voice_scene_delete_result",
-                        description_placeholders={
-                            "result_msg": f"已删除 {len(deleted_auto)} 个自动化"
-                        },
-                        last_step=False,
-                    )
+                    parts.append(f"已删除 {len(deleted_auto)} 个自动化")
+                if failed_auto:
+                    parts.append("自动化删除失败：" + "；".join(failed_auto[:3]))
+                return self.async_show_form(
+                    step_id="voice_scene_delete_result",
+                    description_placeholders={"result_msg": "；".join(parts)},
+                    last_step=False,
+                )
 
             to_options = user_input.get("to_options", False)
             if to_options:

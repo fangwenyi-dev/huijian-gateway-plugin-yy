@@ -100,7 +100,7 @@
                         '<div class="card-header">' +
                             '<div><span class="card-trigger">' + escapeHtml(triggerText) + '</span>' +
                             '<span class="card-tag">传感器自动化</span></div>' +
-                            '<button class="delete-btn" onclick="deleteAutomation(\'' + a.automation_id + '\', \'' + escapeHtml(triggerText) + '\')">删除</button>' +
+                            '<button class="delete-btn" data-auto="' + escapeAttr(a.automation_id) + '" data-trigger="' + escapeAttr(triggerText) + '" onclick="deleteAutomation(this)">删除</button>' +
                         '</div>' +
                         '<div class="info">' +
                             '创建时间: ' + (a.created_at ? new Date(a.created_at).toLocaleString('zh-CN') : '未知') +
@@ -118,12 +118,15 @@
             }
         }
 
-        async function deleteAutomation(automationId, triggerText) {
+        async function deleteAutomation(btn) {
+            // 第四轮审计 C 段：改 dataset 取参——旧形把文本拼进内联 onclick 的 JS
+            // 字符串里，而 escapeHtml 不转义引号 ⇒ 名字含 ' 即可越出字符串（XSS 面）。
+            const automationId = btn.dataset.auto;
+            const triggerText = btn.dataset.trigger;
             if (!confirm('确定要删除传感器自动化 "' + triggerText + '" 吗？')) {
                 return;
             }
 
-            const btn = event.target;
             btn.disabled = true;
             btn.textContent = '删除中...';
 
@@ -161,6 +164,11 @@
             const div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
+        }
+
+        // 属性上下文转义（data-* 用）：innerHTML 不转义引号，属性值必须补齐。
+        function escapeAttr(text) {
+            return escapeHtml(text).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
         }
 
         loadAutomations();

@@ -298,6 +298,8 @@ def test_llm_api_expose_fail_is_warn_throttled():
 def test_scene_partial_failure_not_spoken_as_success():
     src = (ROOT / "custom_components" / "huijian_ai" / "intent_voice_scene.py").read_text(encoding="utf-8")
     i = src.find("all_success = all(")
-    tail = src[i:i + 900]
+    # 钉窗口取到函数收尾，不写死字数（2026-09-30：成功话术分支加了存量补窗
+    # 说明行后，旧 900 字窗口把 else 支的 out["error"] 挤出窗外=假红）。
+    tail = src[i:src.index("return out", i) + len("return out")]
     assert 'out["error"]' in tail and "个动作没执行成功" in tail
     assert 'if all_success:' in tail, "成功话术必须只在全成功路径"

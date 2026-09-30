@@ -8,6 +8,8 @@ import asyncio
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.pipeline import Pipeline  # noqa: E402
 from core.nlu.fast_path import Plan  # noqa: E402
@@ -75,6 +77,18 @@ class Recorder:
         if plan.intent == "HassListAutomations":
             return True, {"success": True, "automations": list(self._autos)}
         return self.ok, {"success": self.ok}
+
+
+@pytest.fixture(autouse=True)
+def _isolate_dynamic_vocab():
+    """第四轮审计 C8：targets 的动态词表是模块级态（sync_vocab/sync_areas）——
+    本文件用手工装配的 Pipeline 直接跑 _cascade，用例间会互相污染（顺序敏感）。
+    targets.clear_vocab() 是模块自带的测试隔离口；前后各清一次。"""
+    from core.nlu import targets as _T
+
+    _T.clear_vocab()
+    yield
+    _T.clear_vocab()
 
 
 def _pipe(scenes=None, executor=None, **set_kw):

@@ -140,10 +140,27 @@ def test_workflow_uses_supported_builder_args():
     assert jobs["e2e"]["needs"] == ["prepare", "build"]
     assert not jobs["e2e"].get("continue-on-error"), "e2e 是发布硬门禁，禁软"
     assert not jobs["manifest"].get("continue-on-error")
-    # v1.0.1 ACR 主源：push-acr 是发布硬前置（image 指 ACR，ACR 无 tag 即发布=
-    # 全体客户安装失败）——透传站 warm-mirrors（best-effort）已随主源退役。
-    assert not jobs["push-acr"].get("continue-on-error"), "push-acr 是硬门禁，禁软"
-    assert "push-acr" in jobs["release"]["needs"], "release 必须等 ACR 推送成功"
+    # 2026-09-30 流程定案（用户令「ACR 一律本地代推」；v1.1.32 三连崩实况）：
+    # 旧不变量「release 硬等 push-acr」被跨境链路劣化拖死（40min+ 卡死仍失败，把
+    # tag/Release/Gitee 一起拖住）。新不变量（机器可验证）＝ **release 内含「等 ACR
+    # 就绪」验证步**：匿名可拉 + 双架构 + 层全 gzip + 端到端 blob sha，谁推到位都认
+    # （本地代推 _acr_local_push.py 或 CI 兜底）。push-acr 因此降为 best-effort
+    # 自动尝试，其失败 ≠「ACR 缺」。
+    assert "push-acr" not in jobs["release"]["needs"], \
+        "release 不应再硬等 push-acr（跨境劣化拖死发布；就绪把关改为验证步）"
+    rel_steps = jobs["release"].get("steps", [])
+    wait_idx = next((i for i, s in enumerate(rel_steps)
+                     if "ACR" in (s.get("name") or "")), None)
+    assert wait_idx is not None, "release 缺「等 ACR 就绪」验证步——发布不变量无处把关"
+    waitblk = str(rel_steps[wait_idx])
+    assert "manifests/" in waitblk and "gzip" in waitblk, \
+        "ACR 就绪验证步须真验 manifest 与 gzip 层（防空跑）"
+    create_idx = next((i for i, s in enumerate(rel_steps)
+                       if "Create or Update Release" in (s.get("name") or "")), None)
+    assert create_idx is not None and wait_idx < create_idx, \
+        "「等 ACR 就绪」必须排在「创建 Release」之前"
+    assert jobs["push-acr"].get("continue-on-error") is True, \
+        "push-acr 应 best-effort（就绪把关已上移到 release 验证步）"
     assert jobs["gitee-release"]["needs"] == ["prepare", "release"]
 
 

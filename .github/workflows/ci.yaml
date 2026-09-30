@@ -341,7 +341,11 @@ jobs:
     needs: [prepare, manifest]
     runs-on: ubuntu-latest
     timeout-minutes: 90   # 转码=260MB 下载+重压+上传；2026-09-25 跨境上传劣化，40min 两连
-                          # 被 cancel（run 36019335781 两次）⇒ Release 跳过，放宽到 90min
+                          # 被 cancel（run 36019335781 两次）⇒ 放宽到 90min
+    # 2026-09-30（用户令「ACR 一律本地代推」配套）：降为 **best-effort 自动尝试**——
+    # 链路好时它自己推完；链路劣化时失败/卡死不挡发布。就绪把关上移到 release job 的
+    # 「Wait for ACR mirror readiness」验证步（谁推到位都认：本地代推或本 job）。
+    continue-on-error: true
     env:
       ACR: crpi-92gcrmsz8v7vvdy1.cn-shanghai.personal.cr.aliyuncs.com
       ACR_REPO: fangwenyi-dev/huijian-gateway-plugin-yy
@@ -464,7 +468,17 @@ jobs:
   # ========== 3. 创建 GitHub Release ==========
   release:
     name: Release
-    needs: [prepare, manifest, push-acr]
+    # 2026-09-30 流程定案（配套用户令「ACR 一律本地代推」）：
+    #   发布**不再等 push-acr**——跨境链路劣化时该段可卡 40min+ 仍失败，
+    #   却会把 tag/Release/Gitee 一起拖住（v1.1.32 三连崩实况）。
+    #   ACR 镜像由本地代推保证（仓根 `_acr_local_push.py`：ghcr 数据面走国内
+    #   代理 + 本机直推，十几分钟），push-acr 保留为自动兜底尝试；
+    #   其失败只表示「镜像待本地补」，不代表发布失败。
+    #   ⚠ gzip 重压非跨环境字节确定性（同长不同字节实测）⇒ 本地代推后 CI
+    #   不保证秒传，别指望 rerun 让 CI 收口 ACR。
+    #   发布对账口径＝ tag + gh Release + Gitee Release + ACR 匿名 verify 四件套。
+    #   不变量（tag 出 ⇒ ACR 可拉）由下方「Wait for ACR mirror readiness」步机器把守。
+    needs: [prepare, manifest]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -490,6 +504,82 @@ jobs:
           fi
           echo "release body: $(wc -c < /tmp/release-body.md) bytes"
 
+      - name: Wait for ACR mirror readiness
+        # 发布不变量（机器可验证，替代 v1.0.1 时代「硬等 push-acr job」）：
+        # tag 一出 ⇒ ACR 必须可匿名拉（config.yaml image 指 ACR；ACR 无该 tag
+        # 的发布＝客户点更新装不上）。谁推到位都认：本地代推 _acr_local_push.py
+        # 或 CI push-acr 兜底。轮询上限 40min。
+        env:
+          ACR: crpi-92gcrmsz8v7vvdy1.cn-shanghai.personal.cr.aliyuncs.com
+          ACR_REPO: fangwenyi-dev/huijian-gateway-plugin-yy
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -eu
+          python3 - "$ACR" "$ACR_REPO" "$VERSION" <<'PYX'
+          import hashlib, json, re, sys, time, urllib.error, urllib.request
+          acr, repo, ver = sys.argv[1:4]
+
+          def http(url, accept=None, tok=None, timeout=30):
+              h = {}
+              if accept:
+                  h["Accept"] = accept
+              if tok:
+                  h["Authorization"] = "Bearer " + tok
+              return urllib.request.urlopen(
+                  urllib.request.Request(url, headers=h), timeout=timeout).read()
+
+          def realm_token():
+              # 匿名认证链动态发现（同 push-acr 自检口径；不硬编码 realm）
+              try:
+                  urllib.request.urlopen(
+                      urllib.request.Request(f"https://{acr}/v2/", method="HEAD"),
+                      timeout=20)
+                  auth = ""
+              except urllib.error.HTTPError as e:
+                  auth = e.headers.get("Www-Authenticate") or ""
+              rm = re.search(r'realm="([^"]+)"', auth)
+              sv = re.search(r'service="([^"]+)"', auth)
+              assert rm, "ACR 未返回 auth realm（认证链异常）"
+              d = json.loads(http(f"{rm.group(1)}?service={sv.group(1) if sv else ''}"
+                                  f"&scope=repository:{repo}:pull"))
+              t = d.get("token") or d.get("access_token") or ""
+              assert t, "匿名 pull token 获取失败（公开读未生效？）"
+              return t
+
+          ACCI = ("application/vnd.oci.image.index.v1+json,"
+                  "application/vnd.docker.distribution.manifest.list.v2+json")
+          ACCM = ("application/vnd.oci.image.manifest.v1+json,"
+                  "application/vnd.docker.distribution.manifest.v2+json")
+          last = ""
+          for i in range(80):   # 80 × 30s = 40min
+              try:
+                  tok = realm_token()
+                  idx = json.loads(http(
+                      f"https://{acr}/v2/{repo}/manifests/{ver}", ACCI, tok))
+                  archs = {(e.get("platform") or {}).get("architecture")
+                           for e in idx.get("manifests", [])}
+                  assert {"amd64", "arm64"} <= archs, f"index 缺架构: {archs}"
+                  for e in idx["manifests"]:
+                      cm = json.loads(http(
+                          f"https://{acr}/v2/{repo}/manifests/{e['digest']}", ACCM, tok))
+                      bad = [l["mediaType"] for l in cm["layers"]
+                             if l["mediaType"]
+                             != "application/vnd.oci.image.layer.v1.tar+gzip"]
+                      assert not bad, f"非 gzip 层（转码回退）: {set(bad)}"
+                      l0 = min(cm["layers"], key=lambda l: l["size"])
+                      blob = http(f"https://{acr}/v2/{repo}/blobs/{l0['digest']}",
+                                  None, tok, 60)
+                      assert "sha256:" + hashlib.sha256(blob).hexdigest() \
+                          == l0["digest"], "blob 字节损坏"
+                  print(f"✅ ACR 就绪：{ver} 双架构全 gzip、匿名端到端过（第 {i+1} 轮）")
+                  sys.exit(0)
+              except Exception as ex:
+                  last = f"{type(ex).__name__}: {ex}"
+                  print(f"… 第 {i+1}/80 轮未就绪（{last}），30s 后重试", flush=True)
+                  time.sleep(30)
+          print(f"::error::ACR 未在 40min 内就绪（{last}）——本地代推/CI 兜底均未落位？")
+          sys.exit(1)
+          PYX
       - name: Create or Update Release
         uses: softprops/action-gh-release@v2
         with:

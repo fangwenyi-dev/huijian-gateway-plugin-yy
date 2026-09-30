@@ -908,3 +908,145 @@ def test_08_peek_automation_manager_never_arms():
 
     assert ia.peek_automation_manager(_H()) is None
     assert tasks == [], "只读访问把监听/整点 tick 拉起了"
+
+
+# ══ C1 收口（第四轮审计 C 段）：场景创建不做「同区多域自动补窗」推断 ══════
+def test_c1_no_auto_window_supplement_for_combined_action():
+    """同区「灯+空调」动作即使该区有开窗器按钮，也不得被追加无名 ControlWindow。
+
+    （旧启发式：动作域并集 ≥2 非 button 即补 ControlWindow ⇒ 「灯+空调」的
+    场景一触发就误开/误关该区所有窗。fixture 刻意摆好窗钮——它正是旧形态
+    起爆的前提，修复后该前提下也不得再补。）
+    """
+    class _Ent:
+        domain, name = "button", "平开窗 开窗器"
+        original_name, area_id = "平开窗 开窗器", "a1"
+
+    class _EntReg:
+        entities = {"button.win_open": _Ent()}
+
+    class _AreaReg:
+        @staticmethod
+        def async_get_area(aid):
+            return types.SimpleNamespace(name="办公室") if aid == "a1" else None
+
+    hass = _plain_hass(_er=_EntReg(), _ar=_AreaReg())
+    _fresh_scene_store()
+    handler = vs.HassCreateVoiceSceneIntent()
+    slots = {"trigger_phrase": {"value": "多域场景"},
+             "actions": {"value": [{
+                 "intent": "TurnDeviceOff",
+                 "params": {"target": [{"area": "办公室", "devices": [
+                     {"name": "灯", "domains": ["light"]},
+                     {"name": "空调", "domains": ["climate"]},
+                 ]}]}}]}}
+    out = asyncio.run(handler.async_handle(
+        types.SimpleNamespace(hass=hass, slots=slots)))
+    assert out.get("success") is True, out
+    acts = asyncio.run(
+        vs.get_voice_scene_store(hass).get_all_scenes())[0]["actions"]
+    assert [a["name"] for a in acts] == ["TurnDeviceOff"], \
+        f"多域动作被追加了窗动作（误开/误关窗）: {acts}"
+
+
+def test_c1_explicit_window_device_still_converts():
+    """明说的窗设备（Turn* 族）仍按 split 转 ControlWindow——收口只删推断，
+    不动「明说即转换」这条产品契约。"""
+    class _Ent:
+        domain, name = "button", "平开窗 开窗器"
+        original_name, area_id = "平开窗 开窗器", "a1"
+
+    class _AreaReg:
+        @staticmethod
+        def async_get_area(aid):
+            return types.SimpleNamespace(name="办公室") if aid == "a1" else None
+
+    hass = _plain_hass(_er=types.SimpleNamespace(entities={"button.win_open": _Ent()}),
+                       _ar=_AreaReg())
+    _fresh_scene_store()
+    handler = vs.HassCreateVoiceSceneIntent()
+    slots = {"trigger_phrase": {"value": "窗转换场景"},
+             "actions": {"value": [{
+                 "intent": "TurnDeviceOff",
+                 "params": {"target": [{"area": "客厅", "devices": [
+                     {"name": "灯", "domains": ["light"]},
+                     {"name": "平开窗", "domains": ["window"]},
+                 ]}]}}]}}
+    out = asyncio.run(handler.async_handle(
+        types.SimpleNamespace(hass=hass, slots=slots)))
+    assert out.get("success") is True, out
+    acts = asyncio.run(
+        vs.get_voice_scene_store(hass).get_all_scenes())[0]["actions"]
+    by_name = {a["name"]: a for a in acts}
+    assert set(by_name) == {"TurnDeviceOff", "ControlWindow"}, acts
+    assert by_name["ControlWindow"]["parameters"]["action"] == "close", acts
+
+
+# ══ C1 续（存量面）：旧启发式留在用户库里的窗动作，回放不执行且点名 ══════
+# 创建侧删启发式只挡住"以后"；它 v1.0.0~v1.1.32 期间追加的动作仍在 .storage
+# （STORAGE_VERSION 未升版、无迁移），回放会按区域压全区窗钮——同一个伤害。
+def _replay_scene(hass, trigger_phrase, actions):
+    """写入一条场景后真跑 HassTriggerVoiceScene 回放；返回 (回执, 实际执行到的动作)。"""
+    store = _fresh_scene_store(hass)
+    assert asyncio.run(store.create_scene(trigger_phrase, actions))[0] is True
+    ran = []
+
+    async def _fake_action(intent_obj, intent_name, params):
+        ran.append(intent_name)
+        return {"success": True}
+
+    handler = vs.HassTriggerVoiceSceneIntent()
+    handler._execute_action_with_timeout = _fake_action
+    out = asyncio.run(handler.async_handle(types.SimpleNamespace(
+        hass=hass, slots={"trigger_phrase": {"value": trigger_phrase}})))
+    return out, ran
+
+
+_LEGACY_SUPPLEMENTED = [
+    {"name": "TurnDeviceOn",
+     "parameters": {"target": [{"area": "办公室", "devices": [
+         {"name": "灯", "domains": ["light"]},
+         {"name": "空调", "domains": ["climate"]},
+         {"name": "插座", "domains": ["switch"]}]}]}},
+    {"name": "ControlWindow",                      # 旧启发式的机械产物
+     "parameters": {"target": [{"area": "办公室",
+                                "devices": [{"domains": ["button"]}]}],
+                    "action": "open"}},
+]
+
+
+def test_c1_legacy_stored_window_action_skipped_at_replay():
+    out, ran = _replay_scene(_plain_hass(), "回家老场景", _LEGACY_SUPPLEMENTED)
+    assert ran == ["TurnDeviceOn"], f"存量自动补窗被执行了（误开全区窗）: {ran}"
+    assert out.get("success") is True, out
+    assert "跳过" in (out.get("message") or ""), f"跳过必须对用户可见: {out}"
+    skipped = [a for a in out["executed_actions"]
+               if a.get("result") == "skipped_legacy"]
+    assert len(skipped) == 1 and "办公室" in skipped[0]["reason"], out
+
+
+def test_c1_legacy_guard_does_not_swallow_legit_window_actions():
+    """反向不变量（防闸过宽把用户意图一起吃掉）：
+    ①只有开窗这一个动作的场景（用户明说"打开客厅的窗"）照常执行；
+    ②窗动作带了设备名，即使同区有多域开关也照常执行。"""
+    out1, ran1 = _replay_scene(_plain_hass(), "只开窗", [
+        {"name": "ControlWindow",
+         "parameters": {"target": [{"area": "客厅",
+                                    "devices": [{"domains": ["button"]}]}],
+                        "action": "open"}}])
+    assert ran1 == ["ControlWindow"], f"单动作开窗场景被误跳: {ran1}"
+    assert "跳过" not in (out1.get("message") or ""), out1
+
+    out2, ran2 = _replay_scene(_plain_hass(), "点名的窗", [
+        {"name": "TurnDeviceOn",
+         "parameters": {"target": [{"area": "办公室", "devices": [
+             {"name": "灯", "domains": ["light"]},
+             {"name": "空调", "domains": ["climate"]}]}]}},
+        {"name": "ControlWindow",
+         "parameters": {"target": [{"area": "办公室",
+                                    "devices": [{"name": "平开窗",
+                                                 "domains": ["button"]}]}],
+                        "action": "open"}}])
+    assert ran2 == ["TurnDeviceOn", "ControlWindow"], \
+        f"点了设备名的窗被误跳: {ran2}"
+    assert "跳过" not in (out2.get("message") or ""), out2

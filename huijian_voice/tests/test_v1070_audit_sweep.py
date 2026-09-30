@@ -150,6 +150,7 @@ def test_ws_transport_send_message_timeout_behavior():
     body = (
         "class _T:\n"
         "    _SEND_HANDOFF_TIMEOUT_S = 0.05\n"
+        "    _conn_gen = 0\n"
         "    hass = None\n"
         "    def __init__(self):\n"
         "        self.logger = _Warn()\n"
@@ -158,6 +159,7 @@ def test_ws_transport_send_message_timeout_behavior():
         "        self.calls += 1\n"
         "    async def restart_connection(self, reason='', **kw):\n"
         "        self.restarted = reason\n"
+        "        self.restarted_kw = dict(kw)\n"
         + fn.group(0) + "\n" + helper.group(0)
     )
     ns = {"asyncio": asyncio, "_Warn": _Warn}
@@ -174,6 +176,8 @@ def test_ws_transport_send_message_timeout_behavior():
         await asyncio.sleep(0.05)          # 让 _schedule_restart 的后台任务起跑
     asyncio.run(scenario())
     assert getattr(t, "restarted", "") == "send stalled", "⑨：交付超时后未触发自愈换连"
+    assert getattr(t, "restarted_kw", {}).get("generation") == 0, \
+        "P2：自愈换连必须带开局代次（否则 15s 超时期间的新连接被误拆）"
     assert t.logger.warns, "⑨：自愈动作必须留 WARN（不静默）"
 
 

@@ -51,7 +51,14 @@ def _load_intent_turn():
         m = types.ModuleType(name)
         for k, v in attrs.items():
             setattr(m, k, v)
-        sys.modules.setdefault(name, m)
+        existing = sys.modules.setdefault(name, m)
+        if existing is not m:
+            # 2026-09-30 对抗复核：别的钉文件在收集期已装过同名替身（可能少
+            # SERVICE_* 常量）——只补缺失属性，防 intent_turn 顶层 import 崩
+            # （子集运行顺序敏感；全量此前靠字母序幸免）。
+            for k, v in attrs.items():
+                if not hasattr(existing, k):
+                    setattr(existing, k, v)
 
     class IntentHandler:
         pass
@@ -111,7 +118,9 @@ class _Hass:
         self.services = svc
         self._loop_tasks = []
 
-    def async_create_task_internal(self, coro, name=None):
+    def async_create_task(self, coro, name=None):
+        # 第四轮审计 C7：产品侧只用 HA 公开面 async_create_task；**不提供**
+        # internal 别名——产品回退非公开 API 时这里必 AttributeError 变红。
         t = asyncio.get_running_loop().create_task(coro)
         if name:
             t.set_name(name)
