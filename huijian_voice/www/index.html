@@ -16,8 +16,8 @@
      v1.0.42 的 #1d1750「过紫」与更早 #030712「过黑」均已作废，勿回潮 -->
 <meta name="theme-color" content="#071426">
 <title>慧尖HA语音插件</title>
-<link rel="stylesheet" href="css/huijian.css?v=1.1.31">
-<link rel="stylesheet" href="css/voice.css?v=1.1.31">
+<link rel="stylesheet" href="css/huijian.css?v=1.1.32">
+<link rel="stylesheet" href="css/voice.css?v=1.1.32">
 </head>
 <body>
 <!-- 「星辰大海」背景层（与网关加载项同一设计标准/同一固定种子＝同一片天）：
@@ -315,7 +315,7 @@
 
 <script>
 "use strict";
-const CURRENT_VERSION = "1.1.31";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
+const CURRENT_VERSION = "1.1.32";           // 与 config.yaml 一致（钉桩测试）；?v= cache-bust 与本行同步 bump
 // 音色表 = kokoro-multi-lang-v1_1 官方 103 sid 全表（k2-fsa docs sid 表实证；
 // 标注=对用户上传试听样本的 CAM++ 声纹溯源榜：v1_1 不含晓晓/云扬，
 // sid18=zf_026 女声最似晓晓(0.454 全场最近)，sid81=zm_055 最似云扬）
@@ -521,7 +521,7 @@ async function loadSettings(){
   // 显示"本地"而实际跑云，且下一次任意保存把它静默改写成 local_kokoro（云配
   // 置丢失、行为翻转、无警告）。放宽为前缀判等，未知值如实提示不静默。
   $("#tts_provider").value = String(S.tts.provider||"").startsWith("cloud") ? "cloud"
-    : ["local_matcha","local_melo"].includes(S.tts.provider) ? S.tts.provider : "local_melo";
+    : ["local_kokoro","local_matcha","local_melo"].includes(S.tts.provider) ? S.tts.provider : "local_melo";
   if (S.tts.provider && !["local_kokoro","local_matcha","local_melo","cloud","cloud_openai_compat"].includes(S.tts.provider))
     toast("tts.provider 值 "+S.tts.provider+" 未知，已按默认档 local_melo 显示（与后端回落一致）；保存将写入下拉框选项");
   $("#stt_cloud_base").value = S.stt.cloud?.base_url||""; $("#stt_cloud_model").value = S.stt.cloud?.model||"";
@@ -941,7 +941,7 @@ async function loadFunnel(){
     $("#funnelBox").innerHTML = h+"</tbody></table>";
     const mi = r.mining||{};
     $("#funnelMeta").textContent = `累计 ${f.total||0} 句；回流语料 ${mi.file||""} ${mi.enabled?(mi.lines+" 条，仅本机"):"已停用"}`;
-  }catch(e){ $("#funnelBox").innerHTML='<span style="color:var(--bad)">读取失败：'+esc0(e.message)+"</span>"; }   // v1.1.27：错误串进 innerHTML 必须先转义
+  }catch(e){ $("#funnelBox").innerHTML='<span style="color:var(--red)">读取失败：'+esc0(e.message)+"</span>"; }   // v1.1.27：错误串进 innerHTML 必须先转义
 }
 $("#funnelBtn").onclick = loadFunnel;
 $("#dbgBtn").onclick = async ()=>{
@@ -974,7 +974,7 @@ $("#ttsBtn").onclick = async ()=>{
     const blob = await r.blob();
     const url = URL.createObjectURL(blob);
     $("#ttsPlayer").innerHTML = `<audio controls autoplay src="${url}"></audio><div class="hint">24kHz 原始采样，经下载解码为 wav 播放；设备端实际收到 16k opus。</div>`;
-  } catch(e){ $("#ttsPlayer").innerHTML = '<span style="color:var(--bad)">'+esc0(e.message)+"</span>"; }   // v1.1.27：同上（错误串含 <>&" 时不得裸拼）
+  } catch(e){ $("#ttsPlayer").innerHTML = '<span style="color:var(--red)">'+esc0(e.message)+"</span>"; }   // v1.1.27：同上（错误串含 <>&" 时不得裸拼）
 };
 async function loadScenes(){
   try { const r = await api("/api/scenes");
@@ -1098,6 +1098,6 @@ $("#regenBtn").onclick = async ()=>{
   try { await post("/api/token/regenerate",{}); toast("已重置"); loadEndpoints(); } catch(e){ toast(e.message); }
 };
 </script>
-<script src="js/starsky.js?v=1.1.31"></script>
+<script src="js/starsky.js?v=1.1.32"></script>
 </body>
 </html>

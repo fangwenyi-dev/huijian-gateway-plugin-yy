@@ -31,6 +31,23 @@ logger = logging.getLogger("huijian.ha")
 _INTENT_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
 
 
+def _indeterminate_exc(e: BaseException) -> bool:
+    """异常是否属"HA 可能已执行、只是回执丢了"（第四轮审计 P2）。
+
+    连接类（断连/半途丢包/超时）之下，服务端可能已落动作——不确定就必须如实
+    标记：既不许播成确定失败（播报假确定），也不许让下游降级重放闸放行
+    （相对量动作会被做第二遍）。折叠后的 message 是中文短句，文本启发式认不出来。
+    """
+    if isinstance(e, asyncio.TimeoutError):
+        return True
+    try:
+        import aiohttp as _ah
+        return isinstance(e, (_ah.ClientConnectionError, _ah.ClientPayloadError,
+                              _ah.ServerDisconnectedError))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 class HAClient:
     def __init__(self, session: Optional[aiohttp.ClientSession] = None):
         self._session = session
@@ -49,6 +66,10 @@ class HAClient:
         self.last_error = ""
         self._reachable = False   # 真连通判据（区别于 ok=已配置；UI/状态面用这个）
         self._states_warned = False  # states 刷新失败的分因闩锁（见 _refresh_states）
+        # 第四轮审计 P2（历史遗留②/⑤）：快照新鲜度——失败/过期必须可判，
+        # 不许让查询族静默拿旧值作答。
+        self._states_ts = 0.0        # 最近一次成功刷新的时刻
+        self._states_ok = False      # 最近一次刷新是否成功
 
     # ── URL 拼接唯一真源 ────────────────────────────────────────
     def _url(self, path: str) -> str:
@@ -120,7 +141,8 @@ class HAClient:
             self._reachable = False
             self.last_error = str(e)
             logger.warning("[HA] intent %s 调用异常: %s", name, e)
-            return {"success": False, "message": "HA 通道异常", "raw": None}
+            return {"success": False, "message": "HA 通道异常", "raw": None,
+                    "indeterminate": _indeterminate_exc(e)}
 
     async def _handle_intent_legacy(self, name: str, data: dict, timeout: float) -> dict:
         """回落形态：POST /api/intent/<name>，body=slots 平铺（HA REST 传统式）。"""
@@ -132,7 +154,8 @@ class HAClient:
                 return self._normalize_result(r.status, payload, name)
         except Exception as e:
             self.last_error = str(e)
-            return {"success": False, "message": "HA 通道异常", "raw": None}
+            return {"success": False, "message": "HA 通道异常", "raw": None,
+                    "indeterminate": _indeterminate_exc(e)}
 
     async def call_service(self, domain: str, service: str, data: dict,
                            timeout: float = 10.0) -> dict:
@@ -163,7 +186,8 @@ class HAClient:
             self._reachable = False
             self.last_error = str(e)
             logger.warning("[HA] service %s.%s 调用异常: %s", domain, service, e)
-            return {"success": False, "message": "HA 通道异常", "raw": None}
+            return {"success": False, "message": "HA 通道异常", "raw": None,
+                    "indeterminate": _indeterminate_exc(e)}
 
     @staticmethod
     def _normalize_result(status: int, payload: str, name: str) -> dict:
@@ -180,7 +204,8 @@ class HAClient:
             # 5xx body 多为 aiohttp 纯文本网页（无信息量）——统一给结构化中文
             # 错误；2026-09-11 事故：500 洗成空 message 让话术只剩空括号。
             # （staticmethod 不碰 self.last_error——由调用方语义承载）
-            return {"success": False, "message": f"HA 内部错误({status})", "raw": obj}
+            return {"success": False, "message": f"HA 内部错误({status})", "raw": obj,
+                    "indeterminate": True}
         if status in (400, 401, 403, 404):
             msg = obj.get("message") if isinstance(obj, dict) else str(obj)
             return {"success": False, "message": msg or f"HA 拒绝({status})", "raw": obj}
@@ -232,6 +257,8 @@ class HAClient:
                         self._states = {e["entity_id"]: e for e in states}
                         self._cache_ts = time.time()
                         self._states_warned = False   # 恢复即重新武装分因
+                        self._states_ts = time.time()
+                        self._states_ok = True
                     else:
                         self.last_error = f"states {r.status}"
             except Exception as e:
@@ -240,6 +267,7 @@ class HAClient:
                 # 每次刷新只留一条具名分因（闩锁），成功刷新即重新武装。不用
                 # "由通转不通"的下降沿判据：_reachable 初值 False，全新安装把
                 # URL 配错会一次都不触发——那条恰恰最需要日志。
+                self._states_ok = False
                 if not self._states_warned:
                     self._states_warned = True
                     logger.warning("[HA] states 刷新失败，此后能力预检失效、状态查询"
@@ -490,6 +518,26 @@ class HAClient:
     async def states(self) -> dict[str, dict]:
         await self.refresh_states()
         return dict(self._states)
+
+    _STATES_STALE_S = 90.0   # 超过 5s TTL 的 18 倍仍未成功刷新＝明确陈旧
+
+    def states_stale(self) -> str:
+        """快照是否可能陈旧/失效：返回 "" 或具名原因（第四轮审计 P2 ②/⑤）。
+
+        查询族据此在应答里如实加注——旧形 refresh 失败只写 last_error 并保留旧
+        快照，用户听到的是过期数字且毫无提示。永不抛。
+        """
+        try:
+            if self._states_ts <= 0:
+                return "HA 状态尚未取到"
+            age = time.time() - self._states_ts
+            if not self._states_ok:
+                return f"上次状态读取失败（快照约 {int(age)} 秒前）"
+            if age > self._STATES_STALE_S:
+                return f"状态快照已 {int(age)} 秒未更新"
+        except Exception:  # noqa: BLE001
+            return ""
+        return ""
 
     async def get_state(self, entity_id: str) -> Optional[dict]:
         """单实体状态（P1 音乐「正在播放」查询用）。走 TTL 缓存 + WS 增量回灌，

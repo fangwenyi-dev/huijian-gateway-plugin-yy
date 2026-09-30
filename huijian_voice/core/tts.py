@@ -129,8 +129,16 @@ def split_sentences(text: str) -> list[str]:
         # 保证**任何**出帧单元 ≤_CHUNK_CHARS（否则空洞回到 4~5s，本钉就白做）。
         for piece in pieces:
             while len(piece) > _CHUNK_CHARS:
-                out2.append(piece[:_CHUNK_CHARS])
-                piece = piece[_CHUNK_CHARS:]
+                head, tail = piece[:_CHUNK_CHARS], piece[_CHUNK_CHARS:]
+                # 第四轮审计 P2：1~2 字尾残片不独占一段——每段合成有固定起步开销，
+                # 残段会多带一段空洞（「21 字句」旧形态产出 [20,1]）。并入前块，
+                # 单段至多 _CHUNK_CHARS+2 字（远低于 60 字的空洞阈值）。
+                if len(tail) <= 2:
+                    out2.append(head + tail)      # 尾残片并入本块（至多 22 字）
+                    piece = ""
+                    break
+                out2.append(head)
+                piece = tail
             if piece:
                 out2.append(piece)
     out = out2
@@ -1388,9 +1396,15 @@ class TtsEngine:
                 # 定案②语义不丢。
                 continue
             key = (prov_key, sent, sid, speed)
-            hit = self._cache_get(key)
+            try:
+                # 第四轮审计 P2：换绑/换代在 worker 线程 clear() 与本读竞态——
+                # 丢一次缓存命中只是多合成一句，绝不能 KeyError 穿出打断整轮。
+                hit = self._cache_get(key)
+                if hit is not None:
+                    self._cache.move_to_end(key)
+            except KeyError:
+                hit = None
             if hit is not None:
-                self._cache.move_to_end(key)
                 self.cache_hits += 1
                 self.last_used = time.time()
                 for pkt in hit[0]:
@@ -1426,9 +1440,13 @@ class TtsEngine:
                                 "(云钉扎)" if eng0 == "local:pinned"
                                 else ("(云回落)" if eng0 == "local:fallback" else ""))
                         key = (prov_key, sent, sid, speed)   # 复核后本句键重算
-                        hit = self._cache_get(key)
+                        try:
+                            hit = self._cache_get(key)
+                            if hit is not None:
+                                self._cache.move_to_end(key)
+                        except KeyError:      # 跨线程 clear 竞态：当 miss 处理
+                            hit = None
                         if hit is not None:
-                            self._cache.move_to_end(key)
                             self.cache_hits += 1
                             self.last_used = time.time()
                             for pkt in hit[0]:

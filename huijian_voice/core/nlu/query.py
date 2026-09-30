@@ -227,6 +227,18 @@ class QueryZone:
 
     # ── 主入口：命中返回中文答案，否则 None ─────────────────────
     async def answer(self, text: str) -> Optional[str]:
+        """查询应答唯一出口（第四轮审计 P2 ②/⑤：陈旧快照必须加注）。"""
+        out = await self._answer_inner(text)
+        if out:
+            try:
+                why = self.ha.states_stale() if hasattr(self.ha, "states_stale") else ""
+            except Exception:  # noqa: BLE001
+                why = ""
+            if why and why not in out:
+                out = out.rstrip("。") + f"（注：{why}，数字可能不是最新）"
+        return out
+
+    async def _answer_inner(self, text: str) -> Optional[str]:
         if self.settings is not None and not self.settings.get("nlu.query_local", True):
             return None
         text = text.strip().rstrip("。？！?!，,")

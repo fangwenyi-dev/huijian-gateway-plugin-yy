@@ -18,7 +18,7 @@ configuration:
     description: >-
       0 keeps models resident in RAM (default, fastest). Set N>0 to free
       ASR/TTS memory after N idle minutes — useful on small devices; the next
-      utterance then pays a ~2 s reload. Applies live, no restart needed.
+      utterance then pays a ~2 s reload. Requires an add-on restart to take effect.
   log_level:
     name: Log level
     description: >-

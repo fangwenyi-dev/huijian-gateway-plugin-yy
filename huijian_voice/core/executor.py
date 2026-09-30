@@ -241,8 +241,10 @@ class Executor:
             return False, {"success": False, "error": "bad response"}
         ok = bool(result.get("success"))
         self.last_run = {"steps": 1, "applied": 1 if ok else 0,
-                         "indeterminate": False if ok else is_indeterminate(
-                             str(result.get("error") or result.get("message") or ""))}
+                         "indeterminate": False if ok else (
+                             bool(result.get("indeterminate"))
+                             or is_indeterminate(str(result.get("error")
+                                                     or result.get("message") or "")))}
         return ok, result
 
     async def _capability_refuse(self, name: str, args: dict) -> Optional[str]:
@@ -743,7 +745,9 @@ class Executor:
                                  "indeterminate": False}
                 logger.info("[执行] %s %s → 开关族能力闸拦下（防area扇出/假成功）",
                             name, args)
-                return self._named(False, self._step_say(idx, steps, gate))
+                return self._named(False, self._step_say(idx, steps, gate)
+                                 + self._accum_notes(missing, noops, no_receipt,
+                                                     offline, lock_notes, anon_missing))
             cap = await self._capability_refuse(name, args)
             if cap is not None:
                 # v1.1.3：网关侧按本家实体真实能力当场如实回话（带可选档位），
@@ -751,7 +755,9 @@ class Executor:
                 self.last_run = {"steps": len(steps), "applied": len(results),
                                  "indeterminate": False}
                 logger.info("[执行] %s %s → 能力预裁拦下 | %s", name, args, cap)
-                return self._named(False, self._step_say(idx, steps, cap))
+                return self._named(False, self._step_say(idx, steps, cap)
+                                 + self._accum_notes(missing, noops, no_receipt,
+                                                     offline, lock_notes, anon_missing))
             await self._repoint_offline_twin(args)
             avail = await self._availability_refuse(name, args)
             if avail is not None:
@@ -760,7 +766,9 @@ class Executor:
                                  "indeterminate": False}
                 logger.info("[执行] %s %s → 目标不可用闸拦下（防谎报成功）| %s",
                             name, args, avail)
-                return self._named(False, self._step_say(idx, steps, avail))
+                return self._named(False, self._step_say(idx, steps, avail)
+                                 + self._accum_notes(missing, noops, no_receipt,
+                                                     offline, lock_notes, anon_missing))
             # v1.1.15(收口批)：单步计划同样逐台证伪——旧的 `len(steps) > 1` 栅栏
             # 让"电视声被听成单步 HassTurnOff 打在已关的灯上"永远回"关了"（审计实证：
             # 17:02/17:03 两轮）。判据本身早就对单步成立（resolve_candidates 与
@@ -806,10 +814,16 @@ class Executor:
                 # （超时/连接/5xx）——那会让 last_run.indeterminate 变 False，
                 # 播报却说"我不自动再试"，下游复议/重试闸失去护栏。
                 _top_err = raw_err
-                if _bad and not _ok and _errs and not is_indeterminate(_top_err):
+                # 第四轮审计 P2：加载项侧已判定的"结果不确定"（连接类异常/5xx，
+                # HA 可能已执行、只是回执丢了）优先采纳——折叠后的 message 是
+                # 中文短句，文本启发式认不出来（旧形当"确定没执行" ⇒ 播报假确定
+                # + 降级重放闸打开，相对量会被做第二遍）。
+                _indet = bool(result.get("indeterminate")) if isinstance(result, dict) else False
+                _indet = _indet or is_indeterminate(_top_err)
+                if _bad and not _ok and _errs and not _indet:
                     raw_err = _errs[0]
                 self.last_run = {"steps": len(steps), "applied": len(results),
-                                 "indeterminate": is_indeterminate(_top_err)}
+                                 "indeterminate": _indet}
                 reply = zh_error(raw_err, klar=(src == "klar"))
                 # P2-12 链失败定位：部分执行已成事实，如实说清第几步、还剩几步
                 # （保留"抱歉"字头——话术层诚实失败纪律被测试钉死）
@@ -924,6 +938,20 @@ class Executor:
         logger.info("[执行] %s %s%s → 成功 | %s", plan.intent, plan.args, tag, reply)
         return self._named(True, reply)
 
+    @staticmethod
+    def _accum_notes(missing, noops, no_receipt, offline, lock_notes,
+                     anon_missing: int = 0) -> str:
+        """早退路径的“已攒判据”尾注（第四轮审计 ①）。
+
+        前几腿已证伪的事实（查无此名/空操作/离线/无回执/锁确证未过）不得因
+        后继腿在三道前置闸前早退而蒸发——与成功收口的 bits 同源同序。"""
+        bits = [f"「{n}」我没找到" for n in missing] + \
+               [f"「{n}」本来就在要求的状态上" for n in noops] + \
+               [f"「{n}」没拿到执行回执" for n in no_receipt] + \
+               [f"「{n}」现在离线、这条没执行" for n in offline] + list(lock_notes)
+        if anon_missing:
+            bits.append(f"另有 {anon_missing} 条找不到对应的设备")
+        return ("（" + "；".join(bits) + "）") if bits else ""
     @staticmethod
     def _step_say(idx: int, steps: list, reason: str) -> str:
         """整链中断时的定句模板：已经动了几步必须说清（v1.1.15 E2）。
@@ -1360,7 +1388,13 @@ class Executor:
                 return f"好的，{head}{names}的{attr}{verb[0] if up else verb[1]}了" if attr else f"好的，已调节{names}"
             if args.get("attribute") == "temperature":
                 return f"好的，{head}{names}温度调到{delta}度了"
-            unit = ("%" if args.get("attribute") in ("brightness", "position")
+            # 第四轮审计 P2：湿度同属百分比量纲（humidifier 域只认 %）——旧表漏它，
+            # 播成"湿度已设为 60 档"；极值档（max/min，LLM 通道声明可用）同样不得
+            # 念英文，按 admin_api 的中文映射播"最大/最小"。
+            _sp_cn = {"max": "最大", "min": "最小", "high": "最大", "low": "最小"}.get(delta)
+            if _sp_cn:
+                return f"好的，{head}{names}的{attr}已设为{_sp_cn}"
+            unit = ("%" if args.get("attribute") in ("brightness", "position", "humidity")
                     # 色温/颜色无量纲可播：K 与 # 念出来只是噪音（「色温已设为
                     # 4000」「颜色已设为暖白」），v1.1.1 把原 `attr != '色温'`
                     # 单点判断扩成集合，颜色族加入后不再漏。

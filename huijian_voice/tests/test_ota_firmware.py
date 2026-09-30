@@ -629,6 +629,9 @@ def test_dispatch_bridge_down_no_issue(store):
     port = next(srv)
     st, j = _jpost(port, "/api/firmware/dispatch", {"mac": "aa"})
     assert st == 502 and not j["success"] and not ha.written
+    # 第四轮审计 P2：桥断**不得白签**令牌（旧序先 issue 再判桥，10min 废令驻内存）。
+    # 本断言此前缺位——钉名说 no_issue，实际只钉住了"不中继"。
+    assert not store._tokens, f"桥断却签发了令牌: {store._tokens}"
 
 
 def test_dispatch_relay_reject_collapse(store, monkeypatch):

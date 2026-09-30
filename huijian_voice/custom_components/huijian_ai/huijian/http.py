@@ -396,7 +396,11 @@ class HuijianSatelliteContinuousView(HuijianHttpView):
         for _ in range(8):
             await asyncio.sleep(0.2)
             st = hass.states.get(eid)
-            if st is not None and (st.state == _CONT_ON) == enabled:
+            # 第四轮审计 P2：unavailable/unknown 不得算"已回显"——旧判据
+            # (False == enabled) 在关开关时把不可用实体判成回显（面板谎报）。
+            if (st is not None and st.state in ("on", "off")
+
+                    and (st.state == _CONT_ON) == enabled):
                 echoed = True
                 break
         _LOGGER.info("[连续对话] %s → %s (mac=%s) 设备回显=%s", eid,
@@ -460,7 +464,9 @@ class HuijianTtsSttView(HuijianHttpView):
         try:
             stream = hass.data["tts_manager"].async_create_result_stream(
                 engine=tts_entity,
-                use_file_cache=not request.query.get("nocache"),
+                # 第四轮审计 P2：`?nocache`（空值）此前被判 falsy ⇒ 开关完全失效；显式在值
+                # 才禁缓存（`?nocache` / `?nocache=1` 都生效）。
+                use_file_cache=request.query.get("nocache") in (None, ""),
                 options=options,
             )
         except Exception as err:
@@ -490,7 +496,13 @@ class HuijianTtsSttView(HuijianHttpView):
             to_extension=metadata.format.value,
             to_sample_rate=metadata.sample_rate.value,
         )
-        result = await stt_entity.async_process_audio_stream(metadata, converting)
+        # 第四轮审计 P2：整段识别必须有界——STT 通道停滞时旧形可把该 HTTP
+        # 请求挂到 tts 整轮总闸（720s），占死 aiohttp handler。
+        try:
+            async with asyncio.timeout(60):
+                result = await stt_entity.async_process_audio_stream(metadata, converting)
+        except TimeoutError:
+            return self.json_message("audio stream timeout", 504)
         return self.json(
             {
                 "text": result.text,

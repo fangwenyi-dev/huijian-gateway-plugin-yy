@@ -25,6 +25,10 @@ from . import const
 logger = logging.getLogger("huijian.models")
 
 # lock 文件带空格的键名笔误兜底：真实 required_files 以 core 侧硬校验为准
+# 下载字节闸（第四轮审计 P2 ⑥）：按声明体积上浮 1.5x 即拒；lock 缺声明时走
+# 绝对兜底（不设地板——小包声明 1MB 就该按 1.5MB 卡）。
+_DL_ABS_MAX_BYTES = 3 << 30       # 3GB
+
 _STATUS_LOCK = threading.Lock()
 
 
@@ -369,14 +373,21 @@ class ModelStore:
                 with urllib.request.urlopen(req, timeout=60) as r, open(part, "wb") as f:
                     got = 0
                     last_pct = -1
+                    # 第四轮审计 P2（历史遗留⑥）：**字节上限**——旧形在核 sha 前
+                    # 无上限落盘，错源/中间盒顶替可把 /data 写满再被拒；按 lock 声
+                    # 明体积上浮 50%（缺声明时给绝对兜底）即拒。
+                    _cap = int(size * 1.5) if size else 0
                     while True:
                         if self.abort.is_set():
                             raise TimeoutError("停机/中止：放弃当前下载")
                         chunk = r.read(1 << 20)
                         if not chunk:
                             break
-                        f.write(chunk)
                         got += len(chunk)
+                        if got > (_cap or _DL_ABS_MAX_BYTES):
+                            raise RuntimeError(
+                                f"下载超上限：已 {got} 字节，上限 {_cap or _DL_ABS_MAX_BYTES}")
+                        f.write(chunk)
                         if size:
                             pct = int(got / size * 100)
                             if pct != last_pct and pct % 5 == 0:

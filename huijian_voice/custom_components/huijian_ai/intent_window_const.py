@@ -474,9 +474,14 @@ def find_window_buttons(
         entity_id = state.entity_id
         name_lower = name.lower()
 
+        # 第四轮审计 P2：用户**原话**（如「开合器」）本身就是强证据——整名不含
+        # "窗"的开合器机型此前过不了 alt_names 闸（extract 把它归"窗户"、alt 只有
+        # {窗户,窗}），开关都必失败。原话命中同样放行；exact filter 仍收紧到该名。
         if not _match_by_name_or_device(
             entity_id, name_lower, alt_names, entity_registry, device_registry
-        ):
+        ) and not (original_name_lower and _match_by_name_or_device(
+            entity_id, name_lower, {original_name_lower}, entity_registry, device_registry
+        )):
             continue
         if any(ln.lower() in name_lower for ln in conflicting_longer_names):
             continue

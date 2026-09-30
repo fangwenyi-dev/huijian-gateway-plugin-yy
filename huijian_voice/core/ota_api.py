@@ -204,6 +204,12 @@ def setup(app, ctx):
                         {"success": False, "error": "固件仓无已登记版本——投递口放包或先「拉取」"},
                         status=400)
                 version = lat["version"]
+            # 第四轮审计 P2：桥断**先判**——旧序先签 10min 令牌再回 502，白签一枚
+            # （docstring 自述"否则会白签"，实现与文档相反，且令牌驻留内存 10min）。
+            if not _bridge_ok(ctx.ha):
+                return web.json_response({
+                    "success": False, "error": "HA 桥未连接，无法中继到设备",
+                    "version": version}, status=502)
             res = await asyncio.to_thread(store.issue, version, mac)
         except Exception as e:  # noqa: BLE001
             logger.warning("[OTA] dispatch 签发异常: %s", e)
@@ -228,13 +234,8 @@ def setup(app, ctx):
                 "success": False,
                 "error": "加载项无可路由局域网地址——设备白名单闸只收私网字面 IPv4"}, status=503)
         url = f"http://{host}:{const.WS_PORT}/firmware/{quote(res['file'])}?t={res['token']}"
-        # v1.1.27：可达判据单点 `_bridge_ok`——旧写法只看 `.ok`，HA 掉线时会把
-        # "中继不可用"错报成"桥在但设备不受理"。
-        bridge_ok = _bridge_ok(ctx.ha)
-        if not bridge_ok:
-            return web.json_response({
-                "success": False, "error": "HA 桥未连接，无法中继到设备", "version": version},
-                status=502)
+        # v1.1.27：可达判据单点 `_bridge_ok`（第四轮审计 P2 起已**前移到签发之前**，
+        # 见上方——桥断时不得白签令牌）。
         ack = await ctx.ha.rest_write("POST", "/api/huijian-ai/satellites/ota",
                                       {"mac": mac, "url": url})
         if not ack.get("success"):

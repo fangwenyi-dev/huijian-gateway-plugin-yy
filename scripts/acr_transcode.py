@@ -178,6 +178,26 @@ class Registry:
         self._tokens[key] = t
         return t
 
+    def head(self, path, repo, actions=("pull",), timeout=20) -> bool:
+        """零响应体的存在性探测（第四轮审计 P3）。True=已在盘；404=False；
+        其余异常原样抛；401 与 get 同规 fresh 重取一次。"""
+        h = {}
+        for i in range(2):
+            t = self.token(repo, list(actions), fresh=(i > 0))
+            h["Authorization"] = "Bearer " + t
+            try:
+                req = urllib.request.Request(f"https://{self.host}{path}", method="HEAD")
+                for k, v in h.items():
+                    req.add_header(k, v)
+                urllib.request.urlopen(req, timeout=timeout)
+                return True
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    return False
+                if e.code != 401 or i == 1:
+                    raise
+        return False
+
     def get(self, path, repo, actions=("pull",), headers=None, binary=False, timeout=60,
             attempts=3):
         # run 35681170094 实证：request() 会 fresh 重取 token 了，但 get() 还用
@@ -242,14 +262,12 @@ class Registry:
 # ────────────────────────── blob 上传（分块 PATCH 流，ACR 已实证） ──────────────────────────
 
 def push_blob(dst: Registry, repo: str, digest: str, data: bytes, label: str):
-    # 秒传：HEAD 命中直接跳（双 tag 复用同层时省 130MB 上传）
-    try:
-        dst.get(f"/v2/{repo}/blobs/{digest}", repo, ("pull",), binary=True, timeout=20)
+    # 秒传：HEAD 命中直接跳（双 tag 复用同层时省 130MB 上传）。
+    # 第四轮审计 P3：旧实现用 GET 探测——http_get 会 resp.read() 把整层（最大
+    # 76MB）读回内存只为确认存在，且不经墙钟预算。改真 HEAD（零响应体）。
+    if dst.head(f"/v2/{repo}/blobs/{digest}", repo):
         log(f"  blob 已存在（秒传）: {label}")
         return
-    except urllib.error.HTTPError as e:
-        if e.code != 404:
-            raise
     # blob 级重启（run 35676700243 当时的判断）：跨境链路掐 session 后复用旧
     # Location 秒败 EOF，于是整块失败即重 POST 开新 session 从 0 重传，最多 3 轮。
     # v1.1.17 审计更正：该前提**未被后续证据支持**——两版发布的日志里"第N/3轮

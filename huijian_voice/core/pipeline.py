@@ -202,6 +202,10 @@ def _klar_window_lamp_conflict(kl: Optional[Plan]) -> bool:
 _KLAR_WRITE_INTENTS = frozenset({
     "HassTurnOn", "HassTurnOff", "HassToggle", "HassLightSet",
     "HassSetPosition", "HassClimateSetTemperature",
+    # 第四轮审计 P2：这两族是已接管的 grounded 写值步（KLAR_CONTROL_INTENTS 里
+    # 本就有），却漏在证据闸外——"数字不算证据"的现场洞（v1.0.55/v1.0.92）
+    # 在风速/湿度写值上原样存在。全族同闸。
+    "HassFanSetSpeed", "HassClimateSetHumidity",
 })
 
 # 域→设备词表：任一子串命中即视为用户点了该类设备。刻意收着放（漏拦由降级链
@@ -610,7 +614,9 @@ class Pipeline:
         """去重键：**(origin, text)**（v1.1.20）——旧实现只按文本分桶，两颗卫星在
         2s 窗内说同一句时，后说话的那颗被前一颗粒的结果顶掉（自己房间零动作、
         听到别人房间的回答）。"""
-        return (origin or "", text)
+        # 第四轮审计 P2：键用 canonical() 归一——「调亮一点/请调亮一点/调亮一点吧」
+        # 是同一句的三种转写，旧键按原文分桶 ⇒ 三条各执行一遍（相对量叠加）。
+        return (origin or "", canonical(text))
 
     async def _dedup_gate(self, text: str, origin: str = "") -> Optional[Reply]:
         """契约 §1.4-② 短时去重的成熟形态：
@@ -1324,6 +1330,7 @@ class Pipeline:
     def _set_last_list(self, origin: str, kind: Optional[str]) -> None:
         """清单回指锚点写入（kind=None 即清本 origin）。"""
         if kind:
+            self._origin_ts[origin] = time.time()   # 第四轮审计 P2：并入 GC 依据
             self._last_list[origin] = (kind, time.time())
         else:
             self._last_list.pop(origin, None)

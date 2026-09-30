@@ -345,6 +345,9 @@ class AsrEngine:
         async with aiohttp.ClientSession(timeout=timeout) as sess:
             async with sess.post(f"{base}/audio/transcriptions", data=form, headers=headers) as r:
                 if r.status != 200:
-                    raise RuntimeError(f"HTTP {r.status}: {(await r.text())[:160]}")
+                    # 第四轮审计 P2：错误体截读——r.text() 会把整个响应灌进内存（base_url 误指
+                    # 大文件/滴流端点时每轮 12s 内的字节全落内存）；与 tts.py F12 同口径。
+                    _err_body = (await r.content.read(8192))[:160].decode("utf-8", "replace")
+                    raise RuntimeError(f"HTTP {r.status}: {_err_body}")
                 obj = await r.json(content_type=None)
                 return str(obj.get("text", "")).strip()

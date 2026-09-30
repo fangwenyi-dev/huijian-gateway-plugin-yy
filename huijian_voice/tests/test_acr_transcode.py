@@ -170,13 +170,29 @@ def test_get_non401_raises_without_retry(monkeypatch):
 
 
 def test_push_blob_instant_skip_after_401_recovery(monkeypatch):
-    # 集成钉：秒传探测先 401→token 刷新→命中 200 → 跳过上传（不再走 POST）
-    fake, _calls = _http_get_script([401, 200])
-    monkeypatch.setattr(ac, "http_get", fake)
-    r, conn, _ = _reg([])
-    r._conn = lambda timeout=300: conn
+    # 集成钉（第四轮审计 P3 改真 HEAD）：探测用 urlopen(HEAD)——401→fresh 重取
+    # →200 命中即跳过上传（不再走 POST）。桩面同步从 http_get 换成 urlopen。
+    class _Ok:
+        def __init__(self, code):
+            self._code = code
+
+        def read(self):
+            return b""
+
+    calls = []
+
+    def fake_urlopen(req, timeout=None):
+        calls.append((getattr(req, "method", None), req.full_url,
+                      dict(getattr(req, "headers", {}) or {})))
+        if len(calls) == 1:
+            raise urllib.error.HTTPError(req.full_url, 401, "unauth", {}, None)
+        return _Ok(200)
+
+    monkeypatch.setattr(ac.urllib.request, "urlopen", fake_urlopen)
+    r, _conn, fresh = _reg([])
     ac.push_blob(r, "x", "sha256:d", b"data", "layer7")
-    assert conn.reqs == [], "401 恢复后秒传命中，不得进上传路径"
+    assert [c[0] for c in calls] == ["HEAD", "HEAD"], "必须真 HEAD 探测"
+    assert fresh == [False, True], "401 后必须 fresh 重取 token"
 
 
 # ── push_blob：秒传 / 换 session 重启 ──────────────────────────
@@ -206,14 +222,14 @@ class _Store:
 
 def test_push_blob_instant_skip_no_upload():
     s = _Store()
-    s.get = lambda path, repo, actions=("pull",), **kw: (b"", {})
+    s.head = lambda path, repo, actions=("pull",), **kw: (b"", {})
     ac.push_blob(s, "x", "sha256:d", b"data", "layer0")
     assert s.calls == [], "秒传命中不得走上传"
 
 
 def test_push_blob_instant_skip_only_on_404():
     s = _Store()
-    s.get = lambda path, repo, actions=("pull",), **kw: (_ for _ in ()).throw(
+    s.head = lambda path, repo, actions=("pull",), **kw: (_ for _ in ()).throw(
         urllib.error.HTTPError(path, 500, "boom", {}, None))
     try:
         ac.push_blob(s, "x", "sha256:d", b"data", "layer0")
@@ -224,8 +240,7 @@ def test_push_blob_instant_skip_only_on_404():
 
 def test_push_blob_happy_path_chunk_then_finalize():
     s = _Store()
-    s.get = lambda path, repo, actions=("pull",), **kw: (_ for _ in ()).throw(
-        urllib.error.HTTPError(path, 404, "nf", {}, None))
+    s.head = lambda path, repo, actions=("pull",), **kw: False   # 404=未在盘
     s.conn = FakeConn([
         FakeResp(202, loc="/u/1"),                       # POST session
         FakeResp(202, loc="/u/1"), FakeResp(202, loc="/u/1"),  # 2×PATCH(8B/4B)
@@ -238,8 +253,7 @@ def test_push_blob_happy_path_chunk_then_finalize():
 
 def test_push_blob_session_death_restarts_with_new_session():
     s = _Store()
-    s.get = lambda path, repo, actions=("pull",), **kw: (_ for _ in ()).throw(
-        urllib.error.HTTPError(path, 404, "nf", {}, None))
+    s.head = lambda path, repo, actions=("pull",), **kw: False   # 404=未在盘
     # 第一轮：POST ok → PATCH ok → 第二轮 PATCH 死（重试穷尽）；
     # 重启轮：POST 新 session → 2×PATCH → PUT 成功。
     s.conn = FakeConn([
