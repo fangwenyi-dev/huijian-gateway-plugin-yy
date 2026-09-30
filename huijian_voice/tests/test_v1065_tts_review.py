@@ -554,7 +554,7 @@ def test_t3_third_close_gated():
     blk = src[i:i + 900]
     assert "await asyncio.wait_for(self._current_ws.close(), 5)" in blk, \
         "writer finally 裸 close=半开 TCP 永挂入口（H8 同款纪律漏第三处）"
-    assert "abort()" in blk
+    assert "abort_ws_transport(" in blk,         "close 超时缺 abort 兜底（旧死码形态已废，须走 abort_ws_transport）"
     j = src.index("heartbeat ping for")
     assert "asyncio.wait_for(self._current_ws.ping()" in src[j:j + 300]
 

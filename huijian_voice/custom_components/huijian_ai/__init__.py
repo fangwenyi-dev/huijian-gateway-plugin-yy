@@ -288,10 +288,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> b
     # reset_automation_globals() 已真注销 EVENT_STATE_CHANGED 与整点 tick，
     # 而重新武装此前只在 get_automation_manager 懒建时发生——条目 reload
     # （保存选项/重配/删设备）后无人再调它 ⇒ 全屋传感器/时间自动化**静默停摆**
-    # （管理页触发日志也恒空），只有重启 HA 才复活。此处每次条目 setup 都补一发
-    # （get_automation_manager 幂等：实例已活只返回，不重复登记）。
-    if entry.data.get(CONF_CONFIG_TYPE) != "assist":
-        get_automation_manager(hass)
+    # （管理页触发日志也恒空），只有重启 HA 才复活。
+    # 对抗复核 A3 修：**无条件**（此前放在 !=assist 分支内 ⇒ assist 引擎条目
+    # reload/重配不补挂）；get_automation_manager 实例已活只 return（幂等），
+    # 真正补挂在 reset 之后的首调——删除路径见 async_remove_entry。
+    get_automation_manager(hass)
     # 语音卫星入驻后自动补建 assist 引擎条目（若 HA 尚无）：三平台实体
     # (conversation/stt/tts) 随慧尖设备安装自动注册、端点默认本机加载项 :8000。
     # 不 await——补建走独立 config flow(SOURCE_IMPORT)，失败 fail-open。
@@ -341,6 +342,10 @@ async def async_remove_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> 
         await transport.async_remove_entry()
 
     await _async_clear_dynamic_encryption_key(hass, entry)
+    # 第四轮审计 P1 对抗复核 A3：删除条目走的是 remove（不经 setup）——
+    # unload 已把监听 reset 掉，此处补挂一次，否则"删一台设备"后全屋自动化
+    # 静默停摆到下次重启 HA。幂等：实例已活只 return。
+    get_automation_manager(hass)
 
 
 async def _async_clear_dynamic_encryption_key(

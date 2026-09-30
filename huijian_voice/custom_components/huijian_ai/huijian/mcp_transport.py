@@ -16,7 +16,7 @@ from custom_components.huijian_ai.entry_data import ESPHomeConfigEntry
 
 from ..const import DOMAIN
 from . import EntryAuthFailedError, get_entry_data
-from .ws_transport import WsTransport
+from .ws_transport import WsTransport, abort_ws_transport
 
 try:
     from mcp.shared.message import SessionMessage  # ha>=2025.10,mcp>=1.14.1
@@ -216,8 +216,7 @@ class McpTransport(WsTransport):
                     self.logger.warning("writer close timeout, abort: %s",
                                         self._redact_endpoint(self.endpoint))
                     try:
-                        t = self._current_ws and self._current_ws.transport
-                        t and t.abort()
+                        abort_ws_transport(self._current_ws)
                     except Exception:  # noqa: BLE001
                         pass
                 else:

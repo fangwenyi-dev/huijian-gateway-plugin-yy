@@ -48,7 +48,18 @@ class HuijianHttpView(HomeAssistantView):
         if not entry:
             return None
         salt = request.headers.get("Salt", "")
-        ret = request.headers.get("Authorization") == calculate_sign(
+        # 第四轮审计 P1（对抗复核 A1 修）：签名从**独立头** `X-Huijian-Sign` 取。
+        # 旧实现拿 `Authorization` 与裸摘要逐字比，而令牌闸（requires_auth=True）
+        # 要求同一个头必须是 `Bearer <HA令牌>` ⇒ 认证通过则签名必失败（"双闸"
+        # 自相矛盾、端点恒 400）。现契约：
+        #   · 令牌是**主闸**（HA middleware 强制，未带即 401）；
+        #   · `X-Huijian-Sign` 是**可选兼容闸**——带了就必须对（防错签/伪造），
+        #     不带则由令牌独立放行（签名密钥只是设备 MAC，本就不构成秘密，
+        #     安全强度由令牌承担；签名算法本身不动，跨端契约形状不变）。
+        sig = request.headers.get("X-Huijian-Sign", "")
+        if not sig:
+            return entry
+        ret = sig == calculate_sign(
             request.path,
             params,
             entry.data.get("mac", "").lower(),

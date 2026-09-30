@@ -258,6 +258,13 @@ def _extract_method(path, cls_name, meth_name, transforms=()):
     for a, b in transforms:
         code = code.replace(a, b)
     ns = {"asyncio": asyncio}
+    # 第四轮审计（对抗复核 A4）：close 超时的 abort 兜底改走模块级 helper
+    # （旧写法 `ws.transport and ...abort()` 对 aiohttp 真对象是死码）——
+    # 一并注入 helper 真源码，本行为钉才走真实现（缺它=NameError 被吞=假绿）。
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "abort_ws_transport":
+            exec(compile(ast.get_source_segment(src, node),  # noqa: S102 抽真源码
+                         "<abort_ws_transport>", "exec"), ns)
     exec(compile(code, f"<{meth_name}>", "exec"), ns)  # noqa: S102
     return ns[meth_name]
 

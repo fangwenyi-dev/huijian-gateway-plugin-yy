@@ -16,6 +16,27 @@ from . import Dict
 _LOGGER = logging.getLogger(__name__)
 
 
+def abort_ws_transport(ws) -> bool:
+    """尽力 abort 底层传输（close 超时收口的兜底动作）。永不抛，返回是否真 abort。
+
+    第四轮审计（对抗复核 A4 实测）：aiohttp 的 `ClientWebSocketResponse` **没有**
+    `.transport` 属性——旧写法 `ws.transport and ws.transport.abort()` 恒
+    AttributeError/None，被外层 `except Exception: pass` 吞掉 = **死码**（三处
+    收口点同款，一直没人发现）。真路径在 `ws._response.connection.transport`；
+    同时兼容确带 `.transport` 的实现/替身。
+    """
+    for obj in (ws, getattr(ws, "_response", None)):
+        for tr in (getattr(obj, "transport", None),
+                   getattr(getattr(obj, "connection", None), "transport", None)):
+            if tr is not None and hasattr(tr, "abort"):
+                try:
+                    tr.abort()
+                    return True
+                except Exception:  # noqa: BLE001 换下一条候选路径
+                    continue
+    return False
+
+
 class WsTransport:
     """Handles WebSocket transport."""
 
@@ -437,8 +458,7 @@ class WsTransport:
                         "writer close timeout, abort: %s",
                         self._redact_endpoint(self.endpoint))
                     try:
-                        t = self._current_ws and self._current_ws.transport
-                        t and t.abort()
+                        abort_ws_transport(self._current_ws)
                     except Exception:  # noqa: BLE001
                         pass
                 else:
@@ -587,7 +607,7 @@ class WsTransport:
             except Exception as err:  # noqa: BLE001（含 TimeoutError）
                 self.logger.warning("restart close timeout, abort: %s", err)
                 try:
-                    ws.transport and ws.transport.abort()
+                    abort_ws_transport(ws)
                 except Exception:  # noqa: BLE001
                     pass
 
@@ -612,7 +632,7 @@ class WsTransport:
             except Exception as err:  # noqa: BLE001（含 TimeoutError）
                 self.logger.warning("stop close timeout, abort: %s", err)
                 try:
-                    self._current_ws.transport and self._current_ws.transport.abort()
+                    abort_ws_transport(self._current_ws)
                 except Exception:  # noqa: BLE001
                     pass
         for stream in (

@@ -137,31 +137,62 @@ _RISKY_ACTION_CHAIN_INTENTS = frozenset({
     "HassCreateVoiceScene", "HassTriggerVoiceScene",
     "HassCreateAutomation", "HassUpdateAutomation",
 })
+# 动作链闸的风险意图集=日常关断族 ∪ **直接解锁族**：actions 里的 intent 名会被
+# `intent.async_handle` 按名直执行，`{intent:HassUnlock,params:{entity_id:lock.*}}`
+# 与 TurnDeviceOff×锁完全等价（顶层单发闸不含 HassUnlock 只因该工具面默认不暴露它）。
+_CHAIN_RISKY_INTENTS = frozenset(set(_RISKY_LOCK_OFF_INTENTS) | {"HassUnlock"})
 
 
 def scene_actions_hit_risk(actions) -> bool:
     """actions（任意嵌套）里是否含「免确认解锁/撤防」动作。永不抛。
 
-    判据与顶层闸同源（_args_targets_lock 域闭包 + 中文词表 + alarm 域/entity_id），
-    只是改为**递归**遍历动作节点——场景动作形如 {intent|name, params|parameters}，
-    风险实体不在参数顶层 target 就是在 params.target，故按「意图节点」取参后复用。
+    **判据=域/实体证据，不看中文名**（第四轮审计 P1 对抗复核 A2）：动作链闸
+    误拒的代价是普通自动化直接建不了——实测「当有人回家关大门灯」的
+    name="大门灯" 会被中文词表 "大门" 子串误杀（"卷帘门" cover 同形）。本通道
+    在闸前已跑 `_enrich_target_domains` 回填真实域，锁/安防目标必带
+    domains=[lock|door|alarm_control_panel] ⇒ 域闭包足以覆盖真风险；
+    顶层单发闸（`_args_targets_lock`）保留中文名启发不动（那条误拒只多问一句）。
     """
     stack = [actions]
     while stack:
         cur = stack.pop()
         if isinstance(cur, dict):
             name = cur.get("intent") or cur.get("name")
-            if isinstance(name, str) and name in _RISKY_LOCK_OFF_INTENTS:
+            if isinstance(name, str) and name in _CHAIN_RISKY_INTENTS:
                 params = cur.get("params")
                 if not isinstance(params, dict):
                     params = cur.get("parameters")
-                if isinstance(params, dict) and _args_targets_lock(params):
+                if isinstance(params, dict) and _params_target_lock_domains(params):
                     return True
             stack.extend(
                 v for v in cur.values() if isinstance(v, (dict, list, tuple))
             )
         elif isinstance(cur, (list, tuple)):
             stack.extend(cur)
+    return False
+
+
+def _params_target_lock_domains(params) -> bool:
+    """**只看域/实体证据**的锁族判据（动作链专用；中文名启发见上方注释）。永不抛。"""
+    try:
+        for t in params.get("target") or []:
+            if not isinstance(t, dict):
+                continue
+            for d in t.get("devices") or []:
+                if not isinstance(d, dict):
+                    continue
+                closed = _risky_domain_closure(d.get("domains") or [])
+                if "lock" in closed or closed & set(_ALARM_DOMAINS):
+                    return True
+        eids = params.get("entity_id")
+        if isinstance(eids, str):
+            eids = [eids]
+        if isinstance(eids, (list, tuple)):
+            return any(isinstance(e, str)
+                       and e.split(".", 1)[0] in ("lock",) + _ALARM_DOMAINS
+                       for e in eids)
+    except (TypeError, AttributeError):
+        return False
     return False
 
 
