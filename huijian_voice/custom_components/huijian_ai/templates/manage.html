@@ -264,7 +264,7 @@
                 });
                 const data = await safeJson(res);
                 if (data.success) {
-                    showToast('测试成功', 'success');
+                    showToast('测试成功' + (data.note ? ('，有设备没动：' + data.note) : ''), 'success');
                 } else {
                     showToast(data.error || '测试失败', 'error');
                 }
@@ -288,7 +288,7 @@
                 });
                 const data = await safeJson(res);
                 if (data.success) {
-                    showToast('测试成功，动作已执行', 'success');
+                    showToast('测试成功，动作已执行' + (data.note ? ('，有设备没动：' + data.note) : ''), 'success');
                     fetchLogs();
                 } else {
                     showToast(data.error || '测试失败', 'error');

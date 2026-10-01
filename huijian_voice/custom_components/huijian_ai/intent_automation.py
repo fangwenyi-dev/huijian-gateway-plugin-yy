@@ -724,7 +724,9 @@ class AutomationManager:
                 # 漏网（SetDeviceMode 族只回 {"results":[…]}，无 success 键时旧判据恒真）。
                 ok, _err = fold_action_ok(response)
                 if ok:
-                    results.append((str(intent_name), True, ""))
+                    # 修③：成功位仍为 True（该步确实动了东西），但第三格带出"有台没动"
+                    # 的真因——消费侧（面板试运行）有义务把它播出去，不许静默。
+                    results.append((str(intent_name), True, _err))
                 else:
                     # v1.1.29：顶层无 error 时用折算出的逐台真因（如 {"results":[…]} 的
                     # 行内 error），别退成笼统的「执行未成功」。

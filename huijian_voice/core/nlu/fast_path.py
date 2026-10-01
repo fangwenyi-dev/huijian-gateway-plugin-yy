@@ -685,12 +685,15 @@ _LOCK_INV = re.compile(r"^(.{2,8}?)(开锁|解锁|上锁|锁上)(?:了|啦|咯)?
 # ── v1.1.27 否定祈使判据（match 内"拒执行闸"用；语义见该处注）────────
 # 直接形：否定词（可带口语虚词）紧贴动作动词。裸 没/不/未 一并收——「不开灯」
 # 「没关空调」与「别开灯」同判；V没V 形态由 lookbehind 排除（动词后紧跟否定词）。
+# 动作动词表**单源**（`_NEG_VERB_ALT`）：`is_bare_negation_imperative` 要拿它判
+# "句里还有没有别的肯定动作"，另抄一份必然与正则漂移。
+_NEG_VERB_ALT = ("打开|开启|关掉|关闭|关上|开了|关了|开一下|关一下|调到|调成|调高|调低|"
+                 "调亮|调暗|调至|设为|设成|拉上|拉下|上锁|解锁|锁上|播放|停止|暂停|启动|"
+                 "开|关|调|设|拉|锁|放|停")
 _NEGATION_CMD = re.compile(
     r"(?<![开关调设拉停顿放锁解])(?:别|不要|不用|不必|不许|不准|甭|勿|莫|没|不|未)"
     r"(?:要|再|又|去|能|会|可以|给我|帮我|把|将)?"
-    r"(?:打开|开启|关掉|关闭|关上|开了|关了|开一下|关一下|调到|调成|调高|调低|"
-    r"调亮|调暗|调至|设为|设成|拉上|拉下|上锁|解锁|锁上|播放|停止|暂停|启动|"
-    r"开|关|调|设|拉|锁|放|停)"
+    r"(?:" + _NEG_VERB_ALT + r")"
     r"(?![^，。！？,、]{0,2}的)")
 # 把字形：「别/不要/勿/莫 + 把/将 + 目标段(≤6字且无动作动词) + 动作动词」——
 # 只收强否定词（裸 没/不 不收）：「把没关的灯打开」不是否定祈使，绝不能误杀。
@@ -698,6 +701,46 @@ _NEG_PREP_FLOW = re.compile(
     r"(?:别|不要|不用|不必|不许|不准|甭|勿|莫)(?:把|将)[^，。！？,、]{0,6}?"
     r"(?:打开|开启|关掉|关闭|关上|调到|调成|调亮|调暗|设为|拉上|拉下|上锁|解锁|"
     r"开|关|调|设|拉|锁)")
+_OTHER_ACTION_VERB = re.compile(r"(?:" + _NEG_VERB_ALT + r")")
+
+
+def is_negation_imperative(text: str) -> bool:
+    """这句是**否定祈使**（「别开灯」「不要把窗关上」）——单点定义，两侧共用。
+
+    v1.1.27 的 CHANGELOG 写的是"否定祈使**全局**拒执行"，实际判据只落在本模块的
+    `match()` 里（拒接管⇒字面表不出计划）。klar 是另一条通路，它把
+    「别开台灯」接地成 `HassTurnOn light.ke_ting_tai_deng` 时**不经本函数**，于是
+    现役树上「别开台灯」真把灯打开、还播「好的，办好了」（2026-10-01 本机干净
+    checkout 全链探针实得）。裁决侧要的正是这个判据，故导出供 pipeline 复用——
+    与 `is_query_like`「疑问句两档都不得执行」同一条纪律（同文件 :490/:499 的教训）。
+    """
+    t = text or ""
+    return bool(_NEGATION_CMD.search(t) or _NEG_PREP_FLOW.search(t))
+
+
+def is_bare_negation_imperative(text: str) -> bool:
+    """**整句就是一句否定命令**（句里没有别的肯定动作）——裁决面只用这条。
+
+    为什么不能用全句判据 `is_negation_imperative`：一条 klar 计划只代表句子的
+    **一部分**，而 `_NEGATION_CMD` 是整句搜索。直接套用会把日常连排/限定句打死
+    （2026-10-01 独立复现对抗复核的指控，全链实测「修前执行=1 → 修后执行=0」）：
+        关灯，不要拉窗帘            （关灯那条腿本来该落地）
+        不用开灯，把窗帘拉上就行    （拉窗帘该落地）
+        把没关严窗户拉上            （"没关严"是状态定语，不是拒绝）
+    收口=命中否定后把那段剥掉，**剩余部分还有动作动词就不否决**（说明否定只管半句
+    或只是定语）；剩余没有动词才是"用户明确拒绝这个动作"。动词表与正则同源
+    （`_NEG_VERB_ALT`），不抄第二份。
+    「窗帘不要拉到底」这类剩余无动词的仍否决（宁可不执行，也不做用户明说不要的
+    完全动作）——与「别开台灯」同向。
+    """
+    t = (text or "").strip()
+    if not (is_negation_imperative(t)):
+        return False
+    m = _NEGATION_CMD.search(t) or _NEG_PREP_FLOW.search(t)
+    if m is None:
+        return False
+    rest = t[:m.start()] + t[m.end():]
+    return not bool(_OTHER_ACTION_VERB.search(rest))
 
 
 def is_pronoun(text: str) -> bool:
@@ -1179,7 +1222,7 @@ class FastPath:
         # 内倒族动词（倒/内倒）**不入表**：本仓 STT 近音把「内倒」听成「别倒」
         # 是既有救援形态（targets._generic_rescue 按 bie/nei 一音节之差救回），
         # 收进来会把「打开书房别倒窗」这条真命令误杀。
-        if _NEGATION_CMD.search(text) or _NEG_PREP_FLOW.search(text):
+        if is_negation_imperative(text):
             return self._miss(trace, "否定句→不接管(拒执行)")
 
         # 连排句绝不在单发通路里执行（2026-09-10 真机实锤）：无连接词的动词连排

@@ -170,7 +170,15 @@ class VoiceSceneStore:
                 scene["trigger_phrase"] = trigger_phrase
 
             if actions is not None:
+                # 修⑤：只有动作**真的变了**才重盖 created_at。对抗复核实证过宽形：
+                # 客户端读-改-写回（actions 一字未动）也会重盖 ⇒ 旧启发式补的匿名
+                # 区级窗动作被放回执行面（按区压所有窗钮）。"变了才重新计时"才是
+                # 用户对这份形状做了当下确认；原样重存不是。
+                changed = actions != scene.get("actions")
                 scene["actions"] = actions
+                if changed:
+                    # 与 `create_scene` 同一枚时钟、同一格式（:101），否则时间闸失义。
+                    scene["created_at"] = datetime.now(timezone.utc).isoformat()
 
             await self._save_data(data)
             _LOGGER.info("Updated voice scene: %s", scene_id)
@@ -295,6 +303,21 @@ def legacy_auto_window_area(action: dict, siblings: list,
     """
     if not _scene_predates_auto_window_retirement(created_at):
         return ""
+    # 修⑤：键形必须是启发式那一路（`name`+`parameters`）。启发式唯一的写入口
+    # `VoiceSceneStore._auto_supplement_windows`（v1.1.32 及以前）逐字写的是
+    # `{"name": "ControlWindow", "parameters": {...}}`；而工具通道/自动化存的是
+    # 模型自己写的 `{"intent": ..., "params": ...}`（intent_automation.py 的
+    # schema 示例逐字即此形）。旧判据 `name or intent` 把两路混在一起 ⇒ **模型正当
+    # 写入的匿名区级窗动作被当存量启发式永久跳过**（2026-10-01 探针实得：
+    # 用户明说「开客厅灯+空调+开客厅的窗」→ legacy_auto_window_area 回「客厅」）。
+    # 认不准就不动，这是本闸自订的"宁漏不误删"纪律的应有之义。
+    if "name" not in action and "parameters" not in action:
+        return ""
+    # 位置判据（同族第四件）：旧启发式只会 `new_actions.append(...)`——补的那条**恒在
+    # 末尾**（v1.1.32 及以前源码实证）。因此"不在末尾的匿名区级窗"绝不可能是它的产物，
+    # 只可能是用户/模型自己写的位置。这一格只能**减少**误跳，不可能放过真启发式产物。
+    if not siblings or siblings[-1] is not action:
+        return ""
     if (action.get("name") or action.get("intent")) not in (
             "ControlWindow", "WindowControl"):
         return ""
@@ -401,6 +424,7 @@ class HassTriggerVoiceSceneIntent(intent.IntentHandler):
                 "message": msg,
             }
         legacy_skips: list = []
+        partial_notes: list = []          # 修③：整步可用但有个别台没动 ⇒ 必须点名
         for action in replay_actions:
             intent_name = action.get("intent") or action.get("name")
             params = action.get("params") or action.get("parameters", {})
@@ -440,6 +464,11 @@ class HassTriggerVoiceSceneIntent(intent.IntentHandler):
                     executed_actions.append(
                         {"intent": intent_name, "result": "success", "detail": result}
                     )
+                    if _err:
+                        # 修③：`{"results":[{成},{败}]}` 折算=该步可用（确实动了东西），
+                        # 但"有一台没动"绝不能被「已执行场景」吞掉（真机红线：播报与
+                        # 事实一致；turn 族 v1.1.31 已按逐台真值同规点名，此处补同族）。
+                        partial_notes.append(f"{intent_name}：{_err[:40]}")
                 else:
                     err = ""
                     if isinstance(result, dict):
@@ -480,6 +509,9 @@ class HassTriggerVoiceSceneIntent(intent.IntentHandler):
                     "，旧版自动补的 "
                     + "、".join(f"「{a}」{d}" for a, d in dict.fromkeys(legacy_skips))
                     + "动作已跳过")
+            if partial_notes:
+                out["message"] += ("，有设备没动：" +
+                                   "；".join(dict.fromkeys(partial_notes)))
         else:
             # v1.0.41 审查 S1：部分失败时 message 不能再带「已执行场景」成功话术——
             # core/executor 失败分支取 error or message 折叠播报，设备离线等失败会被

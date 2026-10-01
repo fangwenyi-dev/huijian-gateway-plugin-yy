@@ -264,6 +264,19 @@ class HAClient:
                         self._states_ok = True
                     else:
                         self.last_error = f"states {r.status}"
+                        # v1.1.36（发布后方差复核②）：非 200 **同样是读取失败**。
+                        # 旧形只在 except 支置否 ⇒ 令牌过期(401/403)、Supervisor
+                        # 抖(500/502)、路径错(404) 这些"有响应但没拿到数据"的形态
+                        # 一律留着 _states_ok=True + 旧 _states_ts ⇒ states_stale()
+                        # 的具名原因"上次状态读取失败"永不出现，只剩 90s 后才来的
+                        # 含糊"已 N 秒未更新"——用户拿无注旧数当现行。
+                        # 可达判据不动（401/403=URL 对而鉴权失败，仍算可达，
+                        # 见 test_ha_client_urls 的 404 事故定案）：可达≠快照可用。
+                        self._states_ok = False
+                        if not self._states_warned:
+                            self._states_warned = True
+                            logger.warning("[HA] states 返回非 200（status=%s），状态快照"
+                                           "不可用（本条闩锁至下次成功）", r.status)
             except Exception as e:
                 self._reachable = False
                 self.last_error = str(e)

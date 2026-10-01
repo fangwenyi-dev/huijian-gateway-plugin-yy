@@ -17,6 +17,7 @@ from .intent_automation import (get_automation_manager,
                                 get_automation_store,
                                 peek_automation_manager)
 from .intent_voice_scene import get_voice_scene_store, legacy_auto_window_area
+from .intent_result import fold_action_ok
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -333,6 +334,7 @@ class TestSceneView(HomeAssistantView):
 
             executed = []
             skipped_legacy: list = []
+            partial_notes: list = []      # 修③：该步可用但有个别台没动 ⇒ 如实点名
             has_errors = False
             for action in actions:
                 intent_name = action.get("intent") or action.get("name")
@@ -361,11 +363,14 @@ class TestSceneView(HomeAssistantView):
                         )
                     # H3 同判据（2026-09-23 深审）：test 路径不读 response 内容
                     # =折叠失败也报「成功」——测试的意义就是见真相。
-                    ok = getattr(response, "success", True) is not False
-                    if isinstance(response, dict):
-                        ok = response.get("success") is not False
+                    # 修③：本口此前自判 `response.get("success") is not False`——
+                    # `{"results":[{成},{败}]}` 顶层无 success 键 ⇒ 恒真 ⇒ 测试口把
+                    # "有一台没动"报成全绿。折算了必须走单点 intent_result。
+                    ok, _perr = fold_action_ok(response)
                     if ok:
                         executed.append({"intent": intent_name, "result": "success"})
+                        if _perr:
+                            partial_notes.append(f"{intent_name}：{str(_perr)[:40]}")
                     else:
                         has_errors = True
                         err = (response.get("error") if isinstance(response, dict)
@@ -384,10 +389,14 @@ class TestSceneView(HomeAssistantView):
 
             if has_errors:
                 return self.json({"success": False, "error": "部分动作执行失败", "executed": executed})
+            _p = "；".join(dict.fromkeys(partial_notes))
             note = ("测试完成" + ("，旧版自动补的 " + "、".join(skipped_legacy)
-                                 + "动作已跳过（如非本意请在面板编辑删除）")
+                                 + "动作已跳过（本版不再执行它；想留开窗请重新创建场景"
+                                 "并把那扇窗的名字说出来）")
                     if skipped_legacy else "测试完成")
-            return self.json({"success": True, "message": note})
+            if _p:
+                note += "，有设备没动：" + _p
+            return self.json({"success": True, "message": note, "note": _p})
         except Exception as e:
             _LOGGER.error("Test scene failed: %s", e, exc_info=True)
             return self.json({"success": False, "error": str(e)}, status_code=500)
@@ -434,7 +443,10 @@ class TestAutomationView(HomeAssistantView):
                     }
                 )
             mgr._add_trigger_log(automation_id, "", "test", "手动测试触发")
-            return self.json({"success": True, "executed": ntotal})
+            _p = "；".join(f"{i}：{str(e)[:40]}" for i, _ok, e in outcomes if e)
+            return self.json({"success": True, "executed": ntotal, "note": _p,
+                              "message": ("测试成功，动作已执行"
+                                          + (f"，有设备没动：{_p}" if _p else ""))})
         except Exception as e:
             return self.json({"success": False, "error": str(e)}, status_code=500)
 

@@ -17,6 +17,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import intent, llm
 
 from .const import DOMAIN
+from .intent_result import fold_action_ok
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -146,12 +147,16 @@ _CHAIN_RISKY_INTENTS = frozenset(set(_RISKY_LOCK_OFF_INTENTS) | {"HassUnlock"})
 def scene_actions_hit_risk(actions) -> bool:
     """actions（任意嵌套）里是否含「免确认解锁/撤防」动作。永不抛。
 
-    **判据=域/实体证据，不看中文名**（第四轮审计 P1 对抗复核 A2）：动作链闸
-    误拒的代价是普通自动化直接建不了——实测「当有人回家关大门灯」的
-    name="大门灯" 会被中文词表 "大门" 子串误杀（"卷帘门" cover 同形）。本通道
-    在闸前已跑 `_enrich_target_domains` 回填真实域，锁/安防目标必带
-    domains=[lock|door|alarm_control_panel] ⇒ 域闭包足以覆盖真风险；
-    顶层单发闸（`_args_targets_lock`）保留中文名启发不动（那条误拒只多问一句）。
+    **判据=域证据优先，无域证据时回落到中文锁词**（v1.1.36 复核①修回）：
+    第四轮审计 P1 曾把中文名整个摘掉，理由是「当有人回家关大门灯」的
+    name="大门灯"（light）与「卷帘门」（cover）被中文子串误杀。那个误杀是真的，
+    但摘掉判据的前提——"闸前已跑 `_enrich_target_domains` 回填真实域"——**只对
+    顶层 target 成立**，动作链里的 `actions[].params.target` 从来没被回填过；
+    而同文件 :626 自己写着「LLM 常不写 domains、只给中文设备名」⇒ 常态输入下
+    动作里的设备无域无判据，`TurnDeviceOff`×大门 被放行，执行面
+    `intent_turn.py:326 # off = unlock` ⇒ 免确认解锁后门重开。
+    现两处一起收：①`_enrich_target_list` 递归回填 actions；②这里对拿不到域证据
+    的名字保守判险。误拦的代价是多问一句，漏拦的代价是门开了——不对称。
     """
     stack = [actions]
     while stack:
@@ -173,7 +178,20 @@ def scene_actions_hit_risk(actions) -> bool:
 
 
 def _params_target_lock_domains(params) -> bool:
-    """**只看域/实体证据**的锁族判据（动作链专用；中文名启发见上方注释）。永不抛。"""
+    """动作链风险判据：**域证据优先**，完全没有域证据时回落到中文锁词。
+
+    v1.1.36（发布后方差复核①＝P0）：今天把它改成"只看域"，是为救「大门灯/卷帘门」
+    被中文子串误杀（那两条确实是 light/cover）。但配套的 `_enrich_target_domains`
+    只回填**顶层** target，从不进 `actions[].params.target`——而本文件 :626 自己
+    写着「LLM 常不写 domains、只给中文设备名」⇒ 常态输入下动作里的设备永远没有域，
+    闸整条失明，`{intent:TurnDeviceOff,params:{target:[{devices:[{name:大门}]}]}}`
+    被放行；执行面 `intent_turn.py:326 # off = unlock` ⇒ 免确认解锁后门重开
+    （v1.1.27 批 7 P0-2 立闸要堵的正是这条）。
+
+    两处一起才既对又不误杀：①回填递归进 actions（域证据真的有了）；②这里对
+    **拿不到任何域证据**的设备名保守按锁词判。取舍不对称：误拦=多问一句，
+    漏拦=门开了。
+    """
     try:
         for t in params.get("target") or []:
             if not isinstance(t, dict):
@@ -181,9 +199,15 @@ def _params_target_lock_domains(params) -> bool:
             for d in t.get("devices") or []:
                 if not isinstance(d, dict):
                     continue
-                closed = _risky_domain_closure(d.get("domains") or [])
-                if "lock" in closed or closed & set(_ALARM_DOMAINS):
-                    return True
+                doms = d.get("domains") or []
+                if doms:
+                    closed = _risky_domain_closure(doms)
+                    if "lock" in closed or closed & set(_ALARM_DOMAINS):
+                        return True
+                    continue                  # 有域证据且不是锁/安防 ⇒ 名字再像也不拦
+                name = str(d.get("name") or "")
+                if any(w in name for w in _LOCK_NAME_WORDS + _ALARM_NAME_WORDS):
+                    return True              # 无域证据：保守判险
         eids = params.get("entity_id")
         if isinstance(eids, str):
             eids = [eids]
@@ -194,6 +218,120 @@ def _params_target_lock_domains(params) -> bool:
     except (TypeError, AttributeError):
         return False
     return False
+
+
+async def _enrich_one_target_list(hass, target: list) -> list:
+    """target 列表里只给了中文名的设备，按 HA 真实状态补 domains（返回副本）。
+
+    模型已写 domains 一律不覆盖。永不抛（HA 拿不到就原样返回，交保守判据兜）。
+    """
+    out = list(target or [])
+    try:
+        rows = list(hass.states.async_all())
+    except Exception:  # noqa: BLE001
+        return out
+    for ti, t in enumerate(out):
+        if not isinstance(t, dict):
+            continue
+        devices = t.get("devices") or []
+        if not devices:
+            continue
+        new_devs = list(devices)
+        changed = False
+        for di, device in enumerate(new_devs):
+            if not isinstance(device, dict) or device.get("domains"):
+                continue
+            name = str(device.get("name", "") or "").lower().strip()
+            if not name:
+                continue
+            found = set()
+            for state in rows:
+                if name == state.name.lower() or (
+                        len(name) >= 2 and state.name.lower().endswith(name)):
+                    found.add(state.domain)
+            if found:
+                nd = dict(device)
+                nd["domains"] = list(found)
+                new_devs[di] = nd
+                changed = True
+                _LOGGER.info(
+                    "Auto-injected domains=%s for device '%s' from HA states",
+                    found, device.get("name"))
+        if changed:
+            nt = dict(t)
+            nt["devices"] = new_devs
+            out[ti] = nt
+    return out
+
+
+async def _enrich_deep(hass, node):
+    """递归回填任意层级的 `…target`（返回副本；无变化时原样返回同一对象）。
+
+    深度不设自加上限：判据侧 `scene_actions_hit_risk` 本来就是栈式遍历任意嵌套，
+    回填必须走到同样的深度，否则深层节点拿不到域就被"无域证据"保守判险误杀。
+    """
+    if isinstance(node, list):
+        new = None
+        for i, item in enumerate(node):
+            r = await _enrich_deep(hass, item)
+            if r is not item:
+                if new is None:
+                    new = list(node)
+                new[i] = r
+        return new if new is not None else node
+    if not isinstance(node, dict):
+        return node
+    out = None
+
+    def _copy():
+        nonlocal out
+        if out is None:
+            out = dict(node)
+        return out
+
+    tgt = node.get("target")
+    if isinstance(tgt, list) and tgt:
+        new_tgt = await _enrich_one_target_list(hass, tgt)
+        if new_tgt != tgt:
+            _copy()["target"] = new_tgt
+    for k, v in node.items():
+        if k == "target" or not isinstance(v, (list, dict)):
+            continue
+        r = await _enrich_deep(hass, v)
+        if r is not v:
+            _copy()[k] = r
+    return node if out is None else out
+
+
+async def _enrich_target_list(hass, arguments: dict) -> dict:
+    """顶层 target **+ 任意层 `actions[].params/parameters.target`** 一并回填域。
+
+    v1.1.36（复核①＝P0）：旧形只处理顶层 target，动作链里的设备名因此永远
+    没有域证据，而动作链闸"只看域"⇒ 常态输入下失明（免确认解锁后门）。
+    **递归回填是"只看域"这个选择能成立的前提**，不是优化。
+    v1.1.36 复核批二（对抗复核抓到、我复现）：第一次收口只走了 `actions`
+    **一层**，而判据 `scene_actions_hit_risk` 是栈式任意嵌套 ⇒ 二层里的
+    `{name:"大门灯"}`（HA 真域=light）拿不到域 ⇒ 被"无域证据"保守判险误杀，
+    同一形状放一层则正常。判据走多深，回填就得走多深。
+    """
+    if not isinstance(arguments, dict):
+        return arguments
+    return await _enrich_deep(hass, arguments)
+
+
+async def _enriched_store_actions(hass, actions):
+    """场景库存量动作在**判之前**补一次域。
+
+    库里那份是建场景当时的原始 args：当年回填只碰顶层 target ⇒ 存量永远没有域
+    证据（v1.1.27 立闸时判据还含中文名，所以没暴露；改成只看域就盲了）。触发链
+    没有"重新编辑"的机会，只能按**当前** HA 真状态现补现判。永不抛。
+    """
+    if not actions:
+        return actions
+    try:
+        return (await _enrich_target_list(hass, {"actions": actions}))["actions"]
+    except Exception:  # noqa: BLE001 —— 补不上域不等于"没风险"
+        return actions
 
 
 def _response_text(response) -> str:
@@ -551,40 +689,12 @@ class HuijianControlAPI(llm.API):
 
     @staticmethod
     async def _enrich_target_domains(hass: HomeAssistant, arguments: dict) -> dict:
-        target = arguments.get("target", [])
-        if not target or not isinstance(target, list):
-            return arguments
+        """薄委托（见模块级 `_enrich_target_list` 的 v1.1.36 说明）。
 
-        arguments = dict(arguments)
-        arguments["target"] = list(target)
-
-        for ti, t in enumerate(target):
-            devices = t.get("devices", [])
-            if not devices:
-                continue
-            enriched = False
-            for di, device in enumerate(devices):
-                if "domains" not in device or not device["domains"]:
-                    name = device.get("name", "")
-                    if not name:
-                        continue
-                    matching_domains = set()
-                    name_lower = name.lower().strip()
-                    for state in hass.states.async_all():
-                        if name_lower == state.name.lower() or (len(name_lower) >= 2 and state.name.lower().endswith(name_lower)):
-                            matching_domains.add(state.domain)
-                    if matching_domains:
-                        if not enriched:
-                            arguments["target"][ti] = dict(t)
-                            arguments["target"][ti]["devices"] = list(devices)
-                            enriched = True
-                        arguments["target"][ti]["devices"][di] = dict(device)
-                        arguments["target"][ti]["devices"][di]["domains"] = list(matching_domains)
-                        _LOGGER.info(
-                            "Auto-injected domains=%s for device '%s' from HA states",
-                            matching_domains, name,
-                        )
-        return arguments
+        调用点仍只这一处（:720 之前判、之后放行），语义不变；变化是**回填范围**
+        从"顶层 target"扩到"顶层 + actions 两形"。
+        """
+        return await _enrich_target_list(hass, arguments)
 
     def _call_intent_factory(self, intent_type: str):
         async def handler(hass, tool_input, llm_context):
@@ -598,11 +708,18 @@ class HuijianControlAPI(llm.API):
 
         触发链 args 只有 trigger_phrase，动作面在场景库里 → 回查存量动作再判。
         库读取异常按放行处理（fail-open，与 _args_targets_lock 同口径）并留痕。
+
+        v1.1.36（复核①＝P0）：**判前先自己回填域**。此前回填只在 `_call_intent`
+        入口跑过一次，而它只读顶层 `arguments["target"]` ⇒ 动作里的中文设备名
+        永远没有域证据，"只看域"的判据在常态输入（本文件 :626 自述"LLM 常不写
+        domains"）下整条失明。回填挪进本函数=每条到达路径（新建/更新/触发/存量）
+        统一覆盖，不再依赖上游记得调；与入口那次重复是幂等的（已有域的不覆盖）。
         """
         if intent_type not in _RISKY_ACTION_CHAIN_INTENTS:
             return False
         args = arguments if isinstance(arguments, dict) else {}
-        if scene_actions_hit_risk(args.get("actions")):
+        if scene_actions_hit_risk(
+                await _enriched_store_actions(hass, args.get("actions"))):
             return True
         if intent_type != "HassTriggerVoiceScene":
             return False
@@ -618,7 +735,8 @@ class HuijianControlAPI(llm.API):
                 "[custom_llm_api] 场景「%s」风险校验失败，放行交执行面：%s",
                 phrase, err)
             return False
-        return scene_actions_hit_risk((scene or {}).get("actions"))
+        return scene_actions_hit_risk(
+            await _enriched_store_actions(hass, (scene or {}).get("actions")))
 
     async def _call_intent(self, hass: HomeAssistant, intent_type: str, arguments: dict, llm_context: llm.LLMContext) -> dict:
         arguments = await self._enrich_target_domains(hass, arguments)
@@ -661,7 +779,15 @@ class HuijianControlAPI(llm.API):
         # 折叠 dict / IntentResponse.success=False）被 LLM 播成「办好了」。
         result_text = _response_text(response)
         if isinstance(response, dict):
-            if "success" in response:
+            if ("states" in response or "partial_error" in response or not response):
+                # 并轨单点（2026-10-01 复核）：这份手抄副本只认 `success`/`results`，
+                # `states` 族（AdjustDeviceAttribute/Lock）与行外 `partial_error`
+                # （turn 族窗侧真因）在此被折成"全绿"，空 dict 也不留痕——
+                # intent_result 已收口，副本必须同源（该文件头训：改返回形态要 grep
+                # 全消费点）。只把这几种副本看不见的形态交出去，其余分支原样，
+                # 避免一次性替换整段改变 LLM 侧既有话术口径。
+                ok, err = fold_action_ok(response)
+            elif "success" in response:
                 ok = response.get("success") is not False
                 err = str(response.get("error") or "")
             elif isinstance(response.get("results"), list):

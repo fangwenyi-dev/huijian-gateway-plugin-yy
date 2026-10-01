@@ -137,6 +137,36 @@ _SCENE_WRITE_TOOLS = frozenset({
 _AUTOMATION_WRITE_TOOLS = frozenset({
     "HassCreateAutomation", "HassUpdateAutomation", "HassDeleteAutomation",
 })
+# 带 actions 的写入类工具（删除类没有动作面，走同一条判断也只是空转）
+_CHAIN_WRITE_TOOLS = _SCENE_WRITE_TOOLS | _AUTOMATION_WRITE_TOOLS
+
+
+def _actions_target_lock(node) -> bool:
+    """任意嵌套的 `actions` 里，是否有一条动作指向锁/安防目标。
+
+    判据就是顶层那道 `args_target_lock`（中文名 ∪ 域闭包 ∪ entity_id 前缀），
+    只是改为**递归遍历动作节点**——与 `custom_llm_api.scene_actions_hit_risk` 同族。
+    刻意不复用它：那份在集成侧（HA 环境），这份在加载项 core（无 HA 依赖），
+    两侧本来各有一套 `args_target_lock`（同纪律的受控重复，见 targets.py 头注）。
+    永不抛：形制异常按 False（与顶层同口径，漏判由执行面/话术兜，绝不误拦正常句）。
+    """
+    from .nlu.targets import args_target_lock
+    try:
+        stack = [node]
+        while stack:
+            cur = stack.pop()
+            if isinstance(cur, dict):
+                for pk in ("params", "parameters"):
+                    p = cur.get(pk)
+                    if isinstance(p, dict) and args_target_lock(p):
+                        return True
+                stack.extend(v for v in cur.values()
+                             if isinstance(v, (dict, list, tuple)))
+            elif isinstance(cur, (list, tuple)):
+                stack.extend(cur)
+    except Exception:  # noqa: BLE01
+        return False
+    return False
 
 SYSTEM_PROMPT = (
     "你是慧尖智能家居语音助手。规则：1) 控制设备必须调用工具，不要凭空声称已完成；"
@@ -411,6 +441,20 @@ class Agent:
         if (name in _SCENE_WRITE_TOOLS
                 and not self.settings.get("llm.allow_scene_write", True)):
             return False, "语音场景的创建/删除没开启"
+        # v1.1.36 复核批二（对抗复核抓到、我复现）：**第二条 LLM 通道整条没进动作链闸**。
+        # 上面 C2 那道只闸单发控制（TurnDeviceOff/HassTurnOff/HassToggle），而创建类
+        # 工具带 `actions[]` 时从没看过——同一条
+        # `{intent:TurnDeviceOff, params:{target:[{devices:[{name:"大门"}]}]}}`
+        # 走 custom_llm_api 那条道今天被拦，走本通道照样入库、触发时免确认解锁
+        # （`intent_turn.py:326 # off = unlock`；运行期 `_execute_actions` 无闸，
+        # 全靠创建侧）。判据沿用同一个 `args_target_lock`（中文名 ∪ 域闭包），
+        # 只是改为递归看每条动作。
+        if (name in _CHAIN_WRITE_TOOLS
+                and self.settings.get("dialog.confirm_risky", True)
+                and isinstance(args, dict)
+                and _actions_target_lock(args.get("actions"))):
+            return False, ("场景/自动化里带锁或安防动作，我不能替您跳过确认——"
+                           "这类动作请在语音里直接说，会先问您一声再执行")
         # v1.1.24：写场景/自动化前做**区域可解析性**预检（与本地创建侧同口径）——
         # LLM 的 actions 里带一个 HA 注册表里不存在的区域，入库后触发必半失败；
         # 注册表未同步 ⇒ 放行（fail-open，同 capability 纪律）。

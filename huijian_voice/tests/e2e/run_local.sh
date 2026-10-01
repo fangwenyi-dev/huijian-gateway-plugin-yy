@@ -36,7 +36,14 @@ try:
     # 本脚本无 $ADDON（第 7 行只 cd），路径取 $PWD——v1.1.17 首版误用未定义量，
     # set -u 下子壳当场 abort ⇒ ready 恒空 ⇒ 600×2s 后假报「models 未就绪」。
     need=[k for k,v in d.items() if isinstance(v,dict) and v.get("default_provider")]
-    print("yes" if need and all(m.get(k) for k in need) else "")
+    # v1.1.36 收口：`models_ready` 只说明**包在盘上解好了**，不等于引擎已装载。
+    # 真装态在同一份 health 里就是 `asr_loaded`/`tts_loaded`——门过去只看前者，
+    # 于是升级后第一次跑本通道必红：客户端在"冷启动双载闩"还没放行时就推第一句，
+    # 拿到 `{'text':'','reason':'模型正在加载（冷启动双载闩拦下本轮）'}`（2026-10-01
+    # 本机四轮同签名红，热栈手跑立刻三通道全绿 ⇒ 红在工装不在产品）。
+    # 闩本身是对的（备料期让位，不换嗓不断播），要补的是把关口径。
+    print("yes" if need and all(m.get(k) for k in need)
+          and j.get("asr_loaded") and j.get("tts_loaded") else "")
 except Exception: print("")' | tr -d '\r' || true)
     [ "$ready" = "yes" ] && break
     sleep 2

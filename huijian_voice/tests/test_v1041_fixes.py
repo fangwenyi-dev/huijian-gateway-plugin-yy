@@ -157,7 +157,12 @@ def _resp(resp):
 # ── F4：测试执行失败如实折算 ────────────────────────────────────────
 def test_f4_source_pins():
     assert '"{len(fails)}/{ntotal} 个动作执行失败：{first_err[:120]}"' in API_SRC
-    assert '{"success": True, "executed": ntotal}' in API_SRC
+    # v1.1.36 修③：成功响应新增 `note`（"有设备没动"的出口），字面形状变了。
+    # 钉按新形状加严而不是放松——三件都必须在一起：success True / executed 计数 /
+    # note 出口（旧形只有前两件，部分失败在源头就被丢掉）。
+    _ok_branch = '{"success": True, "executed": ntotal, "note": _p'
+    assert _ok_branch in API_SRC, "试运行成功响应丢了 executed 计数或 note 出口"
+    assert '"{len(fails)}/{ntotal} 个动作执行失败' in API_SRC, "失败分母口径回潮"
     assert ") -> list[tuple[str, bool, str]]:" in IA_SRC
     assert 'f"不支持的意图: {intent_name}"' in IA_SRC
     # manage.html 测试按钮必须把 data.error 播报出来（success False ≠ 沉默）

@@ -27,6 +27,37 @@ _LOCAL_DIM_RE = re.compile(
 def looks_local_query(text: str) -> bool:
     """命中本地量纲词 → True（守卫放行给查询族，未命中自然回原链）。"""
     return bool(_LOCAL_DIM_RE.search(text or ""))
+
+
+# 本地时钟三支（_time_answer/_weekday_answer/_date_answer）——答案取自
+# datetime.now()（+ HA 时区），**不来自状态快照**，因此不吃陈旧加注。
+# 判据必须与 `_answer_inner` 里那三条分支**逐支对应**，包括各支自己的排除式：
+#   少一条 ⇒ 那一支的时钟答案被贴假注（线上形态：升级后第一句「现在几点」即中招，
+#   因为 `_states_ts` 初值是 0）；多一条 ⇒ 快照来源的答案被免了注。
+# v1.1.36 复核批二（对抗复核抓到、我复现）：旧写法把「定时|预约」的排除**提到全局**，
+#   而 `_answer_inner` 的星期几分支本来**没有**这道排除（它确实能答「预约的会议是
+#   星期几」）⇒ 该类时钟答案仍被贴"数字可能不是最新"。排除式必须跟着各自的分支走。
+# 单向钉不够：tests/test_v1136_review_batch.py 与 test_v1136_second_batch.py 配了
+#   正反两条（分支正则=豁免表；有排除的支不许免注、没排除的支必须免注）。
+_LOCAL_CLOCK_RE = re.compile(
+    r"(现在)?(几点了?|什么时间|几点钟|什么时候|时间)")
+_LOCAL_CLOCK_RE2 = re.compile(r"(星期几|礼拜几|周几)")
+_LOCAL_CLOCK_RE3 = re.compile(r"(几号|几月几号|日期是|号是)")
+
+
+def _answer_from_local_clock(text: str) -> bool:
+    """本句是否由时钟分支应答——三条分支各自的排除式一比一照抄。永不抛。"""
+    t = (text or "").strip().rstrip("。？！?!，,")
+    if not t:
+        return False
+    if _LOCAL_CLOCK_RE.search(t) and not re.search(r"定时|预约", t):
+        return True
+    if _LOCAL_CLOCK_RE2.search(t):                     # 星期几支：无排除式
+        return True
+    if _LOCAL_CLOCK_RE3.search(t) and not re.search(r"定时|预约|几天", t):
+        return True
+    return False
+
 # 查询族设备类别表（v1.1.2 统一：状态/属性/计数三支共用）。
 # 原表 12 词且三支各写一份正则（属性支漏 射灯/平开窗、计数支漏 窗/幕布…），
 # v1.1.0 那批具名设备词进了**设备**表却没进**查询**表，「射灯亮度多少」
@@ -227,9 +258,16 @@ class QueryZone:
 
     # ── 主入口：命中返回中文答案，否则 None ─────────────────────
     async def answer(self, text: str) -> Optional[str]:
-        """查询应答唯一出口（第四轮审计 P2 ②/⑤：陈旧快照必须加注）。"""
+        """查询应答唯一出口（第四轮审计 P2 ②/⑤：陈旧快照必须加注）。
+
+        v1.1.36 收窄：加注只给**状态快照来源**的答案。旧形无条件贴，而时钟三支
+        （几点/星期几/几号）取的是本地时钟，与快照毫无关系——`.91` 探针原文
+        「现在几点」→「现在是 0 点 11 分（注：HA 状态尚未取到，数字可能不是最新）」；
+        `_states_ts` 初值 0 ⇒ 升级后重启的第一句就中招。时钟支免注，其余照旧
+        （含室外环境传感器——那也是快照读数，宁保守）。永不抛。
+        """
         out = await self._answer_inner(text)
-        if out:
+        if out and not _answer_from_local_clock(text):
             try:
                 why = self.ha.states_stale() if hasattr(self.ha, "states_stale") else ""
             except Exception:  # noqa: BLE001

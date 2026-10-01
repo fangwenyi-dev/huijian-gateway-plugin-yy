@@ -126,13 +126,17 @@ def split_sentences(text: str) -> list[str]:
         if cur:
             pieces.append(cur)
         # 边界切完仍可能有一段超长（逗号只出现在 60 字外的场景），逐段再硬切，
-        # 保证**任何**出帧单元 ≤_CHUNK_CHARS（否则空洞回到 4~5s，本钉就白做）。
+        # 保证**任何**出帧单元 ≤_CHUNK_CHARS+2（残片并块的取舍见下方 v1.1.36 注；
+        # 空洞阈值在 60 字级，这里守的是"没有一段长到让引擎持锁过久"）。
         for piece in pieces:
             while len(piece) > _CHUNK_CHARS:
                 head, tail = piece[:_CHUNK_CHARS], piece[_CHUNK_CHARS:]
                 # 第四轮审计 P2：1~2 字尾残片不独占一段——每段合成有固定起步开销，
                 # 残段会多带一段空洞（「21 字句」旧形态产出 [20,1]）。并入前块，
                 # 单段至多 _CHUNK_CHARS+2 字（远低于 60 字的空洞阈值）。
+                # v1.1.36 复核④：上一行的旧注释写的是"≤_CHUNK_CHARS"，与本行
+                # 自相矛盾（同文件里两个不变量）——以代码为准修正注释。真加长的
+                # 不变量由 tests/test_v1136_* 钉住：并块只发生在尾残片 ≤2 字时。
                 if len(tail) <= 2:
                     out2.append(head + tail)      # 尾残片并入本块（至多 22 字）
                     piece = ""
@@ -1497,14 +1501,32 @@ class TtsEngine:
         size = sum(len(p) for p in packets)
         if size > _CACHE_MAX_BYTES:
             return
-        old = self._cache.pop(key, None)
-        if old:
-            self._cache_bytes -= old[1]
+        # v1.1.36 复核批二（对抗复核抓到、我复现）：`pop(旧值) → 减法 → 赋值` 三段
+        # 本身不是原子的，worker 线程的 `clear()` 插在中间能把 `_cache_bytes` 打成
+        # 负值或虚高（我上一版只在末尾"发现负值才重算"，实测漏掉虚高那一半）。
+        # 字节数的**真源就是这张表** ⇒ 写完直接从表重算，不再做增量加减：任何交错
+        # 都自动收敛，也不靠猜哪一步被打断。
+        self._cache.pop(key, None)
         self._cache[key] = (packets, size)
-        self._cache_bytes += size
-        while len(self._cache) > _CACHE_MAX_ITEMS or self._cache_bytes > _CACHE_MAX_BYTES:
-            _k, (_pkt, b) = self._cache.popitem(last=False)
+        self._cache_bytes = sum(int(sz) for _pkts, sz in self._cache.values())
+        # v1.1.36 复核⑦：读侧今天护了，写侧是同一条竞态的另一个落点且更狠——
+        # `len()` 判过之后、`popitem()` 取之前被 worker 线程的 `clear()` 插队
+        # （换绑/换代，见 :1091/:1230/:1489 三处），OrderedDict.popitem 在空表上
+        # 抛 KeyError ⇒ 穿出**发声协程** ⇒ 整轮播报中断；旧形正是我今天读侧那条
+        # 理由要避免的形态。
+        while self._cache and (len(self._cache) > _CACHE_MAX_ITEMS
+                               or self._cache_bytes > _CACHE_MAX_BYTES):
+            try:
+                _k, (_pkt, b) = self._cache.popitem(last=False)
+            except KeyError:
+                break                            # 被插队清空：表已空，无需再驱逐
             self._cache_bytes -= b
+        # v1.1.36 复核批二（对抗复核抓到、我复现）：`pop → 减法 → 赋值` 三步本身
+        # 也非原子，`clear()` 插在中间能把 `_cache_bytes` 打成**负值**（虚高只是多挤
+        # 一次，负值则让"超上限"判据长期恒真/恒假取决于符号方向）。既然字节数的
+        # 真源就是这张表，收口后**从表重算**一次——比在任何局部补丁上猜交错顺序都稳。
+        if not self._cache:
+            self._cache_bytes = 0        # 驱逐途中被清空：跟着归零，别留残账
 
     @staticmethod
     def _encode(pcm16: bytes) -> list:

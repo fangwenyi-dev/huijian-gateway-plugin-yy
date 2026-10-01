@@ -43,6 +43,7 @@ from .nlu.fast_path import (END_DIALOGUE_INTENT, FLAG_ANAPHORA_STRIPPED,
                             TRACE_TAG_CHAIN, TRACE_TAG_CONTEXT,
                             FastPath, Plan,
                             attribute_domain_target, is_end_dialogue, is_pronoun,
+                            is_bare_negation_imperative,
                             is_whole_house, split_compound)
 from .nlu import targets as T
 from .nlu import corrector
@@ -204,8 +205,23 @@ _KLAR_WRITE_INTENTS = frozenset({
     "HassSetPosition", "HassClimateSetTemperature",
     # 第四轮审计 P2：这两族是已接管的 grounded 写值步（KLAR_CONTROL_INTENTS 里
     # 本就有），却漏在证据闸外——"数字不算证据"的现场洞（v1.0.55/v1.0.92）
-    # 在风速/湿度写值上原样存在。全族同闸。
+    # 在风速/湿度写值上原样存在。全族同闸（口径边界见下方 v1.1.36 注：
+    # 域都判不了的 args 形状一律 fail-open，那是有意的，不是漏族）。
     "HassFanSetSpeed", "HassClimateSetHumidity",
+    # v1.1.36 复核⑤：上面那句"全族同闸"此前**不实**——本集只有 8 个意图，白名单
+    # （nlu/klar_client.py `KLAR_CONTROL_INTENTS`）更多，锁族/扫地机族/风扇预设整条
+    # 绕过去。**这里刻意不写"白名单有几个"**：写死的数字会随白名单增长变假（复核
+    # 代理抓到我把 14 数成 12）；两集是否相等由 tests/test_v1136_gate_families.py
+    # 的差集钉在运行时判。实测（.91 工装同形句）：
+    #   HassLock「把会飞的门锁上」「给故事机上个锁」→ 放行执行
+    #   HassVacuumStart「启动会飞的扫地机」        → 放行执行
+    #   HassFanSetPresetMode「会飞的风扇设成睡眠」  → 放行执行
+    # 词表不缺（_DOMAIN_EVIDENCE 里 lock/vacuum/fan 都在），缺的是意图路由。
+    # 锁是高风险面（intent_turn.py:326 `# off = unlock`）。
+    # 不变量由 tests/test_v1136_gate_families.py 机器钉住：白名单控制族必须
+    # 全部进本集——今后加白名单忘加闸，那条钉自己转红。
+    "HassLock", "HassUnlock", "HassFanSetPresetMode",
+    "HassVacuumStart", "HassVacuumPause", "HassVacuumReturnToBase",
 })
 
 # 域→设备词表：任一子串命中即视为用户点了该类设备。刻意收着放（漏拦由降级链
@@ -235,10 +251,62 @@ _NAME_HEAD_STRIP = re.compile(
     r"^(?:把|将|请|麻烦|帮我|给我|我们|现在|马上|立即|再|还|就|来|去|快|然后|顺便|"
     r"打开|开启|开一下|启动|关闭|关掉|关上|关了|停止|调成|调到|调节|调整|调|设成|设为|"
     r"设置|设为|切换|改成|变成|所有的|全部|所有|都|全|的|地|得|了|这|那|该)+")
-_NAME_TAIL_STRIP = re.compile(
-    r"(?:打开|开启|开一下|启动|关闭|关掉|关上|关了|停止|调成|调到|调节|调整|调|设成|设为|"
+_TAIL_TOKENS = (
+    r"打开|开启|开一下|启动|关闭|关掉|关上|关了|停止|调成|调到|调节|调整|调|设成|设为|"
     r"设置|设为|切换|改成|变成|成|为|到|至|亮|暗|一下|一些|一|点|些|所有|全部|都|全|"
-    r"部|每|任何|个|只|盏|根|台|头|的|地|得|了|吗|呢|吧|啊|啦|哦|呀|嗯|度)+$")
+    r"部|每|任何|个|只|盏|根|台|头|的|地|得|了|吗|呢|吧|啊|啦|哦|呀|嗯|度")
+_NAME_TAIL_STRIP = re.compile(r"(?:" + _TAIL_TOKENS + r")+$")
+
+# 「这段不像名字，别拿它去判有没有这台设备」的两种形状（v1.1.36 复核批二）。
+# 形状一：动词语素开头 + 趋向补语/短小 —— 锁上门 / 关好门 / 反锁上门 / 暂停扫地机 /
+#   给门上锁。锁与扫地机这两个域的**类别词本身就兼做动词**，补齐 6 族之后日常句
+#   全被当成"点名的设备"拦下（实测复现，见 tests/test_v1136_second_batch.py）。
+# 形状二：整段就是"数词(+量词)" —— 一个 / 一盏 / 两只。孤字下限把量词留住之后，
+#   「关掉一个灯」这类也不再被剥空，于是从"无判据放行"变成"点名查无"。
+# 刻意只在这几种形状上**放弃裁决**（宁放行不误拦）：误拦的代价是用户天天说的句子
+# 失灵，漏拦只是回到本闸上线前的行为。
+#   形状一：整段都是动词语素/趋向补语/量词虚词 ⇒「锁上」「关好」「暂停」「一个」「一盏」
+#   形状二：两字且含本域类别词 ⇒「门上」（「大门」这类真名同理——放行本来就是正解）
+# 「会飞的」「书桌的」「阳台的」「故事机上」都不在表内，照旧拦。
+_NAMELESS_HEAD_VERBS = frozenset("锁关开反解上下停暂启取恢设调按推拉给封")
+# 状态定语的起字（「没关紧的窗」「未拉严的窗帘」）——用户拿状态指认那台东西，
+# 不是点一个查无此物的名字；见 `_phrase_is_not_a_name` 内注。
+_STATE_DESC_HEAD = frozenset("没未")
+_NAMELESS_TAIL_COMPS = ("上", "下", "好", "完", "住", "到", "过", "起")
+_VERBISH_CHARS = _NAMELESS_HEAD_VERBS | frozenset(
+    "上下来去就好完住到过起个只盏台部根一二两三四五六七八九十几每半把给让们我你他它"
+    "这那为在中和与了地得请帮谢要）")
+_NUM_QUANT_RE = re.compile(r"^[一二两三四五六七八九十几半每][个只盏台部根组]?$")
+
+
+def _phrase_is_not_a_name(seg: str, nouns=()) -> bool:
+    """修饰段更像**动词短语/数量短语/状态定语**而不是设备名 ⇒ 本闸不据此裁决。永不抛。
+
+    与 `_area_like` 同纪律：只借既有词表判形状，不另抄一张"设备名词表"。
+    """
+    try:
+        seg = (seg or "").strip()
+        if len(seg) < 2:
+            return False                  # 交回原有的"无可判修饰段"分支
+        if _NUM_QUANT_RE.match(seg):
+            return True
+        if all(ch in _VERBISH_CHARS for ch in seg):
+            return True
+        if len(seg) <= 2 and any(n and n in seg for n in nouns):
+            return True
+        if (seg[0] in _STATE_DESC_HEAD
+                and any(ch in _NAMELESS_HEAD_VERBS for ch in seg[1:])):
+            # 状态定语（没关紧 / 没拉严 / 未锁好）：用户是在**用状态指认那台东西**，
+            # 不是点一个查无此物的名字。v1.1.27 的 CHANGELOG 写"修掉了它对正常句的
+            # 误杀"，其实只修了字面表一侧——v1.1.35 这道新闸把「把没关紧的灯关上」
+            # 判成"没有这台『没关紧的灯』"（本机实得 unknown='没关紧的灯'），
+            # 修①把窗恢复成锚点后同形在窗域复现。
+            return True
+        return (seg[0] in _NAMELESS_HEAD_VERBS
+                and seg.endswith(_NAMELESS_TAIL_COMPS))
+    except Exception:  # noqa: BLE01 —— 守卫自身故障不得拦正常句
+        return False
+
 
 # 锚点只取**名词性**类别词：`_DOMAIN_EVIDENCE` 里混着属性字（亮/暗/光/暖/冷/度/
 # 色温…——它们是"这句在要求这个属性"的证据，不是设备名词）。拿属性字当锚点会把
@@ -253,8 +321,22 @@ def _attrish_words() -> frozenset:
     global _ATTRISH_CACHE
     if _ATTRISH_CACHE is None:
         _ATTRISH_CACHE = frozenset(
-            w for vals in _ATTR_EVIDENCE.values() for w in vals)
+            w for vals in _ATTR_EVIDENCE.values() for w in vals) - _class_nouns()
     return _ATTRISH_CACHE
+
+
+def _class_nouns() -> frozenset:
+    """**类别词身份优先于属性身份**的字集：属性字表不得吃掉某个域自己的类别词。
+
+    「窗/帘」进 `_ATTR_EVIDENCE["HassSetPosition"]` 的理由是「开窗位置」那类句里它们
+    是**属性证据**；但对 cover 域它们首先是设备类别词。把"属性"当绝对判据，等于把
+    cover 整类排除在点名查无闸之外——真机（办公 .91，v1.1.35 现役）实测
+    「关掉会飞的窗」两道判据双双放行，家里唯一那扇窗被顶包、还播「会飞的窗关了」。
+    类别词取自 `targets._GENERIC_FAMILIES`（泛称字族的既有单源，含 窗/灯/门），
+    该表按"开窗器"形状收词、不含「帘」，故帘在此显式补齐（它在属性证据里只出现过
+    一次，正是被吃掉的那一个）。
+    """
+    return frozenset(T._GENERIC_FAMILIES) | {"帘"}
 
 
 def _category_nouns(dom: str):
@@ -263,7 +345,7 @@ def _category_nouns(dom: str):
 
 
 def _unknown_spoken_device_name(text: str, words, device_names,
-                                known_areas=()) -> str:
+                                known_areas=(), real_areas=None) -> str:
     """原话里"类别词前面的修饰段"构成的设备名，在**给定在装清单**里查无此名时回该名；
     查得着、或提不出可判修饰段时回空串（=不据此拦）。
 
@@ -306,33 +388,81 @@ def _unknown_spoken_device_name(text: str, words, device_names,
         unknown_said = ""
         for end, g in anchors.items():
             pre = text[:end - len(g)]
-            for a in (known_areas or ()):
+            # 区域名从修饰段里剥掉时**只剥真注册区域**（v1.1.36 复核⑥）：旧形剥的是
+            # `known_areas`，而 `_known_areas()` = 静态 BASE_AREAS ∪ 注册表 ⇒ 家里根本
+            # 没有阳台时，"阳台"被当区域名剥走，修饰段只剩动词 ⇒ 无判据 ⇒ 放行 ⇒
+            # 顶了办公室那台射灯。表没拿到（空）才退回静态表，宁可不拦也不误拦。
+            for a in (real_areas or (known_areas or ())):
                 if a:
                     pre = pre.replace(a, "")
             # 判据用"剥干净的修饰段"，回显用"用户自己说的那截"（只剥首部动词，
             # 留着「的」）——播报里念「会飞的灯」而不是我拼出来的「会飞灯」。
             said = pre.strip()
-            prev = None
-            while pre != prev:
-                prev = pre
-                pre = _NAME_HEAD_STRIP.sub("", pre.strip())
-                pre = _NAME_TAIL_STRIP.sub("", pre.strip())
+            # v1.1.36 复核⑥：**头部剥到底（不设长度下限），尾部只认 ≥2 的结果**。
+            # 旧形把"剥头+剥尾"合成一步且不看余长 ⇒「关掉阳台的」一次算到终态「阳」
+            # （"的"之后接着吃量词"台"）⇒ 长度不够 ⇒ 无判据 ⇒ 放行 ⇒ 顶了别的房间
+            # 那台并回播「阳台的灯关了」（办公 .91 探针实得；同批另一侧「书桌的灯」
+            # 反而被拦，两向都偏）。两类必须分开：
+            #   「打开社灯」的「社」= 动词剥完的残名（射↔社 是 ASR 听岔）——短的也要
+            #     交给近音救援，故头部不设下限；
+            #   「阳台」被量词表(台/头/个/只/盏)吃成「阳」= 复合词被拆坏——停在「阳台」，
+            #     让它去**真区域表**判"家里有没有这间房"。
+            cur = pre.strip()
+            while True:
+                head = _NAME_HEAD_STRIP.sub("", cur).strip()
+                if head == cur:
+                    break
+                cur = head
+            while True:
+                tail = _NAME_TAIL_STRIP.sub("", cur).strip()
+                if tail == cur or (len(tail) < 2 <= len(cur)):
+                    break
+                cur = tail
+            pre = cur
+            # v1.1.36 复核批二：本批补齐证据闸 6 族之后，**锁/扫地机域的类别词本身
+            # 兼做动词**，于是日常动词短语被当成"点名的设备"拦下（对抗复核抓到、
+            # 我逐句复现）：「锁上门」「给门上锁」「关好门」「反锁上门」「暂停扫地机」
+            # 全变成「没有找到对应的设备『锁上门』」。同批另一形：孤字下限停在 2 字
+            # 之后，数量词不再被剥空 ⇒「关掉一个灯/一盏灯/两个灯/一只灯」一起中。
+            # 这两类形状上**放弃裁决**（宁放行）：误拦的代价是用户天天说的句子失灵，
+            # 而漏拦只是回到本闸上线前的行为。描述性修饰段（「会飞的」「书桌的」）
+            # 不受本条影响，照旧拦。
+            if _phrase_is_not_a_name(pre, words) or _phrase_is_not_a_name(said, words):
+                continue
             if not (2 <= len(pre) <= 4):
                 continue                            # 无可判修饰段 ⇒ 不据此拦
+            if any(a in pre for a in _ANAPHORA_WORDS):
+                continue            # 回指（那盏/这个）不在本闸职责内
             if not all("\u4e00" <= c <= "\u9fff" for c in pre):
                 continue                            # 混英文/数字：既有救援不管
-            if any(a and (a in pre or pre in a) for a in (known_areas or ())):
-                continue                            # 位置词不是设备修饰语（客厅灯）
-            # 区域名**没注册进 HA**时（用户随口说「客厅/阳台/玄关」而家里只有
-            # 办公室/展厅）仍要放行——用 targets 的既有词形判据（静态 BASE_AREAS ∪
-            # 尾缀室厅房间楼区馆），不另抄一张表；它不依赖 sync 状态，无顺序敏感。
-            if getattr(T, "_area_like", lambda _s: False)(pre):
-                continue
+            # v1.1.36 复核⑥：位置词豁免必须问"**这间房家里真有吗**"。
+            # 旧形两道都吃 `known_areas`/`_area_like`，而 `_known_areas()` 把静态
+            # BASE_AREAS（主卧/次卧/阳台/玄关/车库/露台/走廊）并了进来 ⇒ 办公 .91
+            # （只注册 办公室/展厅）实测「关掉阳台的灯」「关掉走廊的灯」「关掉书房的灯」
+            # 被豁免后顶了唯一那台办公室射灯、回播「阳台的灯关了」＝**猜房间**
+            # （同批另一侧「关掉书桌的灯」反而被拦，两向都偏）。用户红线：绝不猜房间。
+            # 三档：①拿到真区域表 ⇒ **只认表里的房间**；②表为空（注册表还没到）
+            # ⇒ 退回旧判据；③调用方没给表（既有单测形状，None）⇒ 原样，零漂移。
+            if real_areas:
+                if any(a and (a in pre or pre in a) for a in real_areas):
+                    continue                        # 家里真有这间 ⇒ 交给区域机器
+            else:
+                if any(a and (a in pre or pre in a) for a in (known_areas or ())):
+                    continue                        # 位置词不是设备修饰语（客厅灯）
+                if getattr(T, "_area_like", lambda _s: False)(pre):
+                    continue
             spoken = pre + g
             if spoken in T._STATIC_SET or spoken in names:
                 return ""                             # ①名字真实存在
             if any(len(d) >= 2 and (pre in d or d in spoken) for d in names):
-                return ""                             # ②互相包含（半截名字）
+                # ②互相包含（半截名字）：「走廊灯」对上在装的「走廊感应灯」，
+                # 或反过来只说后半截「感应灯」。
+                # v1.1.36 曾在此加"名字不得跨修饰语边界"的收紧（`d in g` + 位置前缀
+                # 判据），变异验证显示它**不承重**：加了上面的孤字下限之后，
+                # 「关掉阳台的灯」的修饰段停在「阳台的」，「台灯」本就不是它的尾串，
+                # 那条洞到达不了。判据留原形，删掉多余的一层（我给自己的改动做的
+                # 减法，依据是 tests/test_v1136_area_modifier.py 的两条救援钉）。
+                return ""
             if _near_homophone_in_home(spoken, names):
                 return ""                             # ③同长度近音（ASR 听岔）
             said = _NAME_HEAD_STRIP.sub("", said.strip())
@@ -363,7 +493,7 @@ def _near_homophone_in_home(spoken: str, names) -> bool:
 
 
 def _klar_named_absent_target(kl: Optional[Plan], device_names,
-                              known_areas=()) -> str:
+                              known_areas=(), real_areas=None) -> str:
     """klar grounded **写值**步里、用户点名而家里查无的那个设备名；否则空串。
 
     一处判据两处用：①作 v1.0.92 目标证据闸的"无证据"形态（非空 ⇒ 弃用本计划，
@@ -388,7 +518,9 @@ def _klar_named_absent_target(kl: Optional[Plan], device_names,
         if not t or any(a in t for a in _ANAPHORA_WORDS):
             return ""
         return _unknown_spoken_device_name(t, _category_nouns(dom),
-                                           device_names, known_areas)
+                                           device_names,
+                                           known_areas=known_areas,
+                                           real_areas=real_areas)
     except Exception:  # noqa: BLE01
         return ""
 
@@ -436,7 +568,8 @@ def _klar_value_without_attr_evidence(kl: Optional[Plan]) -> bool:
 
 
 def _klar_write_without_target_evidence(kl: Optional[Plan],
-                                        known_areas=(), device_names=()) -> bool:
+                                        known_areas=(), device_names=(),
+                                        real_areas=None) -> bool:
     """True = klar grounded 控制步在**原话里找不到任何目标证据**，主裁决弃用。
     永不抛；utterance 缺失/域判定不了/词表拿不到一律放行（fail-open）。"""
     try:
@@ -461,7 +594,8 @@ def _klar_write_without_target_evidence(kl: Optional[Plan],
             # 顶了同类别唯一那台并真执行（.91 实锤）。名字在家里查无 ⇒ 本闸仍判无证据。
             # 提取锚点用名词性子集（属性字不当锚点，见 _category_nouns 头注）。
             return bool(_unknown_spoken_device_name(t, _category_nouns(dom),
-                                                    device_names, known_areas))
+                                                    device_names, known_areas,
+                                                    real_areas))
         if any(a in t for a in known_areas or ()):
             return False                          # 用户真点了区域名
         if any(a in t for a in _ANAPHORA_WORDS):
@@ -472,7 +606,8 @@ def _klar_write_without_target_evidence(kl: Optional[Plan],
 
 
 def select_primary_plan(fp: Optional[Plan], kl: Optional[Plan],
-                        known_areas=(), device_names=()) -> Optional[Plan]:
+                        known_areas=(), device_names=(),
+                        real_areas=None) -> Optional[Plan]:
     """纯裁决函数（可单测）：scene 契约 > 慧尖独占 > klar 标准 > 字面表剩余。
 
     v1.0.92：known_areas 传入时启用「控制步目标证据」闸——见
@@ -498,12 +633,18 @@ def select_primary_plan(fp: Optional[Plan], kl: Optional[Plan],
         # 「哪些灯开着」落成 HassTurnOn。判据与字面表共用 is_query_like（单点定义）。
         if is_query_like(kl.utterance or ""):
             return None
+        # 修②（2026-10-01）：**否定祈使两档都不得执行**——与上面疑问闸同一条纪律。
+        # v1.1.27 的"全局拒执行"只落在字面表 `FastPath.match` 里（拒接管=不出计划），
+        # klar 支不经该判据 ⇒ 现役树上「别开台灯」真把灯打开并播「好的，办好了」。
+        if is_bare_negation_imperative(kl.utterance or ""):
+            return None
         # v1.0.55：见 _klar_window_lamp_conflict——句在说窗、klar 却指向
         # 灯/开关时**整条弃用**（返回 None 落级联下层，宁可不执行）。
         if _klar_window_lamp_conflict(kl):
             return None
         # v1.0.92：说故事说出开灯——控制步必须先在原话里拿出目标证据。
-        if _klar_write_without_target_evidence(kl, known_areas, device_names) or \
+        if _klar_write_without_target_evidence(kl, known_areas, device_names,
+                                               real_areas) or \
                 _klar_value_without_attr_evidence(kl):
             return None
         return kl
@@ -512,7 +653,8 @@ def select_primary_plan(fp: Optional[Plan], kl: Optional[Plan],
 
 def select_fallback_plan(primary: Optional[Plan], fp: Optional[Plan],
                          kl: Optional[Plan], speech: str,
-                         known_areas=(), device_names=()) -> Optional[Plan]:
+                         known_areas=(), device_names=(),
+                         real_areas=None) -> Optional[Plan]:
     """纯函数：主计划执行失败后的降级选择；None = 不降级（如实报+LLM 复议）。"""
     if primary is None:
         return None
@@ -523,7 +665,10 @@ def select_fallback_plan(primary: Optional[Plan], fp: Optional[Plan],
             return None
         # v1.0.92：降级支同样过目标证据闸——v1.0.90 假成功案根因就是
         # 「主路被拦、降级通道不再复检」；只闸主裁决=半道闸。
-        if _klar_write_without_target_evidence(kl, known_areas, device_names) or \
+        if is_bare_negation_imperative(kl.utterance or ""):
+            return None                                   # 修②：降级支同闸
+        if _klar_write_without_target_evidence(kl, known_areas, device_names,
+                                               real_areas) or \
                 _klar_value_without_attr_evidence(kl):
             return None
         # v1.0.12 窗户误动作闸（2026-09-08 实机：ControlWindow 未注册时
@@ -926,10 +1071,11 @@ class Pipeline:
         # ⓪①②③④ klar 引擎与 T0/T1/场景并行判定，三层裁决（见模块头）
         fp_plan, kl_plan = await self._match_pair(text)
         plan = select_primary_plan(fp_plan, kl_plan, self._known_areas(),
-                                 self._device_names())
+                                 self._device_names(), self._real_areas())
         if plan is None:
             absent = _klar_named_absent_target(kl_plan, self._device_names(),
-                                            self._known_areas())
+                                            self._known_areas(),
+                                            self._real_areas())
             if absent:
                 # v1.1.35（2026-09-30 办公 .91 实锤）：用户点了**具体名字**而家里
                 # 查无这台。引擎的形态是把修饰语丢掉、顶同类别里唯一那台并回显原话
@@ -973,7 +1119,8 @@ class Pipeline:
             if not ok:
                 fb = select_fallback_plan(plan, fp_plan, kl_plan, speech,
                                           self._known_areas(),
-                                          self._device_names())
+                                          self._device_names(),
+                                          self._real_areas())
                 # v1.0.87（现场 13:06:37 案）：降级同样是**动作**——主发次若是
                 # "结果不确定"（超时/连接/5xx：HA 可能已执行，只是回执丢了），
                 # 再放一发等于把同一件事做两遍（灯幂等没事，门锁/卷帘/相对量
@@ -1857,10 +2004,11 @@ class Pipeline:
         chain_spec: Optional[dict] = None       # 链内回指：同句先行分句的具名目标
         for (fpp, klp), clause in zip(pairs, clauses):
             p = select_primary_plan(fpp, klp, self._known_areas(),
-                                self._device_names())
+                                self._device_names(), self._real_areas())
             if p is None:
                 absent = _klar_named_absent_target(klp, self._device_names(),
-                                                self._known_areas())
+                                                self._known_areas(),
+                                                self._real_areas())
                 if absent:
                     # v1.1.35：链里某一分句点了家里没有的设备 ⇒ 整链不执行并**点名
                     # 说没找到**（同"链内区域解析不到→整链不执行"的既有口径）。
@@ -2334,6 +2482,29 @@ class Pipeline:
         except Exception:  # noqa: BLE01
             return ()
 
+    def _real_areas(self) -> tuple:
+        """这台 HA **真注册过**的区域名（不含静态 BASE_AREAS）。
+
+        给「点名设备查无」子闸当位置豁免的唯一依据——v1.1.36 复核⑥：旧形用
+        `_known_areas()`（静态基准 ∪ 注册表）与 `_area_like` 的静态词形判"这是不是
+        位置词"，于是家里根本没有阳台时「关掉阳台的灯」被当位置词豁免、顶了别的
+        房间那台。位置词豁免从此只认表；**表拿不到（空）⇒ 返回空 tuple，闸自动
+        退回旧判据**（宁可不拦也不误拦，与 `_device_names` 同纪律）。永不抛。
+        """
+        try:
+            out = []
+            for v in (getattr(self.ha, "_areas", None) or {}).values():
+                name = str(v or "").strip()
+                if name:
+                    out.append(name)
+            for v in (self.settings.get("spatial.satellite_areas", {}) or {}).values():
+                name = str(v or "").strip()
+                if name and name not in out:
+                    out.append(name)
+            return tuple(out)
+        except Exception:  # noqa: BLE01
+            return ()
+
     @staticmethod
     def _overbroad_say(area: str) -> str:
         return (f"「{area}」里设备不止一台，我不确定你要哪一台，这次先不动。"
@@ -2757,7 +2928,7 @@ class Pipeline:
             text, "panel")
         fp_plan, kl_plan = await self._match_pair(text)   # 与真流量同构（并行）
         plan = chain_plan or select_primary_plan(fp_plan, kl_plan, self._known_areas(),
-                                       self._device_names())
+                                       self._device_names(), self._real_areas())
 
         def _dump(p):
             return None if p is None else {

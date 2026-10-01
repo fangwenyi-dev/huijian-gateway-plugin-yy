@@ -251,6 +251,34 @@ def test_settings_defaults_local_model_present_for_merge():
     assert DEFAULTS["stt"]["provider"] == "local_paraformer", "provider 值空间兼容 pin 不得改"
 
 
+def _readiness_snippet(code_text, rel):
+    """从 shell 脚本里摘出就绪判据那段 `python -c '...'` 本体（不复制逻辑）。"""
+    import re
+    m = re.search(r"'(import json,os,sys.*?print\(\"yes\".*?\)\s*)'", code_text, re.S)
+    assert m, f"{rel}: 摘不到就绪判据片段（脚本结构变了要同步本钉）"
+    return m.group(1)
+
+
+def _run_readiness(snippet, health, lock):
+    """按脚本同样的方式真跑一次：health JSON 走 stdin、HJ_LOCK 指临时 lock。"""
+    import json as _json
+    import os as _os
+    import subprocess as _sp
+    import tempfile as _tf
+    with _tf.NamedTemporaryFile("w", suffix=".json", delete=False,
+                                 encoding="utf-8") as lf:
+        _json.dump(lock, lf)
+        lock_path = lf.name
+    try:
+        env = dict(_os.environ, HJ_LOCK=lock_path)
+        out = _sp.run([sys.executable, "-c", snippet],
+                      input=_json.dumps(health), capture_output=True,
+                      text=True, encoding="utf-8", env=env, timeout=30)
+        return (out.stdout or "").strip()
+    finally:
+        _os.unlink(lock_path)
+
+
 def test_e2e_need_is_derived_from_lock_not_hardcoded():
     """两 e2e 脚本的 models 就绪等待集必须**从 models.lock 派生**（default_provider:true）。
 
@@ -270,6 +298,25 @@ def test_e2e_need_is_derived_from_lock_not_hardcoded():
         assert "default_provider" in src, f"{rel}: need 集未从 lock 派生（写死的键会漂）"
         for hard in (KEY_SV, "tts_melo_zh_en", "tts_kokoro_multilang"):
             assert hard not in src, f"{rel}: need 集仍写死 {hard}"
+        # v1.1.36（2026-10-01）：就绪门必须看**引擎真装态**。
+        # ⚠ 这条第一轮写成 `assert "asr_loaded" in src` —— 被我自己写的注释逐字
+        # 满足，把整段闸表达式删掉全量仍零红（独立复核实证 M11 全绿＝假绿）。
+        # 现改为**跑判据本体**：把脚本里那段 python 片段抽出来，喂两种 health JSON，
+        # 只有真装态才许放行。文本匹配一律只在剥掉注释的代码行上做。
+        code = "\n".join(ln for ln in src.splitlines()
+                         if not ln.lstrip().startswith("#"))
+        snippet = _readiness_snippet(code, rel)
+        cases = [
+            ({"models_ready": {k: True for k in want},
+              "asr_loaded": False, "tts_loaded": True}, "", "包解好但引擎没装载必等"),
+            ({"models_ready": {k: True for k in want},
+              "asr_loaded": True, "tts_loaded": False}, "", "同上（TTS 侧）"),
+            ({"models_ready": {k: True for k in want},
+              "asr_loaded": True, "tts_loaded": True}, "yes", "真装态才放行"),
+        ]
+        for health, expect, why in cases:
+            got = _run_readiness(snippet, health, lock)
+            assert got == expect, f"{rel}: {why}（实得 {got!r}）"
 
 
 def test_e2e_scripts_wait_on_need_not_full_lock():

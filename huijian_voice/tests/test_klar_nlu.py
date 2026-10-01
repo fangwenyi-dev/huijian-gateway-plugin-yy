@@ -468,9 +468,12 @@ def test_pipeline_dispatch_wired():
     assert "from .nlu.klar_client import KlarClient" in pl
     # v1.0.92：裁决入口恒带 known_areas（控制步目标证据闸的原料）。
     # 折叠空白再比：实参换行不算断开（v1.1.35 入口又多了 device_names，行宽必换行）。
+    # v1.1.36 复核⑥：再加 third 原料 real_areas（真注册区域表）——位置词豁免从此
+    # 只认家里真有的房间，入口漏传就等于闸退回静态判据（猜房间回潮）。
     flat = " ".join(pl.split())
     assert ("select_primary_plan(fp_plan, kl_plan, self._known_areas(), "
-            "self._device_names())") in flat, "主裁决入口没把两份原料传进去"
+            "self._device_names(), self._real_areas())") in flat, \
+        "主裁决入口没把三份原料都传进去"
     mn = _text("core/main.py")
     assert "self.klar = KlarClient(self.settings)" in mn and "klar=self.klar" in mn
     assert "await self.klar.close()" in mn
@@ -578,18 +581,62 @@ class Proxy500HA(SpyHA):
         return {"success": False, "message": "HA 内部错误(500)", "raw": None}
 
 
+class ProxyDetHA(SpyHA):
+    """**确定型**集成侧失败：message 无 5xx 数字、也不带 indeterminate 旗。
+
+    与 Proxy500HA 成对照——后者 v1.1.36 起被认成"结果不确定"。有这对两臂，
+    "不确定话术"才不是一张到处盖的万能牌：真·集成没生效仍须给出原诊断。
+    """
+
+    async def call_service(self, domain, service, data, timeout=10.0):
+        return {"success": False, "message": "HA 内部错误", "raw": None}
+
+    async def handle_intent(self, name, data):
+        return {"success": False, "message": "HA 内部错误", "raw": None}
+
+
 def test_klar_channel_never_blames_integration():
+    """klar 通道失败**永不**归因到慧尖集成（2026-09-08 实机误报：该通道与集成无关）。
+
+    v1.1.36 改钉不弱化（撞出真冲突的一条）：本钉原先断言话术字面"没有走通"，
+    而复核③把 5xx/连接类按"结果不确定"收拢 ⇒ 500 那条形态改播"没拿到回执、
+    可能已动作"。invariant 拆开守：①两条道都不许出现"集成"二字；②不确定型
+    不得播假确定"没有执行成功"；③确定型仍走"和 Home Assistant 的连接没有走通"。
+    """
     ok, reply = arun(Executor(Proxy500HA()).run(_klar_plan(
         "HassTurnOn", {"entity_id": "light.ban_gong_shi_she_deng"})))
     assert not ok
     assert "集成" not in reply, reply
-    assert "没有走通" in reply
+    assert "没有执行成功" not in reply, f"5xx 仍被播成假确定：{reply}"
+    assert "可能已经动作" in reply, reply
+
+    ok2, reply2 = arun(Executor(ProxyDetHA()).run(_klar_plan(
+        "HassTurnOn", {"entity_id": "light.ban_gong_shi_she_deng"})))
+    assert not ok2
+    assert "集成" not in reply2, f"确定型失败又去怪集成：{reply2}"
+    assert "没有走通" in reply2, f"确定型 klar 失败话术漂移：{reply2}"
 
 
 def test_intent_channel_keeps_integration_speech():
-    ok, reply = arun(Executor(Proxy500HA()).run(
+    """慧尖自有意图（走集成）失败时**该**给集成侧诊断——与上一条成对，证明确实
+    是按通道分叉而不是抹平。
+
+    v1.1.36 两臂：`intent_helper.py:48-56` 记着 HA 对 `vol.Invalid` 直接炸 HTTP 500
+    （请求根本没落到设备上，"没执行"是确定的），而 `ha_client.py:204-207` 把所有
+    5xx 一律标 indeterminate（状态码分不出受理前抛与执行中断）。所以：
+    ①确定型 ⇒ 原诊断"集成还没生效"一字不动；
+    ②不确定型 ⇒ 播"没拿到回执、可能已动作"**并且仍带**"重启/重载 HA Core"这条
+      现场换来的可执行指引（三日误诊悬案的成果不许被我这次改动弄丢）。
+    """
+    ok, reply = arun(Executor(ProxyDetHA()).run(
         Plan(intent="TurnDeviceOn", args={}, source="t0")))
-    assert not ok and "集成还没生效" in reply
+    assert not ok and "集成还没生效" in reply, reply
+
+    ok2, reply2 = arun(Executor(Proxy500HA()).run(
+        Plan(intent="TurnDeviceOn", args={}, source="t0")))
+    assert not ok2
+    assert "可能已经动作" in reply2, f"5xx×集成通道仍播假确定：{reply2}"
+    assert "HA Core" in reply2, f"不确定话术把重启指引弄丢了：{reply2}"
 
 
 def test_panel_execute_runs_full_cascade():

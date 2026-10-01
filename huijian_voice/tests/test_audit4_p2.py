@@ -64,9 +64,27 @@ def test_p2_asr_cloud_error_body_capped():
 
 # ── ③ `?nocache` 空值语义 ─────────────────────────────────────
 def test_p2_nocache_empty_value_disables_cache():
-    src = (CC / "huijian" / "http.py").read_text(encoding="utf-8")
-    assert 'use_file_cache=request.query.get("nocache") in (None, "")' in src, \
-        "`?nocache`（空值）应禁缓存；旧写法 falsy 判等让开关失效"
+    """v1.1.36 复核④：这条原本也是**假绿**——它把源码字符串照抄进 assert，
+    零语义约束。而那句"修复" `query.get("nocache") in (None, "")` 与它要替换的
+    旧写法 `not query.get("nocache")` **真值表逐位相同**（yarl 把裸 `?nocache`
+    解析成空串），所以 `?nocache` 从来没禁掉缓存，注释里"`?nocache` 也生效"
+    那半句是假的。判据从此看**键在不在**，钉也改成跑真值表。
+    """
+    import ast as _a
+    from multidict import CIMultiDict
+
+    http = (CC / "huijian" / "http.py").read_text(encoding="utf-8")
+    ns = {}
+    for node in _a.walk(_a.parse(http)):
+        if isinstance(node, _a.FunctionDef) and node.name == "_file_cache_disabled":
+            exec(compile(_a.get_source_segment(http, node), "<x>", "exec"), ns)
+            break
+    assert "_file_cache_disabled" in ns, "判据函数没了"
+    fn = ns["_file_cache_disabled"]
+    assert fn(CIMultiDict()) is False, "没带参数时不得禁缓存（反向）"
+    for q in (CIMultiDict([("nocache", "")]), CIMultiDict([("nocache", "1")]),
+              CIMultiDict([("tts_entity", "tts.x"), ("nocache", "")])):
+        assert fn(q) is True, f"裸/带值 ?nocache 必须禁缓存：{dict(q)}"
 
 
 # ── ④ 连续对话回显判据排 unavailable ──────────────────────────
@@ -127,10 +145,26 @@ def test_p2_model_download_has_byte_cap(tmp_path, monkeypatch):
 
 # ── ⑤ OTA 桥断不白签（原地加严见 test_ota_firmware）──────────────
 def test_p2_ota_bridge_check_precedes_issue():
+    """v1.1.36 复核④：这条原本是**假绿**——它取
+    `src.index("_bridge_ok(ctx.ha)")` 的首个命中，而那落在 `_devices`(:76)；
+    `store.issue, version, mac` 的首个命中落在 `_issue`(:138) ⇒ 跨函数比先后，
+    把 `_dispatch` 里的前判整段删掉它也照样绿（变异实测如此）。
+    现在按 AST 切出 `_dispatch` 的函数体，在体内取序，并要求两者之间有 `return`。
+    函数被改名/删除也直接断，不让它躲过去。
+    """
+    import ast as _a
     src = (HERE / "core" / "ota_api.py").read_text(encoding="utf-8")
-    i_bridge = src.index("_bridge_ok(ctx.ha)")
-    i_issue = src.index("store.issue, version, mac")
+    tree = _a.parse(src)
+    disp = [n for n in _a.walk(tree)
+            if isinstance(n, (_a.FunctionDef, _a.AsyncFunctionDef))
+            and n.name == "_dispatch"]
+    assert disp, "没找到 `_dispatch`（改名即断）"
+    seg = _a.get_source_segment(src, disp[0])
+    i_bridge = seg.index("_bridge_ok(ctx.ha)")
+    i_issue = seg.index("store.issue, version, mac")
     assert i_bridge < i_issue, "桥判必须在签发之前（白签 10min 令牌）"
+    assert "return" in seg[i_bridge:i_issue], \
+        "判完必须**当场返回**——只查不返回等于照签发"
 
 
 # ══ 剩余批（最早一批收尾）钉 ═════════════════════════════════════════

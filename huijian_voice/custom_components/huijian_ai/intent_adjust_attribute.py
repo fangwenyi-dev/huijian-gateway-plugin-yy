@@ -223,10 +223,19 @@ class Delta:
                 else:
                     target_value = (right_stepped_value if d_right <= d_left
                                     else left_stepped_value)
-                # 对抗复核（2026-09-30）：吸附档**不得逆行**——「调高10%」在非
-                # 网格当前值上（51%，step=25）曾吸到 50% 反向走；「调低1%」在
-                # 99% 上曾吸到 100%。几何保证：INCREASE 的右档恒高于当前值、
-                # DECREASE 的左档恒低于（floor(x)+step > x），逆则改选对侧。
+                # 对抗复核（2026-09-30）：吸附档**不得逆行**——「调高10%」在非网格
+                # 当前值上（51%，step=25）曾吸到 50% 反向走；「调低1%」在 99% 上曾吸
+                # 到 100%。几何保证：INCREASE 的右档恒高于当前值、DECREASE 的左档恒
+                # 低于（floor(x)+step > x），逆则改选对侧。
+                # ⚠ 2026-10-01 本仓实测留账（**未修，需产品定口径**）：上面那个
+                # `abs(user_target - valid) < 1` 的邻近档循环对 INCREASE 不 break，
+                # cur=50.5「调高0.3」step=25 仍得 50（逆向 0.5）。「把守卫提到两条路
+                # 之后」试过，代价是把 cur=50「调高0.5」从**零变化**改成**整档跳 75**
+                # ——步进 25/33 的风速/开合器上这是用户没要的大幅动作。两难：
+                #   A 落在最近合法档（现状：可能逆向半步）
+                #   B 强制同向最近档（跳一档：动作量远超用户所求）
+                #   C 够不到一档就不动并如实说"这一档够不到"（需新话术）
+                # 判据与回执口径等签字，本文件不擅自改行为。
                 if (self.adjust == AdjustType.INCREASE
                         and target_value <= current_value):
                     target_value = right_stepped_value
@@ -408,7 +417,13 @@ def adjust_light_temperature(ctx: AdjustmentContext, target: AdjustmentTarget):
     target_temperature = ctx.delta.calc_target(
         current_color_temperature,
         color_temperature_step,
-        1,
+        # v1.1.36 复核⑦：色温的吸附网格必须用它自己的步进——旧形传 1，于是
+        # "暖一点/调高色温"会落到 1K 这种设备根本不存在的档位上（播报 3417K，
+        # 设备实际只会就近吸到 500K 网格），与 v1.1.33 给空调 temperature_step
+        # 收的那个 0.5 度洞同型。
+        # 同批扫描结论：亮度(:346)/开度(:610)/湿度(:585) 三处传 1 **不是同一个洞**——
+        # HA 这三个域没有设备侧步进属性，1 就是它们的真实粒度，照旧不动。
+        color_temperature_step,
         color_temperature_min,
         color_temperature_max,
         supports={"number", "level"},

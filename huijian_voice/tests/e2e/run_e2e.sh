@@ -51,7 +51,12 @@ for i in $(seq 1 300); do
 j=json.load(sys.stdin); m=j.get("models_ready") or {}
 d=json.load(open(os.environ["HJ_LOCK"], encoding="utf-8"))
 need=[k for k,v in d.items() if isinstance(v,dict) and v.get("default_provider")]
-print("yes" if need and all(m.get(k) for k in need) else "")' \
+# 同 run_local.sh 的收口（2026-10-01）：`models_ready` 只证明**包解好了**，不证明
+# 引擎装载完成。门只看前者时，客户端在"冷启动双载闩"放行前推第一句 ⇒ 拿到
+# `{'text':'','reason':'模型正在加载…'}` 而假红（本地真栈四轮同签名实证）。
+# 真装态在同一份 health 的 `asr_loaded`/`tts_loaded` 里，本闸给足 25 分钟不怕多等。
+print("yes" if need and all(m.get(k) for k in need)
+      and j.get("asr_loaded") and j.get("tts_loaded") else "")' \
         2>/dev/null | tr -d '\r' || true)
     [ "$R" = "yes" ] && break
     sleep 5

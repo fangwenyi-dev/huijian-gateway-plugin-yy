@@ -464,9 +464,10 @@ class HuijianTtsSttView(HuijianHttpView):
         try:
             stream = hass.data["tts_manager"].async_create_result_stream(
                 engine=tts_entity,
-                # 第四轮审计 P2：`?nocache`（空值）此前被判 falsy ⇒ 开关完全失效；显式在值
-                # 才禁缓存（`?nocache` / `?nocache=1` 都生效）。
-                use_file_cache=request.query.get("nocache") in (None, ""),
+                # 第四轮审计 P2：`?nocache`（空值）此前被判 falsy ⇒ 开关完全失效。
+                # v1.1.36 复核：那次"修复"仍是 no-op（见 `_file_cache_disabled` 头注），
+                # 现在按**键在不在**判，裸 `?nocache` 与 `?nocache=1` 都真的禁缓存。
+                use_file_cache=not _file_cache_disabled(request.query),
                 options=options,
             )
         except Exception as err:
@@ -509,6 +510,22 @@ class HuijianTtsSttView(HuijianHttpView):
                 "result": result.result,
             }
         )
+
+
+def _file_cache_disabled(query) -> bool:
+    """`?nocache` **出现即**禁用 TTS 文件缓存（不带值也算，`?nocache=1` 同）。
+
+    第四轮审计 P2 那条"修复"取的是**值**再与 (None, "") 比——它与它声称要替换的
+    旧写法（同样看值真不真）**真值表逐位相同**（yarl 把裸 `?nocache` 解析成空串），
+    ⇒ 带值写法 `?nocache=1` 一直有效，**裸 `?nocache` 则从来没禁掉过缓存**，
+    而那条注释宣称"`?nocache` / `?nocache=1` 都生效"——半句为假（复核代理抓到、
+    我按 yarl 逐值复现过）。判据因此看**键在不在**，不看值真不真。
+    永不抛（query 不是映射时按"没禁用"处理）。
+    """
+    try:
+        return "nocache" in query
+    except TypeError:
+        return False
 
 
 def calculate_sign(uri, params, mac, salt):

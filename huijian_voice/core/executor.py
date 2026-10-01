@@ -75,11 +75,26 @@ _EN_ERR_MAP = [
 ]
 
 
-def zh_error(raw: str, klar: bool = False) -> str:
+def zh_error(raw: str, klar: bool = False, indeterminate: bool = False) -> str:
     """英文错误 → 中文播报。klar=True（引擎直调/内置意图通道）时，禁止把
     失败归因到「慧尖集成没生效」——该通道与集成无关，2026-09-08 实机误报：
-    Supervisor 代理 5xx 被播成了集成话术，把用户引去装集成。"""
+    Supervisor 代理 5xx 被播成了集成话术，把用户引去装集成。
+
+    indeterminate=True（v1.1.36，发布后方差复核③）= **调用侧已判定结果不确定**
+    （超时/连接/5xx：HA 可能已执行、只是回执丢了）。旧形只靠 raw 文本启发，而
+    加载项侧把异常折叠成中文短句「HA 通道异常」（ha_client.py:144/157/189），
+    `_INDETERMINATE_HINTS` 认不出来 ⇒ 播「这一步没有执行成功」＝**假确定**；5xx
+    更被 `_EN_ERR_MAP` 第 68 行先抢成「集成还没生效」＝假确定＋假归因。判据既然
+    已经算出来，话术就必须与它同源（上方 v1.0.87 注释的原始要求）。
+    **不传旗时逐字不变**——文本启发式与映射表一概不动，免得把"不确定"当万能挡箭牌。
+    """
     low = (raw or "").lower()
+    if indeterminate:
+        # 集成侧 5xx（vol.Invalid 也走这条，见 _INDETERMINATE_SAY_INTEGRATION 头注）
+        # ⇒ 不确定话术 + 保留"重启/重载 HA Core"这条现场换来的指引，两边不撒谎。
+        if not klar and any(k in low for k, zh in _EN_ERR_MAP if "集成" in zh):
+            return _INDETERMINATE_SAY_INTEGRATION
+        return _INDETERMINATE_SAY
     for key, zh in _EN_ERR_MAP:
         if key in low:
             if klar and "集成" in zh:
@@ -92,8 +107,7 @@ def zh_error(raw: str, klar: bool = False) -> str:
     # 而系统侧刚被闸成"不自动重放"（见 pipeline 级联闸）。话术必须与判据同源：
     # 说"没拿到回执、可能已动作"，并把是否重试的决定权明明白白交回用户。
     if is_indeterminate(raw):
-        return ("这一步没拿到执行回执，设备可能已经动作了——"
-                "为防重复执行，我不自动再试；确认要再来一遍请再说一次")
+        return _INDETERMINATE_SAY
     detail = (raw or "").strip()[:30]
     if not detail:
         # v1.0.34（审查 L5）：无原因可给时别播空括号「（）」
@@ -155,6 +169,21 @@ _INDETERMINATE_HINTS = (
     "timeout", "timed out", "超时", "connect", "connection", "连接",
     "network", "网络", "502", "503", "504", "500",
 )
+
+# 结果不确定时的唯一话术（文本判据与调用侧判据共用，见 zh_error 的 indeterminate）：
+# 单点定义，免得两条通道各写一份、日后改一份就出现"同一个事实两种说法"。
+_INDETERMINATE_SAY = ("这一步没拿到执行回执，设备可能已经动作了——"
+                      "为防重复执行，我不自动再试；确认要再来一遍请再说一次")
+# 集成侧 5xx 专用合成本（v1.1.36 复核③撞出的真冲突，两边都不能丢）：
+# `intent_helper.py:48-56` 记着 HA 对 `vol.Invalid`（必填键缺失/值不合型）**直接炸
+# HTTP 500**——请求根本没落到设备上，"没执行"是确定的；而 `ha_client.py:204-207`
+# 把所有 5xx 一律标 indeterminate（状态码分不出"handler 受理前抛"与"执行中途断"）。
+# 单选一边都会撒谎：只说不确定⇒丢了"重启/重载 HA Core"这条现场换来的可执行指引
+# （「关闭」误诊三日悬案）；只说没执行⇒回到 v1.0.87 明令禁止的假确定。
+# 故合成播：如实承认拿不到回执，同时给出该做的那一步。
+_INDETERMINATE_SAY_INTEGRATION = (
+    "这一步没拿到执行回执，设备可能已经动作了——为防重复执行，我不自动再试。"
+    "如果反复出现，请在 Supervisor 重启（或重载）HA Core 再试一次")
 
 
 def is_indeterminate(err: str) -> bool:
@@ -824,7 +853,10 @@ class Executor:
                     raw_err = _errs[0]
                 self.last_run = {"steps": len(steps), "applied": len(results),
                                  "indeterminate": _indet}
-                reply = zh_error(raw_err, klar=(src == "klar"))
+                # v1.1.36（复核③）：判据算出来了就必须进话术——旧形只把 raw_err
+                # 交给 zh_error，而"HA 通道异常"这类折叠短句认不出 hint ⇒ 播假确定。
+                reply = zh_error(raw_err, klar=(src == "klar"),
+                                 indeterminate=_indet)
                 # P2-12 链失败定位：部分执行已成事实，如实说清第几步、还剩几步
                 # （保留"抱歉"字头——话术层诚实失败纪律被测试钉死）
                 detail = reply[3:] if reply.startswith("抱歉，") else reply
@@ -855,6 +887,9 @@ class Executor:
             # 已真执行（它的回执没有 per-entity 行，`_receipt` 在 :944-945 跳过）
             # 而末腿逐台全败时，写 0 会让 pipeline._exec_risk 的 `applied>0` 判据
             # 失明 ⇒ 放行降级重放(:760)/LLM 复议(:807)，已执行的腿被再做一遍。
+            # 这里**不**传 indeterminate（v1.1.36 复核批二：代理报"漏传旗两处"，我核
+            # 语义后按现状保留）——走到本支说明每条动作的顶层回执都拿到了
+            # （success=True）、只是**逐台**被设备拒绝 ⇒ 结果确定，不是"回执在路上丢了"。
             self.last_run = {"steps": len(steps),
                              "applied": self._applied_steps(results),
                              "indeterminate": False}
